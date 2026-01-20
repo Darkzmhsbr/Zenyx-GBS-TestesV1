@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+requests
+pydantic
+pytelegrambotapi
+python-multipart
+apscheduler
+pytz
