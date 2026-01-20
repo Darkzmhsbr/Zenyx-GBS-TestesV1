@@ -10,3 +10,4 @@ apscheduler
 pytz
 python-jose[cryptography]
 passlib[bcrypt]
+email-validator
