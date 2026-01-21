@@ -98,14 +98,17 @@ def get_db():
     finally:
         db.close()
 # =========================================================
-# 🔧 FUNÇÕES AUXILIARES DE AUTENTICAÇÃO
+# 🔧 FUNÇÕES AUXILIARES DE AUTENTICAÇÃO (CORRIGIDAS)
 # =========================================================
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifica se a senha está correta"""
     return pwd_context.verify(plain_password, hashed_password)
 
 def get_password_hash(password: str) -> str:
-    """Gera hash da senha"""
+    """Gera hash da senha (com truncamento automático para bcrypt)"""
+    # Bcrypt tem limite de 72 bytes
+    if len(password.encode('utf-8')) > 72:
+        password = password[:72]
     return pwd_context.hash(password)
 
 def create_access_token(data: dict, expires_delta: timedelta = None):
