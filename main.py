@@ -78,6 +78,13 @@ class UserLogin(BaseModel):
     username: str
     password: str
 
+# 👇 COLE ISSO LOGO APÓS A CLASSE UserCreate OU UserLogin
+class PlatformUserUpdate(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    pushin_pay_id: Optional[str] = None # ID da conta para Split
+    taxa_venda: Optional[int] = None    # Taxa fixa em centavos
+
 class Token(BaseModel):
     access_token: str
     token_type: str
@@ -1247,26 +1254,30 @@ class PixCreateRequest(BaseModel):
     tem_order_bump: bool = False
 
 # =========================================================
-# 1. GERAÇÃO DE PIX (COM LIMPEZA DE DADOS)
-# =========================================================
-# =========================================================
-# 1. GERAÇÃO DE PIX (COM LIMPEZA)
+# 1. GERAÇÃO DE PIX (COM SPLIT DE PAGAMENTO)
 # =========================================================
 @app.post("/api/pagamento/pix")
 def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
     try:
-        logger.info(f"💰 Iniciando pagamento para: {data.first_name} (R$ {data.valor})")
-        bot_atual = db.query(Bot).filter(Bot.id == data.bot_id).first()
-        pushin_token = bot_atual.pushin_token if bot_atual else None
+        logger.info(f"💰 Iniciando pagamento com SPLIT para: {data.first_name} (R$ {data.valor})")
         
+        # 1. Buscar o Bot e o Dono (Membro)
+        bot_atual = db.query(Bot).filter(Bot.id == data.bot_id).first()
+        if not bot_atual:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+
+        # 2. Definir Token da API (Prioridade: Bot > Config > Env)
+        pushin_token = bot_atual.pushin_token 
         if not pushin_token:
             config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
             pushin_token = config_sys.value if (config_sys and config_sys.value) else os.getenv("PUSHIN_PAY_TOKEN")
 
+        # Tratamento de usuário anonimo
         user_clean = str(data.username).strip().lower().replace("@", "") if data.username else "anonimo"
         tid_clean = str(data.telegram_id).strip()
         if not tid_clean.isdigit(): tid_clean = user_clean
 
+        # Modo Teste/Sem Token
         if not pushin_token:
             fake_txid = str(uuid.uuid4())
             novo_pedido = Pedido(
@@ -1278,18 +1289,61 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             db.commit()
             return {"txid": fake_txid, "copia_cola": "pix-fake", "qr_code": "https://fake.com/qr.png"}
 
+        # 3. LÓGICA DE SPLIT E TAXAS
+        valor_total_centavos = int(data.valor * 100) # Valor da venda em centavos
+        
+        # ID DA SUA CONTA PRINCIPAL (ZENYX)
+        ADMIN_PUSHIN_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
+        
+        # Pegar dados do Dono do Bot
+        membro_dono = bot_atual.owner
+        
+        # Definir a Taxa (Padrão 60 centavos ou valor personalizado do usuário)
+        taxa_plataforma = 60 # Default
+        if membro_dono and membro_dono.taxa_venda:
+            taxa_plataforma = membro_dono.taxa_venda
+            
+        # Regra de Segurança: Taxa não pode ser maior que 50% (Regra Pushin)
+        if taxa_plataforma > (valor_total_centavos * 0.5):
+            taxa_plataforma = int(valor_total_centavos * 0.5)
+
+        # Montar Payload Básico
         url = "https://api.pushinpay.com.br/api/pix/cashIn"
         headers = { "Authorization": f"Bearer {pushin_token}", "Content-Type": "application/json", "Accept": "application/json" }
         domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app/")
         if domain.startswith("https://"): domain = domain.replace("https://", "")
         
         payload = {
-            "value": int(data.valor * 100),
+            "value": valor_total_centavos,
             "webhook_url": f"https://{domain}/webhook/pix",
             "external_reference": f"bot_{data.bot_id}_{user_clean}_{int(time.time())}"
         }
 
+        # 4. APLICAR SPLIT SE O MEMBRO TIVER CONTA CONFIGURADA
+        if membro_dono and membro_dono.pushin_pay_id:
+            valor_membro = valor_total_centavos - taxa_plataforma
+            
+            payload["split"] = [
+                {
+                    "receiver_id": ADMIN_PUSHIN_ID, # Sua Conta (Recebe a Taxa)
+                    "amount": taxa_plataforma,
+                    "liable": True,
+                    "charge_processing_fee": True # Você assume a taxa de processamento do Pix sobre sua parte?
+                },
+                {
+                    "receiver_id": membro_dono.pushin_pay_id, # Conta do Membro (Recebe o Resto)
+                    "amount": valor_membro,
+                    "liable": False,
+                    "charge_processing_fee": False
+                }
+            ]
+            logger.info(f"🔀 Split Configurado: Admin={taxa_plataforma}, Membro={valor_membro}")
+        else:
+            logger.warning(f"⚠️ Membro dono do bot {data.bot_id} não tem Pushin ID configurado. Sem split.")
+
+        # Enviar Requisição
         req = requests.post(url, json=payload, headers=headers)
+        
         if req.status_code in [200, 201]:
             resp = req.json()
             txid = str(resp.get('id') or resp.get('txid'))
@@ -1307,6 +1361,7 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         else:
             logger.error(f"Erro PushinPay: {req.text}")
             raise HTTPException(status_code=400, detail="Erro Gateway")
+            
     except Exception as e:
         logger.error(f"Erro fatal PIX: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1460,6 +1515,29 @@ async def get_current_user_info(current_user = Depends(get_current_user)):
         "is_superuser": current_user.is_superuser, 
         "is_active": current_user.is_active
     }
+
+# 👇 COLE ISSO LOGO APÓS A FUNÇÃO get_current_user_info TERMINAR
+
+# 🆕 ROTA PARA O MEMBRO ATUALIZAR SEU PRÓPRIO PERFIL FINANCEIRO
+@app.put("/api/auth/profile")
+def update_own_profile(
+    user_data: PlatformUserUpdate, 
+    current_user = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.id == current_user.id).first()
+    
+    if user_data.full_name:
+        user.full_name = user_data.full_name
+    if user_data.email:
+        user.email = user_data.email
+    # O membro só pode atualizar o ID de recebimento, não a taxa!
+    if user_data.pushin_pay_id is not None:
+        user.pushin_pay_id = user_data.pushin_pay_id
+        
+    db.commit()
+    db.refresh(user)
+    return user
 
 # =========================================================
 # ⚙️ HELPER: CONFIGURAR MENU (COMANDOS)
@@ -5228,6 +5306,33 @@ def update_user_status(
     except Exception as e:
         logger.error(f"Erro ao atualizar status do usuário: {e}")
         raise HTTPException(status_code=500, detail="Erro ao atualizar status")
+
+# 👇 COLE ISSO NA SEÇÃO DE ROTAS DO SUPER ADMIN
+
+# 🆕 ROTA PARA O SUPER ADMIN EDITAR DADOS FINANCEIROS DOS MEMBROS
+@app.put("/api/superadmin/users/{user_id}")
+def update_user_financials(
+    user_id: int, 
+    user_data: PlatformUserUpdate, 
+    current_user = Depends(get_current_active_superuser),
+    db: Session = Depends(get_db)
+):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado")
+        
+    if user_data.full_name:
+        user.full_name = user_data.full_name
+    if user_data.email:
+        user.email = user_data.email
+    if user_data.pushin_pay_id is not None:
+        user.pushin_pay_id = user_data.pushin_pay_id
+    # 👑 Só o Admin pode mudar a taxa que o membro paga
+    if user_data.taxa_venda is not None:
+        user.taxa_venda = user_data.taxa_venda
+        
+    db.commit()
+    return {"status": "success", "message": "Dados financeiros do usuário atualizados"}
 
 @app.delete("/api/superadmin/users/{user_id}")
 def delete_user(

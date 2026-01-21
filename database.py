@@ -48,6 +48,10 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    # 🆕 NOVOS CAMPOS FINANCEIROS (ADICIONADOS AGORA)
+    pushin_pay_id = Column(String, nullable=True) # ID da conta do membro na Pushin
+    taxa_venda = Column(Integer, default=60)      # Taxa em centavos (Padrão: 60)
+
     # RELACIONAMENTO: Um usuário possui vários bots
     bots = relationship("Bot", back_populates="owner")
     
