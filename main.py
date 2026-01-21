@@ -1455,7 +1455,10 @@ async def get_current_user_info(current_user = Depends(get_current_user)):
         "id": current_user.id,
         "username": current_user.username,
         "email": current_user.email,
-        "full_name": current_user.full_name
+        "full_name": current_user.full_name,
+        # 👇 ADICIONADO: Agora o front vai saber quem manda!
+        "is_superuser": current_user.is_superuser, 
+        "is_active": current_user.is_active
     }
 
 # =========================================================
