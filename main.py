@@ -517,7 +517,7 @@ def registrar_remarketing(
 # 💀 O CEIFADOR: VERIFICA VENCIMENTOS E REMOVE (KICK SUAVE)
 # =========================================================
 def loop_verificar_vencimentos():
-    """Roda a cada 60 minutos para remover usuários vencidos"""
+    """Roda a cada 60 segundos para remover usuários vencidos"""
     while True:
         try:
             logger.info("⏳ Verificando assinaturas vencidas...")
@@ -525,7 +525,7 @@ def loop_verificar_vencimentos():
         except Exception as e:
             logger.error(f"Erro no loop de vencimento: {e}")
         
-        time.sleep(3600) # Espera 1 hora (3600 segundos)
+        time.sleep(60) # 🔥 VOLTOU PARA 60 SEGUNDOS (Verificação Rápida)
 
 # =========================================================
 # 💀 O CEIFADOR: REMOVEDOR BASEADO EM DATA (SAAS)
@@ -543,57 +543,66 @@ def verificar_expiracao_massa():
                 # Conecta no Telegram deste bot específico
                 tb = telebot.TeleBot(bot_data.token)
                 
-                # Tratamento do ID do canal
-                try: canal_id = int(str(bot_data.id_canal_vip).strip())
-                except: canal_id = bot_data.id_canal_vip
+                # Tratamento ROBUSTO do ID do canal (Remove espaços e caracteres invisíveis)
+                try: 
+                    raw_id = str(bot_data.id_canal_vip).strip()
+                    canal_id = int(raw_id)
+                except: 
+                    logger.error(f"ID do canal inválido para o bot {bot_data.nome}")
+                    continue
                 
                 agora = datetime.utcnow()
                 
                 # --- QUERY INTELIGENTE ---
                 # Busca usuários deste bot que:
-                # 1. Estão com status 'paid' (Ativos)
+                # 1. Estão com status 'paid' ou 'approved' (Ativos)
                 # 2. Têm uma data de expiração definida (NÃO SÃO VITALÍCIOS)
                 # 3. A data de expiração é MENOR que agora (Já venceu)
                 vencidos = db.query(Pedido).filter(
                     Pedido.bot_id == bot_data.id,
-                    Pedido.status == 'paid',
+                    Pedido.status.in_(['paid', 'approved', 'active']), # 🔥 Pega todos os status de ativos
                     Pedido.custom_expiration != None, 
                     Pedido.custom_expiration < agora
                 ).all()
                 
                 for u in vencidos:
-                    # 🔥 [CORRIGIDO] Proteção: Se for admin, não remove
-                    # Verificar se é admin através da tabela BotAdmin
-                    admin = db.query(BotAdmin).filter(
-                        BotAdmin.telegram_id == u.telegram_id,
-                        BotAdmin.bot_id == u.bot_id
+                    # 🔥 Proteção: Admin nunca é removido
+                    # Verifica na tabela BotAdmin
+                    eh_admin = db.query(BotAdmin).filter(
+                        BotAdmin.telegram_id == str(u.telegram_id),
+                        BotAdmin.bot_id == bot_data.id
                     ).first()
                     
-                    if admin:
-                        logger.info(f"⏭️ Pulando admin: {u.telegram_id}")
+                    # Verifica se é o dono do bot
+                    if str(u.telegram_id) == str(bot_data.admin_principal_id) or eh_admin:
+                        logger.info(f"👑 Ignorando remoção de Admin vencido: {u.telegram_id}")
                         continue
                     
                     try:
                         logger.info(f"💀 Ceifando usuário vencido: {u.first_name} (Bot: {bot_data.nome})")
                         
-                        # 1. Kick Suave (Ban + Unban)
+                        # 1. Kick Suave (Ban + Unban para remover do canal mas permitir volta futura)
                         tb.ban_chat_member(canal_id, int(u.telegram_id))
                         tb.unban_chat_member(canal_id, int(u.telegram_id))
                         
-                        # 2. Atualiza Status no Banco
+                        # 2. Atualiza Status no Banco IMEDIATAMENTE
                         u.status = 'expired'
                         db.commit()
                         
-                        # 3. Avisa o defunto
+                        # 3. Avisa o usuário
                         try: 
-                            tb.send_message(int(u.telegram_id), "🚫 <b>Seu plano venceu!</b>\n\nSeu tempo acabou. Para renovar, digite /start", parse_mode="HTML")
+                            tb.send_message(int(u.telegram_id), "🚫 <b>Seu plano venceu!</b>\n\nSeu tempo de acesso acabou. Para renovar e voltar ao canal, digite /start", parse_mode="HTML")
                         except: pass
                         
                     except Exception as e_kick:
-                        logger.error(f"Erro ao remover {u.telegram_id}: {e_kick}")
-                        # Se der erro (ex: user já saiu), marca como expired para não ficar tentando eternamente
-                        u.status = 'expired'
-                        db.commit()
+                        err_msg = str(e_kick)
+                        if "participant_id_invalid" in err_msg or "user not found" in err_msg:
+                            # Se o user já saiu, apenas marca como expirado
+                            logger.info(f"Usuário {u.telegram_id} já não estava no canal. Marcando expired.")
+                            u.status = 'expired'
+                            db.commit()
+                        else:
+                            logger.error(f"Erro ao remover {u.telegram_id}: {e_kick}")
                         
             except Exception as e_bot:
                 logger.error(f"Erro ao processar bot {bot_data.id}: {e_bot}")
@@ -665,15 +674,19 @@ def notificar_admin_principal(bot_db: Bot, mensagem: str):
     """
     ids_unicos = set()
 
-    # 1. Adiciona Admin Principal (se houver)
+    # 1. Adiciona Admin Principal (Prioridade)
     if bot_db.admin_principal_id:
         ids_unicos.add(str(bot_db.admin_principal_id).strip())
 
-    # 2. Adiciona Admins Extras (da tabela BotAdmin)
-    if bot_db.admins:
-        for admin in bot_db.admins:
-            if admin.telegram_id:
-                ids_unicos.add(str(admin.telegram_id).strip())
+    # 2. Adiciona Admins Extras (Com proteção contra lazy loading)
+    try:
+        if bot_db.admins:
+            for admin in bot_db.admins:
+                if admin.telegram_id:
+                    ids_unicos.add(str(admin.telegram_id).strip())
+    except Exception as e:
+        # Se der erro ao ler admins extras (ex: sessão fechada), ignora e manda só pro principal
+        logger.warning(f"Não foi possível ler admins extras: {e}")
 
     if not ids_unicos:
         return
@@ -682,7 +695,7 @@ def notificar_admin_principal(bot_db: Bot, mensagem: str):
         sender = telebot.TeleBot(bot_db.token)
         for chat_id in ids_unicos:
             try:
-                # 🔥 ALTERADO PARA HTML
+                # 🔥 GARANTE O PARSE_MODE HTML
                 sender.send_message(chat_id, mensagem, parse_mode="HTML")
             except Exception as e_send:
                 logger.error(f"Erro ao notificar admin {chat_id}: {e_send}")
@@ -2426,7 +2439,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         return {"status": "error"}
 
 # =========================================================
-# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO HTML BLINDADA
+# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO FINAL BLINDADA
 # =========================================================
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
@@ -2456,7 +2469,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         # Status
         status_pix = str(data.get("status", "")).lower()
         
-        # 🔥 AQUI ESTÁ O FILTRO: SÓ PASSA SE FOR PAGO
+        # 🔥 FILTRO: SÓ PASSA SE FOR PAGO
         if status_pix not in ["paid", "approved", "completed", "succeeded"]:
             return {"status": "ignored"}
 
@@ -2504,24 +2517,24 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         pedido.status_funil = 'fundo'
         pedido.pagou_em = now
         
-        db.commit()
-        
-        # 🔥 ATUALIZA ESTATÍSTICAS DE TRACKING (VENDAS/FATURAMENTO)
+        # 🔥 ATUALIZA TRACKING (MANTIDO INTACTO!)
+        # (Isso é crucial para seus gráficos de vendas)
         if pedido.tracking_id:
             try:
                 t_link = db.query(TrackingLink).filter(TrackingLink.id == pedido.tracking_id).first()
                 if t_link:
                     t_link.vendas += 1
                     t_link.faturamento += pedido.valor
-                    db.commit()
                     logger.info(f"📈 Tracking atualizado: {t_link.nome} (+R$ {pedido.valor})")
             except Exception as e_track:
                 logger.error(f"Erro ao atualizar tracking: {e_track}")
 
+        db.commit() # Salva tudo no banco antes de enviar mensagens
+
         texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
         print(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
         
-        # 6. ENTREGA E NOTIFICAÇÕES (EM HTML)
+        # 6. ENTREGA E NOTIFICAÇÕES (LÓGICA BLINDADA)
         try:
             bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
             if bot_data:
@@ -2529,15 +2542,15 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                 
                 # --- A) ENTREGA PRODUTO PRINCIPAL ---
                 try: 
-                    # Limpeza e Desbanimento
-                    canal_id = bot_data.id_canal_vip
-                    if str(canal_id).replace("-","").isdigit():
-                         canal_id = int(str(canal_id).strip())
+                    # Tratamento Robusto do ID do Canal
+                    raw_cid = str(bot_data.id_canal_vip).strip()
+                    canal_id = int(raw_cid) if raw_cid.lstrip('-').isdigit() else raw_cid
 
+                    # 1. Tenta desbanir antes (Correção para ex-assinantes)
                     try: tb.unban_chat_member(canal_id, int(pedido.telegram_id))
                     except: pass
 
-                    # Gera Link Único
+                    # 2. Gera Link Único
                     link_acesso = None
                     try:
                         convite = tb.create_chat_invite_link(
@@ -2547,50 +2560,50 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                         )
                         link_acesso = convite.invite_link
                     except Exception as e_link:
-                        logger.warning(f"Erro ao gerar link: {e_link}. Usando link salvo.")
+                        logger.warning(f"Erro ao gerar link único: {e_link}. Usando link salvo.")
                         link_acesso = pedido.link_acesso 
 
+                    # 3. Envia Mensagem ao Cliente
                     if link_acesso:
                         msg_cliente = (
-                            f"✅ <b>Pagamento Confirmado!</b>\n"
+                            f"✅ <b>Pagamento Confirmado!</b>\n\n"
+                            f"🎉 Parabéns! Seu acesso foi liberado.\n"
                             f"📅 Validade: <b>{texto_validade}</b>\n\n"
-                            f"Seu acesso exclusivo:\n👉 {link_acesso}"
+                            f"👇 <b>Toque no link para entrar:</b>\n👉 {link_acesso}\n\n"
+                            f"<i>Este link é exclusivo para você.</i>"
                         )
                         tb.send_message(int(pedido.telegram_id), msg_cliente, parse_mode="HTML")
                     else:
-                        tb.send_message(int(pedido.telegram_id), f"✅ <b>Pagamento Confirmado!</b>\nVocê já pode acessar o canal VIP.", parse_mode="HTML")
+                        tb.send_message(int(pedido.telegram_id), f"✅ <b>Pagamento Confirmado!</b>\nTente entrar no canal agora ou digite /start.", parse_mode="HTML")
 
                 except Exception as e_main:
                     logger.error(f"Erro na entrega principal: {e_main}")
 
-                # --- B) ENTREGA DO ORDER BUMP (HTML) ---
+                # --- B) ENTREGA DO ORDER BUMP (MANTIDO INTACTO!) ---
                 if pedido.tem_order_bump:
                     logger.info(f"🎁 [PIX] Entregando Order Bump...")
                     try:
                         bump_config = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_data.id).first()
                         if bump_config and bump_config.link_acesso:
-                            msg_bump = f"""🎁 <b>BÔNUS LIBERADO!</b>
-
-Você também garantiu acesso ao: 
-👉 <b>{bump_config.nome_produto}</b>
-
-🔗 <b>Acesse seu conteúdo extra abaixo:</b>
-{bump_config.link_acesso}"""
+                            msg_bump = f"🎁 <b>BÔNUS LIBERADO!</b>\n\nVocê também garantiu acesso ao: <b>{bump_config.nome_produto}</b>\n\n🔗 <b>Acesse aqui:</b>\n{bump_config.link_acesso}"
                             tb.send_message(int(pedido.telegram_id), msg_bump, parse_mode="HTML")
                     except Exception as e_bump:
                         logger.error(f"Erro ao entregar Bump: {e_bump}")
 
-                # --- C) NOTIFICAÇÃO AO ADMIN (CORRIGIDO: USA FUNÇÃO GLOBAL) ---
-                # 🔥 Agora avisa o admin principal E os admins extras
-                msg_admin = (
-                    f"💰 <b>VENDA REALIZADA!</b>\n\n"
-                    f"🤖 Bot: <b>{bot_data.nome}</b>\n"
-                    f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
-                    f"📦 Plano: {pedido.plano_nome}\n"
-                    f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
-                    f"📅 Vence em: {texto_validade}"
-                )
-                notificar_admin_principal(bot_data, msg_admin)
+                # --- C) NOTIFICAÇÃO AO ADMIN (MANTIDO E CORRIGIDO) ---
+                try:
+                    msg_admin = (
+                        f"💰 <b>VENDA REALIZADA!</b>\n\n"
+                        f"🤖 Bot: <b>{bot_data.nome}</b>\n"
+                        f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
+                        f"📦 Plano: {pedido.plano_nome}\n"
+                        f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
+                        f"📅 Vence em: {texto_validade}"
+                    )
+                    # Chama a função auxiliar (Certifique-se que ela também foi atualizada)
+                    notificar_admin_principal(bot_data, msg_admin)
+                except Exception as e_notif:
+                    logger.error(f"Erro ao notificar admin: {e_notif}")
 
         except Exception as e_tg:
             print(f"❌ Erro Telegram/Entrega: {e_tg}")
