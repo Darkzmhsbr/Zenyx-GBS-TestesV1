@@ -2870,6 +2870,9 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
 # =========================================================
 # 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO FINAL BLINDADA
 # =========================================================
+# =========================================================
+# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO FINAL COM NOTIFICAÇÕES
+# =========================================================
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     print("🔔 WEBHOOK PIX CHEGOU!") 
@@ -2947,7 +2950,6 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         pedido.pagou_em = now
         
         # 🔥 ATUALIZA TRACKING (MANTIDO INTACTO!)
-        # (Isso é crucial para seus gráficos de vendas)
         if pedido.tracking_id:
             try:
                 t_link = db.query(TrackingLink).filter(TrackingLink.id == pedido.tracking_id).first()
@@ -2961,86 +2963,135 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         db.commit() # Salva tudo no banco antes de enviar mensagens
 
         texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
-        print(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
+        logger.info(f"✅ Entrega realizada para ID: {pedido.telegram_id}")
         
-        # 6. ENTREGA E NOTIFICAÇÕES (LÓGICA BLINDADA)
+        # 6. BUSCA O BOT E ENVIA NOTIFICAÇÕES
+        bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+        
+        if not bot_data:
+            logger.error(f"❌ Bot {pedido.bot_id} não encontrado!")
+            return {"status": "ok", "msg": "Bot not found"}
+        
+        # --- A) ENTREGA PRODUTO PRINCIPAL ---
         try:
-            bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
-            if bot_data:
-                tb = telebot.TeleBot(bot_data.token)
+            tb = telebot.TeleBot(bot_data.token)
+            
+            # Tratamento do ID do Canal
+            raw_cid = str(bot_data.id_canal_vip).strip()
+            canal_id = int(raw_cid) if raw_cid.lstrip('-').isdigit() else raw_cid
+
+            # 1. Tenta desbanir antes
+            try: 
+                tb.unban_chat_member(canal_id, int(pedido.telegram_id))
+            except: 
+                pass
+
+            # 2. Gera Link Único
+            link_acesso = None
+            try:
+                convite = tb.create_chat_invite_link(
+                    chat_id=canal_id, 
+                    member_limit=1, 
+                    name=f"Venda {pedido.first_name}"
+                )
+                link_acesso = convite.invite_link
+            except Exception as e_link:
+                logger.warning(f"Erro ao gerar link único: {e_link}. Usando link salvo.")
+                link_acesso = pedido.link_acesso 
+
+            # 3. Envia Mensagem ao Cliente
+            if link_acesso:
+                msg_cliente = (
+                    f"✅ <b>Pagamento Confirmado!</b>\n\n"
+                    f"🎉 Parabéns! Seu acesso foi liberado.\n"
+                    f"📅 Validade: <b>{texto_validade}</b>\n\n"
+                    f"👇 <b>Toque no link para entrar:</b>\n"
+                    f"👉 {link_acesso}\n\n"
+                    f"<i>Este link é exclusivo para você.</i>"
+                )
+                tb.send_message(int(pedido.telegram_id), msg_cliente, parse_mode="HTML")
+            else:
+                tb.send_message(
+                    int(pedido.telegram_id), 
+                    f"✅ <b>Pagamento Confirmado!</b>\nTente entrar no canal agora ou digite /start.", 
+                    parse_mode="HTML"
+                )
+
+        except Exception as e_entrega:
+            logger.error(f"❌ Erro na entrega principal: {e_entrega}")
+
+        # --- B) ENTREGA DO ORDER BUMP ---
+        if pedido.tem_order_bump:
+            logger.info(f"🎁 [PIX] Entregando Order Bump...")
+            try:
+                bump_config = db.query(OrderBumpConfig).filter(
+                    OrderBumpConfig.bot_id == bot_data.id
+                ).first()
                 
-                # --- A) ENTREGA PRODUTO PRINCIPAL ---
-                try: 
-                    # Tratamento Robusto do ID do Canal
-                    raw_cid = str(bot_data.id_canal_vip).strip()
-                    canal_id = int(raw_cid) if raw_cid.lstrip('-').isdigit() else raw_cid
-
-                    # 1. Tenta desbanir antes (Correção para ex-assinantes)
-                    try: tb.unban_chat_member(canal_id, int(pedido.telegram_id))
-                    except: pass
-
-                    # 2. Gera Link Único
-                    link_acesso = None
-                    try:
-                        convite = tb.create_chat_invite_link(
-                            chat_id=canal_id, 
-                            member_limit=1, 
-                            name=f"Venda {pedido.first_name}"
-                        )
-                        link_acesso = convite.invite_link
-                    except Exception as e_link:
-                        logger.warning(f"Erro ao gerar link único: {e_link}. Usando link salvo.")
-                        link_acesso = pedido.link_acesso 
-
-                    # 3. Envia Mensagem ao Cliente
-                    if link_acesso:
-                        msg_cliente = (
-                            f"✅ <b>Pagamento Confirmado!</b>\n\n"
-                            f"🎉 Parabéns! Seu acesso foi liberado.\n"
-                            f"📅 Validade: <b>{texto_validade}</b>\n\n"
-                            f"👇 <b>Toque no link para entrar:</b>\n👉 {link_acesso}\n\n"
-                            f"<i>Este link é exclusivo para você.</i>"
-                        )
-                        tb.send_message(int(pedido.telegram_id), msg_cliente, parse_mode="HTML")
-                    else:
-                        tb.send_message(int(pedido.telegram_id), f"✅ <b>Pagamento Confirmado!</b>\nTente entrar no canal agora ou digite /start.", parse_mode="HTML")
-
-                except Exception as e_main:
-                    logger.error(f"Erro na entrega principal: {e_main}")
-
-                # --- B) ENTREGA DO ORDER BUMP (MANTIDO INTACTO!) ---
-                if pedido.tem_order_bump:
-                    logger.info(f"🎁 [PIX] Entregando Order Bump...")
-                    try:
-                        bump_config = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_data.id).first()
-                        if bump_config and bump_config.link_acesso:
-                            msg_bump = f"🎁 <b>BÔNUS LIBERADO!</b>\n\nVocê também garantiu acesso ao: <b>{bump_config.nome_produto}</b>\n\n🔗 <b>Acesse aqui:</b>\n{bump_config.link_acesso}"
-                            tb.send_message(int(pedido.telegram_id), msg_bump, parse_mode="HTML")
-                    except Exception as e_bump:
-                        logger.error(f"Erro ao entregar Bump: {e_bump}")
-
-                # --- C) NOTIFICAÇÃO AO ADMIN (MANTIDO E CORRIGIDO) ---
-                try:
-                    msg_admin = (
-                        f"💰 <b>VENDA REALIZADA!</b>\n\n"
-                        f"🤖 Bot: <b>{bot_data.nome}</b>\n"
-                        f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
-                        f"📦 Plano: {pedido.plano_nome}\n"
-                        f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
-                        f"📅 Vence em: {texto_validade}"
+                if bump_config and bump_config.link_acesso:
+                    msg_bump = (
+                        f"🎁 <b>BÔNUS LIBERADO!</b>\n\n"
+                        f"Você também garantiu acesso ao:\n"
+                        f"👉 <b>{bump_config.nome_produto}</b>\n\n"
+                        f"🔗 <b>Acesse seu conteúdo extra abaixo:</b>\n"
+                        f"{bump_config.link_acesso}"
                     )
-                    # Chama a função auxiliar (Certifique-se que ela também foi atualizada)
-                    notificar_admin_principal(bot_data, msg_admin)
-                except Exception as e_notif:
-                    logger.error(f"Erro ao notificar admin: {e_notif}")
+                    tb.send_message(int(pedido.telegram_id), msg_bump, parse_mode="HTML")
+                    
+            except Exception as e_bump:
+                logger.error(f"❌ Erro ao entregar Order Bump: {e_bump}")
 
-        except Exception as e_tg:
-            print(f"❌ Erro Telegram/Entrega: {e_tg}")
+        # --- C) NOTIFICAÇÃO AO ADMIN (CORRIGIDO!) ---
+        logger.info(f"📢 Enviando notificação de venda aos admins...")
+        
+        msg_admin = (
+            f"💰 <b>VENDA REALIZADA!</b>\n\n"
+            f"🤖 Bot: <b>{bot_data.nome}</b>\n"
+            f"👤 Cliente: {pedido.first_name} (@{pedido.username or 'sem username'})\n"
+            f"📦 Plano: {pedido.plano_nome}\n"
+            f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
+            f"📅 Vence em: {texto_validade}"
+        )
+        
+        # 🔥 ENVIA PARA O ADMIN PRINCIPAL E ADMINS EXTRAS
+        ids_para_notificar = set()
+        
+        # 1. Admin Principal
+        if bot_data.admin_principal_id:
+            ids_para_notificar.add(str(bot_data.admin_principal_id).strip())
+            logger.info(f"   → Admin Principal: {bot_data.admin_principal_id}")
+        
+        # 2. Admins Extras (da tabela bot_admins)
+        try:
+            admins_extras = db.query(BotAdmin).filter(
+                BotAdmin.bot_id == bot_data.id
+            ).all()
+            
+            for admin in admins_extras:
+                if admin.telegram_id:
+                    ids_para_notificar.add(str(admin.telegram_id).strip())
+                    logger.info(f"   → Admin Extra: {admin.telegram_id} ({admin.nome})")
+                    
+        except Exception as e_admins:
+            logger.warning(f"⚠️ Erro ao buscar admins extras: {e_admins}")
+        
+        # 3. Envia as notificações
+        if ids_para_notificar:
+            for admin_id in ids_para_notificar:
+                try:
+                    tb.send_message(int(admin_id), msg_admin, parse_mode="HTML")
+                    logger.info(f"   ✅ Notificação enviada para {admin_id}")
+                except Exception as e_send:
+                    logger.error(f"   ❌ Erro ao enviar para {admin_id}: {e_send}")
+        else:
+            logger.warning("⚠️ Nenhum admin configurado para receber notificações!")
 
         return {"status": "received"}
 
     except Exception as e:
-        print(f"❌ ERRO CRÍTICO NO WEBHOOK: {e}")
+        logger.error(f"❌ ERRO CRÍTICO NO WEBHOOK: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return {"status": "error"}
 
 # =========================================================
