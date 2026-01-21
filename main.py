@@ -759,10 +759,63 @@ def get_pushin_token():
         return os.getenv("PUSHIN_PAY_TOKEN")
     finally:
         db.close()
+
+# =========================================================
+# 🏢 BUSCAR PUSHIN PAY ID DA PLATAFORMA (ZENYX)
+# =========================================================
+def get_plataforma_pushin_id(db: Session) -> str:
+    """
+    Retorna o pushin_pay_id da plataforma Zenyx para receber as taxas.
+    Prioridade:
+    1. SystemConfig (pushin_plataforma_id)
+    2. Primeiro Super Admin encontrado
+    3. None se não encontrar
+    """
+    try:
+        # 1. Tenta buscar da SystemConfig
+        config = db.query(SystemConfig).filter(
+            SystemConfig.chave == "pushin_plataforma_id"
+        ).first()
+        
+        if config and config.valor:
+            return config.valor
+        
+        # 2. Busca o primeiro Super Admin com pushin_pay_id configurado
+        from database import User
+        super_admin = db.query(User).filter(
+            User.is_superuser == True,
+            User.pushin_pay_id.isnot(None)
+        ).first()
+        
+        if super_admin and super_admin.pushin_pay_id:
+            return super_admin.pushin_pay_id
+        
+        logger.warning("⚠️ Nenhum pushin_pay_id da plataforma configurado! Split desabilitado.")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar pushin_pay_id da plataforma: {e}")
+        return None
+
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA)
 # =========================================================
-def gerar_pix_pushinpay(valor_float: float, transaction_id: str):
+# =========================================================
+# 🔌 INTEGRAÇÃO PUSHIN PAY (COM SPLIT AUTOMÁTICO)
+# =========================================================
+def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db: Session):
+    """
+    Gera PIX com Split automático de taxa para a plataforma.
+    
+    Args:
+        valor_float: Valor do PIX em reais (ex: 100.50)
+        transaction_id: ID único da transação
+        bot_id: ID do bot que está gerando o PIX
+        db: Sessão do banco de dados
+    
+    Returns:
+        dict: Resposta da API Pushin Pay ou None em caso de erro
+    """
     token = get_pushin_token()
     
     if not token:
@@ -776,26 +829,80 @@ def gerar_pix_pushinpay(valor_float: float, transaction_id: str):
         "Accept": "application/json"
     }
     
-    # 🔧 CORRIGIDO: Domínio SEM https:// (será adicionado no payload)
+    # URL do Webhook
     seus_dominio = "zenyx-gbs-testesv1-production.up.railway.app" 
     
+    # Valor em centavos
+    valor_centavos = int(valor_float * 100)
+    
+    # Monta payload básico
     payload = {
-        "value": int(valor_float * 100), 
+        "value": valor_centavos, 
         "webhook_url": f"https://{seus_dominio}/webhook/pix",
         "external_reference": transaction_id
     }
-
+    
+    # ========================================
+    # 💰 LÓGICA DE SPLIT (TAXA DA PLATAFORMA)
+    # ========================================
     try:
-        logger.info(f"📤 Gerando PIX. Webhook definido para: https://{seus_dominio}/webhook/pix")
+        # 1. Busca o bot
+        bot = db.query(Bot).filter(Bot.id == bot_id).first()
+        
+        if bot and bot.owner_id:
+            # 2. Busca o dono do bot (membro)
+            from database import User
+            owner = db.query(User).filter(User.id == bot.owner_id).first()
+            
+            if owner:
+                # 3. Busca o pushin_pay_id da PLATAFORMA (para receber a taxa)
+                plataforma_id = get_plataforma_pushin_id(db)
+                
+                if plataforma_id:
+                    # 4. Define a taxa (padrão: R$ 0,60)
+                    taxa_centavos = owner.taxa_venda or 60
+                    
+                    # 5. Validação: Taxa não pode ser maior que o valor total
+                    if taxa_centavos >= valor_centavos:
+                        logger.warning(f"⚠️ Taxa ({taxa_centavos}) >= Valor Total ({valor_centavos}). Split ignorado.")
+                    else:
+                        # 6. Monta o split_rules
+                        payload["split_rules"] = [
+                            {
+                                "value": taxa_centavos,
+                                "account_id": plataforma_id
+                            }
+                        ]
+                        
+                        logger.info(f"💸 Split configurado: Taxa R$ {taxa_centavos/100:.2f} → Conta {plataforma_id[:8]}...")
+                        logger.info(f"   Membro receberá: R$ {(valor_centavos - taxa_centavos)/100:.2f}")
+                else:
+                    logger.warning("⚠️ Pushin Pay ID da plataforma não configurado. Gerando PIX SEM split.")
+            else:
+                logger.warning(f"⚠️ Owner do bot {bot_id} não encontrado. Gerando PIX SEM split.")
+        else:
+            logger.warning(f"⚠️ Bot {bot_id} sem owner_id. Gerando PIX SEM split.")
+            
+    except Exception as e:
+        logger.error(f"❌ Erro ao configurar split: {e}. Gerando PIX SEM split.")
+        # Continua sem split em caso de erro
+    
+    # ========================================
+    # 📤 ENVIA REQUISIÇÃO PARA PUSHIN PAY
+    # ========================================
+    try:
+        logger.info(f"📤 Gerando PIX de R$ {valor_float:.2f}. Webhook: https://{seus_dominio}/webhook/pix")
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         
         if response.status_code in [200, 201]:
+            logger.info(f"✅ PIX gerado com sucesso! ID: {response.json().get('id')}")
             return response.json()
         else:
-            logger.error(f"Erro PushinPay: {response.text}")
+            logger.error(f"❌ Erro PushinPay: {response.text}")
             return None
+            
     except Exception as e:
-        logger.error(f"Exceção PushinPay: {e}")
+        logger.error(f"❌ Exceção ao gerar PIX: {e}")
         return None
 
 # --- HELPER: Notificar Admin Principal ---
@@ -3314,7 +3421,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     # PIX DIRETO
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>PIX</b>...", parse_mode="HTML")
                     mytx = str(uuid.uuid4())
-                    pix = gerar_pix_pushinpay(plano.preco_atual, mytx)
+                    pix = gerar_pix_pushinpay(plano.preco_atual, mytx, bot_db.id, db)
+
                     
                     if pix:
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
@@ -3364,7 +3472,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 
                 msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
                 mytx = str(uuid.uuid4())
-                pix = gerar_pix_pushinpay(valor_final, mytx)
+                pix = gerar_pix_pushinpay(valor_final, mytx, bot_db.id, db)
                 
                 if pix:
                     qr = pix.get('qr_code_text') or pix.get('qr_code')
@@ -3406,7 +3514,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
                         msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
                         mytx = str(uuid.uuid4())
-                        pix = gerar_pix_pushinpay(preco_final, mytx)
+                        pix = gerar_pix_pushinpay(preco_final, mytx, bot_db.id, db)
                         
                         if pix:
                             qr = pix.get('qr_code_text') or pix.get('qr_code')
@@ -5546,6 +5654,33 @@ def on_startup():
         executar_migracao_audit_logs()
     except Exception as e:
         logger.error(f"Erro na migração Audit Logs: {e}")
+    
+    # 4. 🆕 Configura pushin_pay_id da plataforma (para receber taxas de split)
+    try:
+        db = SessionLocal()
+        config = db.query(SystemConfig).filter(
+            SystemConfig.chave == "pushin_plataforma_id"
+        ).first()
+        
+        if not config:
+            # Cria a configuração vazia se não existir
+            config = SystemConfig(
+                chave="pushin_plataforma_id",
+                valor="",  # ⚠️ SERÁ PREENCHIDO DEPOIS VIA PAINEL OU BANCO
+                descricao="ID da conta Pushin Pay da plataforma Zenyx para receber taxas de split"
+            )
+            db.add(config)
+            db.commit()
+            logger.info("✅ SystemConfig 'pushin_plataforma_id' criada! Configure o valor no banco ou via painel.")
+        else:
+            if config.valor:
+                logger.info(f"✅ Pushin Pay ID da plataforma configurado: {config.valor[:8]}...")
+            else:
+                logger.warning("⚠️ Pushin Pay ID da plataforma não está preenchido. Split desabilitado.")
+        
+        db.close()
+    except Exception as e:
+        logger.error(f"Erro ao configurar pushin_plataforma_id: {e}")
     
     logger.info("✅ Sistema Iniciado e Pronto!")
 
