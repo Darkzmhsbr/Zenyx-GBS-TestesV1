@@ -2461,12 +2461,17 @@ def salvar_fluxo(
     logger.info(f"💾 Fluxo do Bot {bot_id} salvo com sucesso (Owner: {current_user.username})")
     
     return {"status": "saved"}
+# =========================================================
+# 🔗 ROTAS DE TRACKING (RASTREAMENTO) - VERSÃO CORRIGIDA
+# =========================================================
+# ⚠️ SUBSTITUIR AS LINHAS 2468-2553 DO SEU main.py POR ESTE CÓDIGO
+# =========================================================
 
-# =========================================================
-# 🔗 ROTAS DE TRACKING (RASTREAMENTO)
-# =========================================================
 @app.get("/api/admin/tracking/folders")
-def list_tracking_folders(db: Session = Depends(get_db)):
+def list_tracking_folders(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     """Lista pastas com contagem de links E métricas somadas"""
     try:
         folders = db.query(TrackingFolder).all()
@@ -2499,7 +2504,11 @@ def list_tracking_folders(db: Session = Depends(get_db)):
         return []
 
 @app.post("/api/admin/tracking/folders")
-def create_tracking_folder(dados: TrackingFolderCreate, db: Session = Depends(get_db)):
+def create_tracking_folder(
+    dados: TrackingFolderCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     try:
         nova_pasta = TrackingFolder(nome=dados.nome, plataforma=dados.plataforma)
         db.add(nova_pasta)
@@ -2511,11 +2520,19 @@ def create_tracking_folder(dados: TrackingFolderCreate, db: Session = Depends(ge
         raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
 
 @app.get("/api/admin/tracking/links/{folder_id}")
-def list_tracking_links(folder_id: int, db: Session = Depends(get_db)):
+def list_tracking_links(
+    folder_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     return db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id).all()
 
 @app.post("/api/admin/tracking/links")
-def create_tracking_link(dados: TrackingLinkCreate, db: Session = Depends(get_db)):
+def create_tracking_link(
+    dados: TrackingLinkCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     # Gera código aleatório se não informado
     if not dados.codigo:
         import random, string
@@ -2539,7 +2556,11 @@ def create_tracking_link(dados: TrackingLinkCreate, db: Session = Depends(get_db
     return {"status": "ok", "link": novo_link}
 
 @app.delete("/api/admin/tracking/folders/{fid}")
-def delete_folder(fid: int, db: Session = Depends(get_db)):
+def delete_folder(
+    fid: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     # Apaga links dentro da pasta primeiro
     db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
     db.query(TrackingFolder).filter(TrackingFolder.id == fid).delete()
@@ -2547,7 +2568,11 @@ def delete_folder(fid: int, db: Session = Depends(get_db)):
     return {"status": "deleted"}
 
 @app.delete("/api/admin/tracking/links/{lid}")
-def delete_link(lid: int, db: Session = Depends(get_db)):
+def delete_link(
+    lid: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     db.query(TrackingLink).filter(TrackingLink.id == lid).delete()
     db.commit()
     return {"status": "deleted"}
