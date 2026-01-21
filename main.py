@@ -4396,7 +4396,7 @@ def dashboard_stats(
             ).all()
             
             taxa_centavos = current_user.taxa_venda or 60
-            total_revenue = len(vendas_periodo) * taxa_centavos
+            total_revenue = len(vendas_periodo) * taxa_centavos  # = 360 centavos = R$ 3,60
             
         else:
             # USUÁRIO NORMAL: Soma dos próprios pedidos
@@ -4512,7 +4512,7 @@ def dashboard_stats(
     except Exception as e:
         logger.error(f"Erro ao buscar stats do dashboard: {e}")
         raise HTTPException(status_code=500, detail="Erro ao buscar estatísticas")
-        
+
 # =========================================================
 # 💸 WEBHOOK DE PAGAMENTO (BLINDADO E TAGARELA)
 # =========================================================
@@ -4793,13 +4793,21 @@ def get_profile_stats(
             
             logger.info(f"💰 Super Admin {current_user.username}: {total_vendas_sistema} vendas × R$ {taxa_centavos/100:.2f} = R$ {total_revenue/100:.2f}")
             
+            # Total de bots (query explícita - não usar current_user.bots)
+            total_bots = db.query(Bot).filter(Bot.owner_id == user_id).count()
+            
+            # Buscar IDs dos bots (query explícita)
+            user_bots = db.query(Bot.id).filter(Bot.owner_id == user_id).all()
+            bots_ids_user = [bot.id for bot in user_bots]
+            
         else:
             # ============================================
             # 👤 CÁLCULO NORMAL PARA USUÁRIO COMUM
             # ============================================
             
-            # Busca todos os bots do usuário
-            bots_ids = [bot.id for bot in current_user.bots]
+            # Busca todos os bots do usuário (query explícita)
+            user_bots = db.query(Bot.id).filter(Bot.owner_id == user_id).all()
+            bots_ids = [bot.id for bot in user_bots]
             
             if not bots_ids:
                 return {
@@ -4817,17 +4825,16 @@ def get_profile_stats(
             
             total_revenue = sum(int(p.valor * 100) for p in pedidos_aprovados)
             total_sales = len(pedidos_aprovados)
+            
+            # Total de bots
+            total_bots = len(bots_ids)
+            bots_ids_user = bots_ids
         
         # ============================================
         # 📊 ESTATÍSTICAS COMUNS (TODOS OS USUÁRIOS)
         # ============================================
         
-        # Total de bots
-        total_bots = db.query(Bot).filter(Bot.owner_id == user_id).count()
-        
         # Total de membros (leads + pedidos únicos)
-        bots_ids_user = [bot.id for bot in current_user.bots]
-        
         total_leads = db.query(Lead).filter(
             Lead.bot_id.in_(bots_ids_user)
         ).count() if bots_ids_user else 0
@@ -4847,6 +4854,8 @@ def get_profile_stats(
         
     except Exception as e:
         logger.error(f"Erro ao buscar stats do perfil: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail="Erro ao buscar estatísticas")
 
 # =========================================================
