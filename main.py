@@ -1254,7 +1254,7 @@ class PixCreateRequest(BaseModel):
     tem_order_bump: bool = False
 
 # =========================================================
-# 1. GERAÇÃO DE PIX (COM SPLIT DE PAGAMENTO)
+# 1. GERAÇÃO DE PIX (COM SPLIT E WEBHOOK CORRIGIDO)
 # =========================================================
 @app.post("/api/pagamento/pix")
 def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
@@ -1277,7 +1277,7 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         tid_clean = str(data.telegram_id).strip()
         if not tid_clean.isdigit(): tid_clean = user_clean
 
-        # Modo Teste/Sem Token
+        # Modo Teste/Sem Token (Gera PIX Fake)
         if not pushin_token:
             fake_txid = str(uuid.uuid4())
             novo_pedido = Pedido(
@@ -1307,15 +1307,24 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         if taxa_plataforma > (valor_total_centavos * 0.5):
             taxa_plataforma = int(valor_total_centavos * 0.5)
 
-        # Montar Payload Básico
+        # 👇👇👇 CORREÇÃO DA URL DO WEBHOOK AQUI 👇👇👇
+        # 1. Pega o domínio (pode vir com https ou sem, com barra no final ou sem)
+        raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
+        
+        # 2. Limpa TUDO (tira http, https e barras do final)
+        clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
+        
+        # 3. Reconstrói a URL do jeito certo (Garante https único e a rota correta)
+        webhook_url_final = f"https://{clean_domain}/api/webhooks/pushinpay"
+        
+        logger.info(f"🔗 Webhook Configurado: {webhook_url_final}")
+
         url = "https://api.pushinpay.com.br/api/pix/cashIn"
         headers = { "Authorization": f"Bearer {pushin_token}", "Content-Type": "application/json", "Accept": "application/json" }
-        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app/")
-        if domain.startswith("https://"): domain = domain.replace("https://", "")
         
         payload = {
             "value": valor_total_centavos,
-            "webhook_url": f"https://{domain}/webhook/pix",
+            "webhook_url": webhook_url_final, # Usando a URL corrigida e limpa
             "external_reference": f"bot_{data.bot_id}_{user_clean}_{int(time.time())}"
         }
 
