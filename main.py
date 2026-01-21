@@ -1330,6 +1330,9 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
     Registra um novo usuário no sistema
     🆕 Agora com log de auditoria
     """
+    # ✅ CORREÇÃO: Importar User ANTES de usar na validação
+    from database import User 
+
     # Validações
     existing_user = db.query(User).filter(User.username == user_data.username).first()
     if existing_user:
@@ -1340,7 +1343,6 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
         raise HTTPException(status_code=400, detail="Email já cadastrado")
     
     # Cria novo usuário
-    from database import User
     hashed_password = get_password_hash(user_data.password)
     
     new_user = User(
