@@ -769,9 +769,6 @@ def get_pushin_token():
 # =========================================================
 # 🏢 BUSCAR PUSHIN PAY ID DA PLATAFORMA (ZENYX)
 # =========================================================
-# =========================================================
-# 🏢 BUSCAR PUSHIN PAY ID DA PLATAFORMA (ZENYX)
-# =========================================================
 def get_plataforma_pushin_id(db: Session) -> str:
     """
     Retorna o pushin_pay_id da plataforma Zenyx para receber as taxas.
@@ -805,7 +802,6 @@ def get_plataforma_pushin_id(db: Session) -> str:
     except Exception as e:
         logger.error(f"Erro ao buscar pushin_pay_id da plataforma: {e}")
         return None
-
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA)
 # =========================================================
