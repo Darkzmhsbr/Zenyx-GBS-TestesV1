@@ -1519,12 +1519,16 @@ async def get_current_user_info(current_user = Depends(get_current_user)):
 # 👇 COLE ISSO LOGO APÓS A FUNÇÃO get_current_user_info TERMINAR
 
 # 🆕 ROTA PARA O MEMBRO ATUALIZAR SEU PRÓPRIO PERFIL FINANCEIRO
+# 🆕 ROTA PARA O MEMBRO ATUALIZAR SEU PRÓPRIO PERFIL FINANCEIRO
 @app.put("/api/auth/profile")
 def update_own_profile(
     user_data: PlatformUserUpdate, 
     current_user = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
+    # 👇 A CORREÇÃO MÁGICA ESTÁ AQUI:
+    from database import User 
+
     user = db.query(User).filter(User.id == current_user.id).first()
     
     if user_data.full_name:
@@ -5311,13 +5315,17 @@ def update_user_status(
 
 # 🆕 ROTA PARA O SUPER ADMIN EDITAR DADOS FINANCEIROS DOS MEMBROS
 # 🆕 ROTA PARA O SUPER ADMIN EDITAR DADOS FINANCEIROS DOS MEMBROS
+# 🆕 ROTA PARA O SUPER ADMIN EDITAR DADOS FINANCEIROS DOS MEMBROS
 @app.put("/api/superadmin/users/{user_id}")
 def update_user_financials(
     user_id: int, 
     user_data: PlatformUserUpdate, 
-    current_user = Depends(get_current_superuser), # <--- CORRIGIDO AQUI
+    current_user = Depends(get_current_superuser), # Já corrigimos o nome aqui antes
     db: Session = Depends(get_db)
 ):
+    # 👇 A CORREÇÃO MÁGICA ESTÁ AQUI TAMBÉM:
+    from database import User
+
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
