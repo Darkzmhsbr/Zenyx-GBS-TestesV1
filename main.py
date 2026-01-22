@@ -55,9 +55,18 @@ try:
 except Exception as e:
     print(f"Erro na migração forçada: {e}")
 
+origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "https://zenyx-gbs-testesv1-production.up.railway.app", # Seu Backend
+    "https://zenyx-gbs-testes-vf-1.vercel.app",             # 🆕 SEU FRONTEND VERCEL (Obrigatório!)
+    "*" # Em último caso, deixe * para testes, mas o ideal são os domínios acima
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins, # <--- Garanta que está usando a variável atualizada
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
