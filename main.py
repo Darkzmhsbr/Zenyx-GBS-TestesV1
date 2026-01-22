@@ -63,9 +63,10 @@ origins = [
     "*" # Em último caso, deixe * para testes, mas o ideal são os domínios acima
 ]
 
+# Substitua a lista 'origins' e o 'add_middleware' por isso:
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins, # <--- Garanta que está usando a variável atualizada
+    allow_origins=["*"],  # 🔥 LIBERA GERAL (Para garantir que funcione)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -6051,3 +6052,4 @@ def limpar_leads_que_viraram_pedidos(db: Session = Depends(get_db)):
         db.rollback()
         logger.error(f"Erro: {e}")
         return {"status": "error", "mensagem": str(e)}
+# (NÃO PODE TER NADA AQUI EMBAIXO, SÓ LINHA VAZIA)
