@@ -8,6 +8,7 @@ import threading
 from telebot import types
 import json
 import uuid
+from sqlalchemy.exc import IntegrityError
 
 from sqlalchemy import func, desc, text
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
@@ -1723,20 +1724,23 @@ def criar_bot(
     current_user = Depends(get_current_user)
 ):
     """
-    Cria um novo bot e atribui automaticamente ao usuário logado
-    🆕 Agora com log de auditoria
+    Cria um novo bot. 
+    🔥 BLINDAGEM: Se der duplo clique ou recarregar, recupera o bot existente 
+    e devolve o ID para o Frontend continuar o fluxo (Step 1 -> Step 2).
     """
+    
+    # Prepara o objeto Bot
+    novo_bot = Bot(
+        nome=bot_data.nome,
+        token=bot_data.token,
+        id_canal_vip=bot_data.id_canal_vip,
+        admin_principal_id=bot_data.admin_principal_id,
+        suporte_username=bot_data.suporte_username,
+        owner_id=current_user.id,  # 🔒 Atribui automaticamente
+        status="ativo"
+    )
+
     try:
-        novo_bot = Bot(
-            nome=bot_data.nome,
-            token=bot_data.token,
-            id_canal_vip=bot_data.id_canal_vip,
-            admin_principal_id=bot_data.admin_principal_id,
-            suporte_username=bot_data.suporte_username,
-            owner_id=current_user.id,  # 🔒 Atribui automaticamente
-            status="ativo"
-        )
-        
         db.add(novo_bot)
         db.commit()
         db.refresh(novo_bot)
@@ -1752,35 +1756,62 @@ def criar_bot(
             description=f"Criou bot '{novo_bot.nome}'",
             details={
                 "bot_name": novo_bot.nome,
-                "canal_vip": novo_bot.id_canal_vip,
-                "status": novo_bot.status
+                "token_partial": bot_data.token[:10] + "...",
+                "canal_vip": novo_bot.id_canal_vip
             },
             ip_address=get_client_ip(request),
             user_agent=request.headers.get("user-agent")
         )
         
-        logger.info(f"✅ Bot criado: {novo_bot.nome} (Owner: {current_user.username})")
+        logger.info(f"✅ Bot criado: {novo_bot.nome} (ID: {novo_bot.id})")
         return {"id": novo_bot.id, "nome": novo_bot.nome, "status": "criado"}
+
+    except IntegrityError as e:
+        db.rollback() # Limpa a transação falha
         
+        error_msg = str(e.orig)
+        # Verifica se o erro é duplicidade de Token
+        if "ix_bots_token" in error_msg or "unique constraint" in error_msg:
+            logger.warning(f"⚠️ Token duplicado detectado: {bot_data.token}")
+            
+            # Tenta achar o bot que JÁ EXISTE no banco
+            bot_existente = db.query(Bot).filter(Bot.token == bot_data.token).first()
+            
+            # Se o bot existe E É DO MESMO DONO (o usuário atual)
+            if bot_existente and bot_existente.owner_id == current_user.id:
+                logger.info(f"🔄 Recuperando bot ID {bot_existente.id} para destravar fluxo.")
+                
+                # RETORNA SUCESSO (200) COM O ID EXISTENTE
+                # Isso faz o Frontend pensar que criou agora e redireciona para o passo 2
+                return {"id": bot_existente.id, "nome": bot_existente.nome, "status": "recuperado"}
+            
+            else:
+                # Se o token já existe mas é de OUTRA pessoa
+                raise HTTPException(status_code=409, detail="Este token já pertence a outro usuário.")
+        
+        # Outros erros de integridade
+        logger.error(f"Erro de integridade não tratado: {e}")
+        raise HTTPException(status_code=400, detail="Erro de dados ao criar bot.")
+
     except Exception as e:
         db.rollback()
         
-        # 📋 AUDITORIA: Falha ao criar bot
+        # 📋 AUDITORIA: Falha genérica
         log_action(
             db=db,
             user_id=current_user.id,
             username=current_user.username,
             action="bot_create_failed",
             resource_type="bot",
-            description=f"Falha ao criar bot '{bot_data.nome}'",
+            description=f"Falha fatal ao criar bot '{bot_data.nome}'",
             success=False,
             error_message=str(e),
             ip_address=get_client_ip(request),
             user_agent=request.headers.get("user-agent")
         )
         
-        logger.error(f"Erro ao criar bot: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"❌ Erro fatal ao criar bot: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao processar solicitação.")
 
 @app.put("/api/admin/bots/{bot_id}")
 def update_bot(
