@@ -8,25 +8,24 @@ import threading
 from telebot import types
 import json
 import uuid
-
+from contextlib import asynccontextmanager # 🆕 NECESSÁRIO PARA O LIFESPAN
 
 # --- IMPORTS CORRIGIDOS ---
 from sqlalchemy import func, desc, text
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+# 🆕 ConfigDict corrige o erro "PydanticDeprecatedSince20"
+from pydantic import BaseModel, EmailStr, ConfigDict 
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
-from database import Lead  # Não esqueça de importar Lead!
+from database import Lead
 from force_migration import forcar_atualizacao_tabelas
 
 # 🆕 ADICIONAR ESTES IMPORTS PARA AUTENTICAÇÃO
 from passlib.context import CryptContext
 from jose import JWTError, jwt
-from datetime import timedelta
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel, EmailStr
 
 # Importa o banco e o script de reparo
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
@@ -34,27 +33,13 @@ import update_db
 
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
-from migration_v5 import executar_migracao_v5  # <--- ADICIONE ESTA LINHA
-from migration_v6 import executar_migracao_v6  # <--- ADICIONE AQUI
+from migration_v5 import executar_migracao_v5
+from migration_v6 import executar_migracao_v6
+from migration_audit_logs import executar_migracao_audit_logs # Adicionando import para garantir
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-app = FastAPI(title="Zenyx Gbot SaaS")
-
-# 🔥 FORÇA A CRIAÇÃO DAS COLUNAS AO INICIAR
-try:
-    forcar_atualizacao_tabelas()
-except Exception as e:
-    print(f"Erro na migração forçada: {e}")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # =========================================================
 # 🔐 CONFIGURAÇÕES DE AUTENTICAÇÃO JWT
@@ -1031,8 +1016,9 @@ class BotResponse(BotCreate):
     status: str
     leads: int = 0
     revenue: float = 0.0
-    class Config:
-        from_attributes = True
+    
+    # ✅ CORREÇÃO PYDANTIC V2
+    model_config = ConfigDict(from_attributes=True)
 
 class PlanoCreate(BaseModel):
     bot_id: int
@@ -1048,7 +1034,8 @@ class PlanoUpdate(BaseModel):
     preco: Optional[float] = None
     dias_duracao: Optional[int] = None
     
-    # Adiciona essa config para permitir que o Pydantic ignore tipos estranhos se possível
+    # ✅ CORREÇÃO PYDANTIC V2
+    model_config = ConfigDict(arbitrary_types_allowed=True)
     class Config:
         arbitrary_types_allowed = True
 class FlowUpdate(BaseModel):
@@ -6063,95 +6050,80 @@ def promote_user_to_superadmin(
         raise HTTPException(status_code=500, detail="Erro ao alterar status de super-admin")
 
 # =========================================================
-# ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)
+# 🚀 LIFESPAN (NOVA FORMA DE INICIALIZAR O APP)
+# Substitui o @app.on_event("startup") que está depreciado
 # =========================================================
-@app.on_event("startup")
-def on_startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     print("="*60)
-    print("🚀 INICIANDO ZENYX GBOT SAAS")
+    print("🚀 INICIANDO ZENYX GBOT SAAS (LIFESPAN)")
     print("="*60)
-    
-    # 1. Cria tabelas básicas se não existirem
+
+    # 1. Executa migração forçada (AGORA DENTRO DO LIFESPAN PARA NÃO TRAVAR O DEPLOY)
+    try:
+        print("🔧 Executando migração forçada de tabelas...")
+        forcar_atualizacao_tabelas()
+    except Exception as e:
+        print(f"⚠️ Erro na migração forçada (não fatal): {e}")
+
+    # 2. Inicializa tabelas básicas
     try:
         print("📊 Inicializando banco de dados...")
         init_db()
-        print("✅ Banco de dados inicializado")
     except Exception as e:
-        logger.error(f"❌ ERRO CRÍTICO no init_db: {e}")
-        import traceback
-        traceback.print_exc()
-        # NÃO pare a aplicação aqui, continue tentando
-    
-    # 2. Executa migrações existentes (COM FALLBACK)
+        logger.error(f"❌ Erro no init_db: {e}")
+
+    # 3. Executa migrações de versão (Sequencial)
+    migracoes = [
+        ("v3", executar_migracao_v3),
+        ("v4", executar_migracao_v4),
+        ("v5", executar_migracao_v5),
+        ("v6", executar_migracao_v6),
+        ("audit_logs", executar_migracao_audit_logs)
+    ]
+
+    print("🔄 Verificando migrações de versão...")
+    for nome, func_migracao in migracoes:
+        try:
+            func_migracao()
+            print(f"✅ Migração {nome} OK")
+        except Exception as e:
+            # Loga mas não para o sistema, para evitar erro 502
+            logger.warning(f"⚠️ Migração {nome} falhou ou já aplicada: {e}")
+
+    # 4. Configura pagamento (PushinPay ID)
     try:
-        print("🔄 Executando migrações...")
-        
-        # Tenta cada migração individualmente
-        try:
-            executar_migracao_v3()
-            print("✅ Migração v3 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v3 falhou: {e}")
-        
-        try:
-            executar_migracao_v4()
-            print("✅ Migração v4 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v4 falhou: {e}")
-        
-        try:
-            executar_migracao_v5()
-            print("✅ Migração v5 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v5 falhou: {e}")
-        
-        try:
-            executar_migracao_v6()
-            print("✅ Migração v6 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v6 falhou: {e}")
-            
-    except Exception as e:
-        logger.error(f"❌ Erro geral nas migrações: {e}")
-    
-    # 3. Executa migração de Audit Logs (COM FALLBACK)
-    try:
-        print("📋 Configurando Audit Logs...")
-        from migration_audit_logs import executar_migracao_audit_logs
-        executar_migracao_audit_logs()
-        print("✅ Audit Logs configurado")
-    except ImportError:
-        logger.warning("⚠️ Arquivo migration_audit_logs.py não encontrado")
-    except Exception as e:
-        logger.error(f"⚠️ Erro na migração Audit Logs: {e}")
-    
-    # 4. Configura pushin_pay_id (COM FALLBACK ROBUSTO)
-    try:
-        print("💳 Configurando sistema de pagamento...")
         db = SessionLocal()
-        try:
-            config = db.query(SystemConfig).filter(
-                SystemConfig.key == "pushin_plataforma_id"
-            ).first()
-            
-            if not config:
-                config = SystemConfig(
-                    key="pushin_plataforma_id",
-                    value=""
-                )
-                db.add(config)
-                db.commit()
-                print("✅ Configuração de pagamento criada")
-            else:
-                print("✅ Configuração de pagamento encontrada")
-        finally:
-            db.close()
+        config = db.query(SystemConfig).filter(SystemConfig.key == "pushin_plataforma_id").first()
+        if not config:
+            db.add(SystemConfig(key="pushin_plataforma_id", value=""))
+            db.commit()
+        db.close()
     except Exception as e:
-        logger.warning(f"⚠️ Erro ao configurar pushin_pay_id: {e}")
-    
-    print("="*60)
-    print("✅ SISTEMA INICIADO E PRONTO!")
-    print("="*60)
+        logger.warning(f"⚠️ Erro config pagamento: {e}")
+
+    # 5. Inicia o Ceifador (Thread de verificação)
+    try:
+        thread = threading.Thread(target=loop_verificar_vencimentos)
+        thread.daemon = True
+        thread.start()
+        logger.info("💀 O Ceifador (Auto-Kick) foi iniciado!")
+    except Exception as e:
+        logger.error(f"❌ Erro ao iniciar Ceifador: {e}")
+
+    print("✅ SISTEMA PRONTO PARA RECEBER REQUISIÇÕES!")
+    yield
+    print("🛑 Desligando sistema...")
+
+# --- CRIAÇÃO DO APP COM O NOVO LIFESPAN ---
+app = FastAPI(title="Zenyx Gbot SaaS", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 def home():
