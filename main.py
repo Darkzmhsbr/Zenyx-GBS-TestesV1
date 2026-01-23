@@ -1377,6 +1377,112 @@ def check_status(txid: str, db: Session = Depends(get_db)):
 # =========================================================
 
 # =========================================================
+# ROTAS DE LOGIN E REGISTRO COM CLOUDFLARE TURNSTILE
+# =========================================================
+# Cole estas rotas no seu main.py
+# =========================================================
+
+# 🔑 SUBSTITUA pela sua Secret Key do Cloudflare Turnstile
+TURNSTILE_SECRET_KEY = "0x4AAAAAACOUmpPNTu0O44Tfoa_r8qOZzJs"
+
+def verify_turnstile(token: str) -> bool:
+    """
+    Verifica token do Cloudflare Turnstile
+    
+    Returns:
+        True se verificação passou
+        False se falhou
+    """
+    try:
+        response = requests.post(
+            'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+            data={
+                'secret': TURNSTILE_SECRET_KEY,
+                'response': token
+            },
+            timeout=5
+        )
+        
+        result = response.json()
+        success = result.get('success', False)
+        
+        if success:
+            logger.info("✅ Turnstile: Verificação bem-sucedida")
+        else:
+            logger.warning(f"❌ Turnstile: Verificação falhou - {result.get('error-codes', [])}")
+        
+        return success
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao verificar Turnstile: {e}")
+        return False
+
+
+# =========================================================
+# 🔐 ROTA DE LOGIN COM TURNSTILE (VERSÃO FINAL)
+# =========================================================
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    turnstile_token: str
+
+@app.post("/api/auth/login")
+def login(data: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    """Login com Turnstile - Versão Corrigida"""
+    try:
+        logger.info("🔐 LOGIN: Iniciando...")
+        logger.info(f"👤 Username: {data.username}")
+        
+        # Verifica Turnstile
+        logger.info("🛡️ Verificando Turnstile...")
+        if not verify_turnstile(data.turnstile_token):
+            logger.error("❌ Turnstile falhou!")
+            raise HTTPException(status_code=400, detail="Verificação de segurança falhou")
+        
+        logger.info("✅ Turnstile OK")
+        
+        # Busca usuário
+        from database import User
+        user = db.query(User).filter(User.username == data.username).first()
+        
+        if not user:
+            logger.error(f"❌ Usuário não encontrado: {data.username}")
+            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
+        
+        # Verifica senha
+        if not verify_password(data.password, user.password_hash):
+            logger.error("❌ Senha incorreta")
+            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
+        
+        logger.info("✅ Credenciais OK")
+        
+        # Gera token
+        access_token = create_access_token(
+            data={"sub": user.username, "user_id": user.id},
+            expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        )
+        
+        logger.info(f"✅ LOGIN SUCESSO: {user.username}")
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "email": user.email
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ ERRO: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail="Erro interno")
+
+# =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
 # =========================================================
 @app.post("/api/auth/register", response_model=Token)
@@ -1482,134 +1588,6 @@ def update_own_profile(
     db.commit()
     db.refresh(user)
     return user
-
-# =========================================================
-# ROTAS DE LOGIN E REGISTRO COM CLOUDFLARE TURNSTILE
-# =========================================================
-# Cole estas rotas no seu main.py
-# =========================================================
-
-# 🔑 SUBSTITUA pela sua Secret Key do Cloudflare Turnstile
-TURNSTILE_SECRET_KEY = "0x4AAAAAACOUmpPNTu0O44Tfoa_r8qOZzJs"
-
-def verify_turnstile(token: str) -> bool:
-    """
-    Verifica token do Cloudflare Turnstile
-    
-    Returns:
-        True se verificação passou
-        False se falhou
-    """
-    try:
-        response = requests.post(
-            'https://challenges.cloudflare.com/turnstile/v0/siteverify',
-            data={
-                'secret': TURNSTILE_SECRET_KEY,
-                'response': token
-            },
-            timeout=5
-        )
-        
-        result = response.json()
-        success = result.get('success', False)
-        
-        if success:
-            logger.info("✅ Turnstile: Verificação bem-sucedida")
-        else:
-            logger.warning(f"❌ Turnstile: Verificação falhou - {result.get('error-codes', [])}")
-        
-        return success
-        
-    except Exception as e:
-        logger.error(f"❌ Erro ao verificar Turnstile: {e}")
-        return False
-
-
-# =========================================================
-# 🔐 ROTA DE LOGIN COM TURNSTILE
-# =========================================================
-
-class LoginRequest(BaseModel):
-    username: str        # ✅ CORRIGIDO
-    password: str
-    turnstile_token: str
-
-@app.post("/api/auth/login")
-def login(data: LoginRequest, request: Request, db: Session = Depends(get_db)):
-    """
-    Login com verificação Cloudflare Turnstile
-    """
-    try:
-        logger.info("=" * 60)
-        logger.info("🔐 LOGIN: Requisição recebida")
-        logger.info(f"👤 Username: {data.username}")  # ✅ CORRIGIDO
-        
-        # 🛡️ ETAPA 1: Verificar Turnstile
-        logger.info("🛡️ Verificando Cloudflare Turnstile...")
-        
-        if not verify_turnstile(data.turnstile_token):
-            raise HTTPException(
-                status_code=400,
-                detail="Verificação de segurança falhou. Tente novamente."
-            )
-        
-        # 🔐 ETAPA 2: Verificar credenciais
-        logger.info("🔍 Buscando usuário no banco...")
-        from database import User
-        
-        # ✅ CORRIGIDO: Busca por username
-        user = db.query(User).filter(User.username == data.username).first()
-        
-        if not user:
-            logger.warning(f"❌ Usuário não encontrado: {data.username}")
-            raise HTTPException(
-                status_code=401,
-                detail="Usuário ou senha incorretos"
-            )
-        
-        # Verifica senha
-        if not verify_password(data.password, user.password_hash):
-            logger.warning(f"❌ Senha incorreta para: {data.username}")
-            raise HTTPException(
-                status_code=401,
-                detail="Usuário ou senha incorretos"
-            )
-        
-        logger.info(f"✅ Credenciais válidas para: {user.username}")
-        
-        # 🎫 ETAPA 3: Gerar JWT
-        logger.info("🎫 Gerando token JWT...")
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": user.username, "user_id": user.id},
-            expires_delta=access_token_expires
-        )
-        
-        # 📦 ETAPA 4: Retornar dados
-        response_data = {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user_id": user.id,
-            "username": user.username,
-            "full_name": user.full_name,
-            "email": user.email
-        }
-        
-        logger.info(f"✅ LOGIN BEM-SUCEDIDO: {user.username}")
-        logger.info("=" * 60)
-        
-        return response_data
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ ERRO no login: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise HTTPException(
-            status_code=500,
-            detail="Erro interno no servidor"
-        )
 
 # =========================================================
 # ⚙️ HELPER: CONFIGURAR MENU (COMANDOS)
