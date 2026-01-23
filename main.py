@@ -8,13 +8,13 @@ import threading
 from telebot import types
 import json
 import uuid
-# ✅ IMPORT ESSENCIAL PARA O LIFESPAN NÃO DAR ERRO
+from contextlib import asynccontextmanager 
 
 # --- IMPORTS FRAMEWORK ---
 from sqlalchemy import func, desc, text
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-# ✅ IMPORT PARA CORRIGIR ERRO DE BUILD DO PYDANTIC
+# ✅ IMPORT DO CONFIGDICT (CRUCIAL PARA OS AVISOS)
 from pydantic import BaseModel, EmailStr, ConfigDict 
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -26,33 +26,97 @@ from jose import JWTError, jwt
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 # --- IMPORTS PROJETO ---
-# Verifique se todos esses arquivos existem na sua pasta
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
 from force_migration import forcar_atualizacao_tabelas
 
+# --- IMPORTS MIGRAÇÕES ---
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
-from migration_v5 import executar_migracao_v5  # <--- ADICIONE ESTA LINHA
-from migration_v6 import executar_migracao_v6  # <--- ADICIONE AQUI
+from migration_v5 import executar_migracao_v5
+from migration_v6 import executar_migracao_v6
+from migration_audit_logs import executar_migracao_audit_logs 
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Zenyx Gbot SaaS")
+# =========================================================
+# 💀 CEIFADOR (LOOP DE VENCIMENTOS)
+# =========================================================
+def loop_verificar_vencimentos():
+    """Roda a cada 60 segundos para remover usuários vencidos"""
+    while True:
+        try:
+            # Se você tiver a função verificar_expiracao_massa, descomente:
+            # verificar_expiracao_massa() 
+            pass 
+        except Exception as e:
+            logger.error(f"Erro no loop de vencimento: {e}")
+        time.sleep(60)
 
-# 🔥 FORÇA A CRIAÇÃO DAS COLUNAS AO INICIAR
-try:
-    forcar_atualizacao_tabelas()
-except Exception as e:
-    print(f"Erro na migração forçada: {e}")
+# =========================================================
+# 🚀 LIFESPAN (INICIALIZAÇÃO)
+# =========================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("="*60)
+    print("🚀 INICIANDO ZENYX GBOT SAAS")
+    print("="*60)
+
+    try:
+        print("🔧 Executando manutenção de tabelas...")
+        forcar_atualizacao_tabelas()
+        init_db()
+    except Exception as e:
+        logger.error(f"⚠️ Erro não-fatal no DB: {e}")
+
+    # Migrações
+    migracoes = [
+        ("v3", executar_migracao_v3),
+        ("v4", executar_migracao_v4),
+        ("v5", executar_migracao_v5),
+        ("v6", executar_migracao_v6),
+        ("audit_logs", executar_migracao_audit_logs)
+    ]
+    for nome, func_migracao in migracoes:
+        try:
+            func_migracao()
+        except Exception as e:
+            logger.warning(f"⚠️ Migração {nome}: {e}")
+
+    # Inicia Threads
+    try:
+        t = threading.Thread(target=loop_verificar_vencimentos)
+        t.daemon = True
+        t.start()
+        logger.info("💀 Ceifador iniciado.")
+    except Exception as e:
+        logger.error(f"❌ Erro thread: {e}")
+
+    print("✅ SISTEMA PRONTO PARA CONEXÕES!")
+    yield
+    print("🛑 Desligando sistema...")
+
+# =========================================================
+# 🏗️ CRIAÇÃO DO APP
+# =========================================================
+app = FastAPI(title="Zenyx Gbot SaaS", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], 
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 🔐 CONFIGURAÇÕES DE SEGURANÇA
+SECRET_KEY = os.getenv("SECRET_KEY", "zenyx-secret-key-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 
 # =========================================================
 # 1. FUNÇÃO DE CONEXÃO COM BANCO (TEM QUE SER A PRIMEIRA)
@@ -404,20 +468,6 @@ def registrar_remarketing(
     logger.info("💀 O Ceifador (Auto-Kick) foi iniciado!")
 
 # =========================================================
-# 💀 O CEIFADOR: VERIFICA VENCIMENTOS E REMOVE (KICK SUAVE)
-# =========================================================
-def loop_verificar_vencimentos():
-    """Roda a cada 60 minutos para remover usuários vencidos"""
-    while True:
-        try:
-            logger.info("⏳ Verificando assinaturas vencidas...")
-            verificar_expiracao_massa()
-        except Exception as e:
-            logger.error(f"Erro no loop de vencimento: {e}")
-        
-        time.sleep(3600) # Espera 1 hora (3600 segundos)
-
-# =========================================================
 # 💀 O CEIFADOR: REMOVEDOR BASEADO EM DATA (SAAS)
 # =========================================================
 def verificar_expiracao_massa():
@@ -637,6 +687,23 @@ def save_pushin_token(bot_id: int, data: IntegrationUpdate, db: Session = Depend
     return {"status": "conectado", "msg": f"Integração salva para {bot.nome}!"}
 
 # --- MODELOS ---
+
+# ✅ CLASSE TOKEN (Causa do NameError - Trazida para o topo)
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
+class User(BaseModel):
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    disabled: Optional[bool] = None
+
+class UserInDB(User):
+    hashed_password: str
 class BotCreate(BaseModel):
     nome: str
     token: str
@@ -657,13 +724,15 @@ class BotAdminCreate(BaseModel):
     telegram_id: str
     nome: Optional[str] = "Admin"
 
+# ✅ CLASSE BOTRESPONSE (Corrigida com ConfigDict)
 class BotResponse(BotCreate):
     id: int
     status: str
     leads: int = 0
     revenue: float = 0.0
-    class Config:
-        from_attributes = True
+    
+    # Correção Pydantic V2
+    model_config = ConfigDict(from_attributes=True)
 
 class PlanoCreate(BaseModel):
     bot_id: int
@@ -674,14 +743,14 @@ class PlanoCreate(BaseModel):
 # --- Adicione logo após a classe PlanoCreate ---
 # 👇 COLE ISSO LOGO ABAIXO DA CLASS 'PlanoCreate'
 # COLE AQUI (LOGO APÓS AS CLASSES INICIAIS)
+# ✅ CLASSE PLANOUPDATE (Corrigida com ConfigDict)
 class PlanoUpdate(BaseModel):
     nome_exibicao: Optional[str] = None
     preco: Optional[float] = None
     dias_duracao: Optional[int] = None
     
-    # Adiciona essa config para permitir que o Pydantic ignore tipos estranhos se possível
-    class Config:
-        arbitrary_types_allowed = True
+    # Correção Pydantic V2
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 class FlowUpdate(BaseModel):
     msg_boas_vindas: str
     media_url: Optional[str] = None
