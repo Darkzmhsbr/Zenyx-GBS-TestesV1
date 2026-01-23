@@ -8,126 +8,100 @@ import threading
 from telebot import types
 import json
 import uuid
-from contextlib import asynccontextmanager 
 
-# --- IMPORTS FRAMEWORK ---
+
+# --- IMPORTS CORRIGIDOS ---
 from sqlalchemy import func, desc, text
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-# ✅ IMPORT DO CONFIGDICT (CRUCIAL PARA OS AVISOS)
-from pydantic import BaseModel, EmailStr, ConfigDict 
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
-
-# --- IMPORTS SEGURANÇA ---
-from passlib.context import CryptContext
-from jose import JWTError, jwt
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-
-# --- IMPORTS PROJETO ---
-from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
+from database import Lead  # Não esqueça de importar Lead!
 from force_migration import forcar_atualizacao_tabelas
 
-# --- IMPORTS MIGRAÇÕES ---
+# 🆕 ADICIONAR ESTES IMPORTS PARA AUTENTICAÇÃO
+from passlib.context import CryptContext
+from jose import JWTError, jwt
+from datetime import timedelta
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from pydantic import BaseModel, EmailStr
+
+# Importa o banco e o script de reparo
+from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
+import update_db 
+
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
-from migration_v5 import executar_migracao_v5
-from migration_v6 import executar_migracao_v6
-from migration_audit_logs import executar_migracao_audit_logs 
+from migration_v5 import executar_migracao_v5  # <--- ADICIONE ESTA LINHA
+from migration_v6 import executar_migracao_v6  # <--- ADICIONE AQUI
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# =========================================================
-# 💀 CEIFADOR (LOOP DE VENCIMENTOS)
-# =========================================================
-def loop_verificar_vencimentos():
-    """Roda a cada 60 segundos para remover usuários vencidos"""
-    while True:
-        try:
-            # Se você tiver a função verificar_expiracao_massa, descomente:
-            # verificar_expiracao_massa() 
-            pass 
-        except Exception as e:
-            logger.error(f"Erro no loop de vencimento: {e}")
-        time.sleep(60)
+app = FastAPI(title="Zenyx Gbot SaaS")
 
-# =========================================================
-# 🚀 LIFESPAN (INICIALIZAÇÃO)
-# =========================================================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("="*60)
-    print("🚀 INICIANDO ZENYX GBOT SAAS")
-    print("="*60)
-
-    try:
-        print("🔧 Executando manutenção de tabelas...")
-        forcar_atualizacao_tabelas()
-        init_db()
-    except Exception as e:
-        logger.error(f"⚠️ Erro não-fatal no DB: {e}")
-
-    # Migrações
-    migracoes = [
-        ("v3", executar_migracao_v3),
-        ("v4", executar_migracao_v4),
-        ("v5", executar_migracao_v5),
-        ("v6", executar_migracao_v6),
-        ("audit_logs", executar_migracao_audit_logs)
-    ]
-    for nome, func_migracao in migracoes:
-        try:
-            func_migracao()
-        except Exception as e:
-            logger.warning(f"⚠️ Migração {nome}: {e}")
-
-    # Inicia Threads
-    try:
-        t = threading.Thread(target=loop_verificar_vencimentos)
-        t.daemon = True
-        t.start()
-        logger.info("💀 Ceifador iniciado.")
-    except Exception as e:
-        logger.error(f"❌ Erro thread: {e}")
-
-    print("✅ SISTEMA PRONTO PARA CONEXÕES!")
-    yield
-    print("🛑 Desligando sistema...")
-
-# =========================================================
-# 🏗️ CRIAÇÃO DO APP
-# =========================================================
-app = FastAPI(title="Zenyx Gbot SaaS", lifespan=lifespan)
+# 🔥 FORÇA A CRIAÇÃO DAS COLUNAS AO INICIAR
+try:
+    forcar_atualizacao_tabelas()
+except Exception as e:
+    print(f"Erro na migração forçada: {e}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 🔐 CONFIGURAÇÕES DE SEGURANÇA
-SECRET_KEY = os.getenv("SECRET_KEY", "zenyx-secret-key-change-in-production")
+# =========================================================
+# 🔐 CONFIGURAÇÕES DE AUTENTICAÇÃO JWT
+# =========================================================
+SECRET_KEY = os.getenv("SECRET_KEY", "zenyx-secret-key-change-in-production-2026")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7 
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 dias
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 
 # =========================================================
-# 1. FUNÇÃO DE CONEXÃO COM BANCO (TEM QUE SER A PRIMEIRA)
+# 🔑 CLOUDFLARE TURNSTILE - CONFIGURAÇÃO
 # =========================================================
-def get_db():
-    """Gera conexão com o banco de dados"""
-    db = SessionLocal()
+TURNSTILE_SECRET_KEY = "0x4AAAAAACOUmpPNTu0O44Tfoa_r8qOZzJs"
+
+def verify_turnstile(token: str) -> bool:
+    """
+    Verifica token do Cloudflare Turnstile
+    
+    Returns:
+        True se verificação passou
+        False se falhou
+    """
     try:
-        yield db
-    finally:
-        db.close()
+        response = requests.post(
+            'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+            data={
+                'secret': TURNSTILE_SECRET_KEY,
+                'response': token
+            },
+            timeout=5
+        )
+        
+        result = response.json()
+        success = result.get('success', False)
+        
+        if success:
+            logger.info("✅ Turnstile: Verificação bem-sucedida")
+        else:
+            logger.warning(f"❌ Turnstile: Verificação falhou - {result.get('error-codes', [])}")
+        
+        return success
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao verificar Turnstile: {e}")
+        return False
 
 # =========================================================
 # 📦 SCHEMAS PYDANTIC PARA AUTENTICAÇÃO
@@ -152,18 +126,11 @@ class PlatformUserUpdate(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    user_id: int
+    username: str
 
 class TokenData(BaseModel):
-    username: Optional[str] = None
-
-class User(BaseModel):
-    username: str
-    email: Optional[str] = None
-    full_name: Optional[str] = None
-    disabled: Optional[bool] = None
-
-class UserInDB(User):
-    hashed_password: str
+    username: str = None
 
 # =========================================================
 # 📦 SCHEMAS PYDANTIC PARA SUPER ADMIN (🆕 FASE 3.4)
@@ -186,6 +153,16 @@ class UserDetailsResponse(BaseModel):
     total_revenue: float
     total_sales: int
 
+# ========================================================
+# 1. FUNÇÃO DE CONEXÃO COM BANCO (TEM QUE SER A PRIMEIRA)
+# =========================================================
+def get_db():
+    """Gera conexão com o banco de dados"""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 # =========================================================
 # 🔧 FUNÇÕES AUXILIARES DE AUTENTICAÇÃO (CORRIGIDAS)
 # =========================================================
@@ -369,10 +346,6 @@ def log_action(
         logger.error(f"❌ Erro ao criar log de auditoria: {e}")
         # Não propaga o erro para não quebrar a operação principal
         db.rollback()
-
-# ============================================================
-# 👇 COLE TODAS AS 5 FUNÇÕES AQUI (DEPOIS DO get_db)
-# ============================================================
 
 # ============================================================
 # 👇 COLE TODAS AS 5 FUNÇÕES AQUI (DEPOIS DO get_db)
@@ -713,6 +686,20 @@ def registrar_remarketing(
     logger.info("💀 O Ceifador (Auto-Kick) foi iniciado!")
 
 # =========================================================
+# 💀 O CEIFADOR: VERIFICA VENCIMENTOS E REMOVE (KICK SUAVE)
+# =========================================================
+def loop_verificar_vencimentos():
+    """Roda a cada 60 segundos para remover usuários vencidos"""
+    while True:
+        try:
+            logger.info("⏳ Verificando assinaturas vencidas...")
+            verificar_expiracao_massa()
+        except Exception as e:
+            logger.error(f"Erro no loop de vencimento: {e}")
+        
+        time.sleep(60) # 🔥 VOLTOU PARA 60 SEGUNDOS (Verificação Rápida)
+
+# =========================================================
 # 💀 O CEIFADOR: REMOVEDOR BASEADO EM DATA (SAAS)
 # =========================================================
 def verificar_expiracao_massa():
@@ -722,63 +709,78 @@ def verificar_expiracao_massa():
         bots = db.query(Bot).all()
         
         for bot_data in bots:
-            if not bot_data.token or not bot_data.id_canal_vip: continue
+            if not bot_data.token or not bot_data.id_canal_vip: 
+                continue
             
             try:
                 # Conecta no Telegram deste bot específico
                 tb = telebot.TeleBot(bot_data.token)
                 
-                # Tratamento do ID do canal
-                try: canal_id = int(str(bot_data.id_canal_vip).strip())
-                except: canal_id = bot_data.id_canal_vip
+                # Tratamento ROBUSTO do ID do canal
+                try: 
+                    raw_id = str(bot_data.id_canal_vip).strip()
+                    canal_id = int(raw_id)
+                except: 
+                    logger.error(f"ID do canal inválido para o bot {bot_data.nome}")
+                    continue
                 
                 agora = datetime.utcnow()
                 
-                # --- QUERY INTELIGENTE ---
-                # Busca usuários deste bot que:
-                # 1. Estão com status 'paid' (Ativos)
-                # 2. Têm uma data de expiração definida (NÃO SÃO VITALÍCIOS)
-                # 3. A data de expiração é MENOR que agora (Já venceu)
+                # Busca usuários vencidos
                 vencidos = db.query(Pedido).filter(
                     Pedido.bot_id == bot_data.id,
-                    Pedido.status == 'paid',
+                    Pedido.status.in_(['paid', 'approved', 'active']),
                     Pedido.custom_expiration != None, 
                     Pedido.custom_expiration < agora
                 ).all()
                 
                 for u in vencidos:
-                    # 🔥 [CORRIGIDO] Proteção: Se for admin, não remove
-                    # Verificar se é admin através da tabela BotAdmin
-                    admin = db.query(BotAdmin).filter(
-                        BotAdmin.telegram_id == u.telegram_id,
-                        BotAdmin.bot_id == u.bot_id
+                    # 🔥 Proteção: Admin nunca é removido
+                    # ✅ CORRIGIDO: Comparação segura com None
+                    eh_admin_principal = (
+                        bot_data.admin_principal_id and 
+                        str(u.telegram_id) == str(bot_data.admin_principal_id)
+                    )
+                    
+                    # Verifica na tabela BotAdmin
+                    eh_admin_extra = db.query(BotAdmin).filter(
+                        BotAdmin.telegram_id == str(u.telegram_id),
+                        BotAdmin.bot_id == bot_data.id
                     ).first()
                     
-                    if admin:
-                        logger.info(f"⏭️ Pulando admin: {u.telegram_id}")
+                    if eh_admin_principal or eh_admin_extra:
+                        logger.info(f"👑 Ignorando remoção de Admin: {u.telegram_id}")
                         continue
                     
                     try:
-                        logger.info(f"💀 Ceifando usuário vencido: {u.first_name} (Bot: {bot_data.nome})")
+                        logger.info(f"💀 Removendo usuário vencido: {u.first_name} (Bot: {bot_data.nome})")
                         
-                        # 1. Kick Suave (Ban + Unban)
+                        # 1. Kick Suave
                         tb.ban_chat_member(canal_id, int(u.telegram_id))
                         tb.unban_chat_member(canal_id, int(u.telegram_id))
                         
-                        # 2. Atualiza Status no Banco
+                        # 2. Atualiza Status
                         u.status = 'expired'
                         db.commit()
                         
-                        # 3. Avisa o defunto
+                        # 3. Avisa o usuário
                         try: 
-                            tb.send_message(int(u.telegram_id), "🚫 <b>Seu plano venceu!</b>\n\nSeu tempo acabou. Para renovar, digite /start", parse_mode="HTML")
-                        except: pass
+                            tb.send_message(
+                                int(u.telegram_id), 
+                                "🚫 <b>Seu plano venceu!</b>\n\nPara renovar, digite /start", 
+                                parse_mode="HTML"
+                            )
+                        except: 
+                            pass
                         
                     except Exception as e_kick:
-                        logger.error(f"Erro ao remover {u.telegram_id}: {e_kick}")
-                        # Se der erro (ex: user já saiu), marca como expired para não ficar tentando eternamente
-                        u.status = 'expired'
-                        db.commit()
+                        err_msg = str(e_kick).lower()
+                        if "participant_id_invalid" in err_msg or "user not found" in err_msg:
+                            logger.info(f"Usuário {u.telegram_id} já havia saído. Marcando expired.")
+                            u.status = 'expired'
+                            db.commit()
+                        else:
+                            logger.error(f"Erro ao remover {u.telegram_id}: {e_kick}")
                         
             except Exception as e_bot:
                 logger.error(f"Erro ao processar bot {bot_data.id}: {e_bot}")
@@ -803,9 +805,60 @@ def get_pushin_token():
         db.close()
 
 # =========================================================
+# 🏢 BUSCAR PUSHIN PAY ID DA PLATAFORMA (ZENYX)
+# =========================================================
+def get_plataforma_pushin_id(db: Session) -> str:
+    """
+    Retorna o pushin_pay_id da plataforma Zenyx para receber as taxas.
+    Prioridade:
+    1. SystemConfig (pushin_plataforma_id)
+    2. Primeiro Super Admin encontrado
+    3. None se não encontrar
+    """
+    try:
+        # 1. Tenta buscar da SystemConfig
+        config = db.query(SystemConfig).filter(
+            SystemConfig.key == "pushin_plataforma_id"  # ✅ CORRIGIDO: key ao invés de chave
+        ).first()
+        
+        if config and config.value:  # ✅ CORRIGIDO: value ao invés de valor
+            return config.value
+        
+        # 2. Busca o primeiro Super Admin com pushin_pay_id configurado
+        from database import User
+        super_admin = db.query(User).filter(
+            User.is_superuser == True,
+            User.pushin_pay_id.isnot(None)
+        ).first()
+        
+        if super_admin and super_admin.pushin_pay_id:
+            return super_admin.pushin_pay_id
+        
+        logger.warning("⚠️ Nenhum pushin_pay_id da plataforma configurado! Split desabilitado.")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar pushin_pay_id da plataforma: {e}")
+        return None
+# =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA)
 # =========================================================
-def gerar_pix_pushinpay(valor_float: float, transaction_id: str):
+# =========================================================
+# 🔌 INTEGRAÇÃO PUSHIN PAY (COM SPLIT AUTOMÁTICO)
+# =========================================================
+def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db: Session):
+    """
+    Gera PIX com Split automático de taxa para a plataforma.
+    
+    Args:
+        valor_float: Valor do PIX em reais (ex: 100.50)
+        transaction_id: ID único da transação
+        bot_id: ID do bot que está gerando o PIX
+        db: Sessão do banco de dados
+    
+    Returns:
+        dict: Resposta da API Pushin Pay ou None em caso de erro
+    """
     token = get_pushin_token()
     
     if not token:
@@ -819,26 +872,80 @@ def gerar_pix_pushinpay(valor_float: float, transaction_id: str):
         "Accept": "application/json"
     }
     
-    # URL DO RAILWAY FIXA (Garante que o Webhook chegue)
-    seus_dominio = "zenyx-gbs-testes-production.up.railway.app" 
+    # URL do Webhook
+    seus_dominio = "zenyx-gbs-testesv1-production.up.railway.app" 
     
+    # Valor em centavos
+    valor_centavos = int(valor_float * 100)
+    
+    # Monta payload básico
     payload = {
-        "value": int(valor_float * 100), 
+        "value": valor_centavos, 
         "webhook_url": f"https://{seus_dominio}/webhook/pix",
         "external_reference": transaction_id
     }
-
+    
+    # ========================================
+    # 💰 LÓGICA DE SPLIT (TAXA DA PLATAFORMA)
+    # ========================================
     try:
-        logger.info(f"📤 Gerando PIX. Webhook definido para: https://{seus_dominio}/webhook/pix")
+        # 1. Busca o bot
+        bot = db.query(Bot).filter(Bot.id == bot_id).first()
+        
+        if bot and bot.owner_id:
+            # 2. Busca o dono do bot (membro)
+            from database import User
+            owner = db.query(User).filter(User.id == bot.owner_id).first()
+            
+            if owner:
+                # 3. Busca o pushin_pay_id da PLATAFORMA (para receber a taxa)
+                plataforma_id = get_plataforma_pushin_id(db)
+                
+                if plataforma_id:
+                    # 4. Define a taxa (padrão: R$ 0,60)
+                    taxa_centavos = owner.taxa_venda or 60
+                    
+                    # 5. Validação: Taxa não pode ser maior que o valor total
+                    if taxa_centavos >= valor_centavos:
+                        logger.warning(f"⚠️ Taxa ({taxa_centavos}) >= Valor Total ({valor_centavos}). Split ignorado.")
+                    else:
+                        # 6. Monta o split_rules
+                        payload["split_rules"] = [
+                            {
+                                "value": taxa_centavos,
+                                "account_id": plataforma_id
+                            }
+                        ]
+                        
+                        logger.info(f"💸 Split configurado: Taxa R$ {taxa_centavos/100:.2f} → Conta {plataforma_id[:8]}...")
+                        logger.info(f"   Membro receberá: R$ {(valor_centavos - taxa_centavos)/100:.2f}")
+                else:
+                    logger.warning("⚠️ Pushin Pay ID da plataforma não configurado. Gerando PIX SEM split.")
+            else:
+                logger.warning(f"⚠️ Owner do bot {bot_id} não encontrado. Gerando PIX SEM split.")
+        else:
+            logger.warning(f"⚠️ Bot {bot_id} sem owner_id. Gerando PIX SEM split.")
+            
+    except Exception as e:
+        logger.error(f"❌ Erro ao configurar split: {e}. Gerando PIX SEM split.")
+        # Continua sem split em caso de erro
+    
+    # ========================================
+    # 📤 ENVIA REQUISIÇÃO PARA PUSHIN PAY
+    # ========================================
+    try:
+        logger.info(f"📤 Gerando PIX de R$ {valor_float:.2f}. Webhook: https://{seus_dominio}/webhook/pix")
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         
         if response.status_code in [200, 201]:
+            logger.info(f"✅ PIX gerado com sucesso! ID: {response.json().get('id')}")
             return response.json()
         else:
-            logger.error(f"Erro PushinPay: {response.text}")
+            logger.error(f"❌ Erro PushinPay: {response.text}")
             return None
+            
     except Exception as e:
-        logger.error(f"Exceção PushinPay: {e}")
+        logger.error(f"❌ Exceção ao gerar PIX: {e}")
         return None
 
 # --- HELPER: Notificar Admin Principal ---
@@ -850,15 +957,19 @@ def notificar_admin_principal(bot_db: Bot, mensagem: str):
     """
     ids_unicos = set()
 
-    # 1. Adiciona Admin Principal (se houver)
+    # 1. Adiciona Admin Principal (Prioridade)
     if bot_db.admin_principal_id:
         ids_unicos.add(str(bot_db.admin_principal_id).strip())
 
-    # 2. Adiciona Admins Extras (da tabela BotAdmin)
-    if bot_db.admins:
-        for admin in bot_db.admins:
-            if admin.telegram_id:
-                ids_unicos.add(str(admin.telegram_id).strip())
+    # 2. Adiciona Admins Extras (Com proteção contra lazy loading)
+    try:
+        if bot_db.admins:
+            for admin in bot_db.admins:
+                if admin.telegram_id:
+                    ids_unicos.add(str(admin.telegram_id).strip())
+    except Exception as e:
+        # Se der erro ao ler admins extras (ex: sessão fechada), ignora e manda só pro principal
+        logger.warning(f"Não foi possível ler admins extras: {e}")
 
     if not ids_unicos:
         return
@@ -867,7 +978,7 @@ def notificar_admin_principal(bot_db: Bot, mensagem: str):
         sender = telebot.TeleBot(bot_db.token)
         for chat_id in ids_unicos:
             try:
-                # 🔥 ALTERADO PARA HTML
+                # 🔥 GARANTE O PARSE_MODE HTML
                 sender.send_message(chat_id, mensagem, parse_mode="HTML")
             except Exception as e_send:
                 logger.error(f"Erro ao notificar admin {chat_id}: {e_send}")
@@ -932,23 +1043,6 @@ def save_pushin_token(bot_id: int, data: IntegrationUpdate, db: Session = Depend
     return {"status": "conectado", "msg": f"Integração salva para {bot.nome}!"}
 
 # --- MODELOS ---
-
-# ✅ CLASSE TOKEN (Causa do NameError - Trazida para o topo)
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-
-class TokenData(BaseModel):
-    username: Optional[str] = None
-
-class User(BaseModel):
-    username: str
-    email: Optional[str] = None
-    full_name: Optional[str] = None
-    disabled: Optional[bool] = None
-
-class UserInDB(User):
-    hashed_password: str
 class BotCreate(BaseModel):
     nome: str
     token: str
@@ -969,15 +1063,13 @@ class BotAdminCreate(BaseModel):
     telegram_id: str
     nome: Optional[str] = "Admin"
 
-# ✅ CLASSE BOTRESPONSE (Corrigida com ConfigDict)
 class BotResponse(BotCreate):
     id: int
     status: str
     leads: int = 0
     revenue: float = 0.0
-    
-    # Correção Pydantic V2
-    model_config = ConfigDict(from_attributes=True)
+    class Config:
+        from_attributes = True
 
 class PlanoCreate(BaseModel):
     bot_id: int
@@ -988,14 +1080,14 @@ class PlanoCreate(BaseModel):
 # --- Adicione logo após a classe PlanoCreate ---
 # 👇 COLE ISSO LOGO ABAIXO DA CLASS 'PlanoCreate'
 # COLE AQUI (LOGO APÓS AS CLASSES INICIAIS)
-# ✅ CLASSE PLANOUPDATE (Corrigida com ConfigDict)
 class PlanoUpdate(BaseModel):
     nome_exibicao: Optional[str] = None
     preco: Optional[float] = None
     dias_duracao: Optional[int] = None
     
-    # Correção Pydantic V2
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    # Adiciona essa config para permitir que o Pydantic ignore tipos estranhos se possível
+    class Config:
+        arbitrary_types_allowed = True
 class FlowUpdate(BaseModel):
     msg_boas_vindas: str
     media_url: Optional[str] = None
@@ -1183,7 +1275,16 @@ class RemarketingSend(BaseModel):
     specific_user_id: Optional[str] = None
 
 @app.post("/api/admin/bots/{bot_id}/remarketing/send")
-def send_remarketing(bot_id: int, data: RemarketingSend, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def send_remarketing(
+    bot_id: int, 
+    data: RemarketingSend, 
+    background_tasks: BackgroundTasks, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+
     try:
         logger.info(f"📢 Iniciando Remarketing para Bot {bot_id} | Target: {data.target}")
         
@@ -1302,26 +1403,30 @@ class PixCreateRequest(BaseModel):
     tem_order_bump: bool = False
 
 # =========================================================
-# 1. GERAÇÃO DE PIX (COM LIMPEZA DE DADOS)
-# =========================================================
-# =========================================================
-# 1. GERAÇÃO DE PIX (COM LIMPEZA)
+# 1. GERAÇÃO DE PIX (COM SPLIT E WEBHOOK CORRIGIDO)
 # =========================================================
 @app.post("/api/pagamento/pix")
 def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
     try:
-        logger.info(f"💰 Iniciando pagamento para: {data.first_name} (R$ {data.valor})")
-        bot_atual = db.query(Bot).filter(Bot.id == data.bot_id).first()
-        pushin_token = bot_atual.pushin_token if bot_atual else None
+        logger.info(f"💰 Iniciando pagamento com SPLIT para: {data.first_name} (R$ {data.valor})")
         
+        # 1. Buscar o Bot e o Dono (Membro)
+        bot_atual = db.query(Bot).filter(Bot.id == data.bot_id).first()
+        if not bot_atual:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+
+        # 2. Definir Token da API (Prioridade: Bot > Config > Env)
+        pushin_token = bot_atual.pushin_token 
         if not pushin_token:
             config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
             pushin_token = config_sys.value if (config_sys and config_sys.value) else os.getenv("PUSHIN_PAY_TOKEN")
 
+        # Tratamento de usuário anonimo
         user_clean = str(data.username).strip().lower().replace("@", "") if data.username else "anonimo"
         tid_clean = str(data.telegram_id).strip()
         if not tid_clean.isdigit(): tid_clean = user_clean
 
+        # Modo Teste/Sem Token (Gera PIX Fake)
         if not pushin_token:
             fake_txid = str(uuid.uuid4())
             novo_pedido = Pedido(
@@ -1333,18 +1438,70 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             db.commit()
             return {"txid": fake_txid, "copia_cola": "pix-fake", "qr_code": "https://fake.com/qr.png"}
 
+        # 3. LÓGICA DE SPLIT E TAXAS
+        valor_total_centavos = int(data.valor * 100) # Valor da venda em centavos
+        
+        # ID DA SUA CONTA PRINCIPAL (ZENYX)
+        ADMIN_PUSHIN_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
+        
+        # Pegar dados do Dono do Bot
+        membro_dono = bot_atual.owner
+        
+        # Definir a Taxa (Padrão 60 centavos ou valor personalizado do usuário)
+        taxa_plataforma = 60 # Default
+        if membro_dono and membro_dono.taxa_venda:
+            taxa_plataforma = membro_dono.taxa_venda
+            
+        # Regra de Segurança: Taxa não pode ser maior que 50% (Regra Pushin)
+        if taxa_plataforma > (valor_total_centavos * 0.5):
+            taxa_plataforma = int(valor_total_centavos * 0.5)
+
+        # 👇👇👇 CORREÇÃO DA URL DO WEBHOOK AQUI 👇👇👇
+        # 1. Pega o domínio (pode vir com https ou sem, com barra no final ou sem)
+        raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
+        
+        # 2. Limpa TUDO (tira http, https e barras do final)
+        clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
+        
+        # 3. Reconstrói a URL do jeito certo (Garante https único e a rota correta)
+        webhook_url_final = f"https://{clean_domain}/api/webhooks/pushinpay"
+        
+        logger.info(f"🔗 Webhook Configurado: {webhook_url_final}")
+
         url = "https://api.pushinpay.com.br/api/pix/cashIn"
         headers = { "Authorization": f"Bearer {pushin_token}", "Content-Type": "application/json", "Accept": "application/json" }
-        domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testes-production.up.railway.app")
-        if domain.startswith("https://"): domain = domain.replace("https://", "")
         
         payload = {
-            "value": int(data.valor * 100),
-            "webhook_url": f"https://{domain}/webhook/pix",
+            "value": valor_total_centavos,
+            "webhook_url": webhook_url_final, # Usando a URL corrigida e limpa
             "external_reference": f"bot_{data.bot_id}_{user_clean}_{int(time.time())}"
         }
 
+        # 4. APLICAR SPLIT SE O MEMBRO TIVER CONTA CONFIGURADA
+        if membro_dono and membro_dono.pushin_pay_id:
+            valor_membro = valor_total_centavos - taxa_plataforma
+            
+            payload["split"] = [
+                {
+                    "receiver_id": ADMIN_PUSHIN_ID, # Sua Conta (Recebe a Taxa)
+                    "amount": taxa_plataforma,
+                    "liable": True,
+                    "charge_processing_fee": True # Você assume a taxa de processamento do Pix sobre sua parte?
+                },
+                {
+                    "receiver_id": membro_dono.pushin_pay_id, # Conta do Membro (Recebe o Resto)
+                    "amount": valor_membro,
+                    "liable": False,
+                    "charge_processing_fee": False
+                }
+            ]
+            logger.info(f"🔀 Split Configurado: Admin={taxa_plataforma}, Membro={valor_membro}")
+        else:
+            logger.warning(f"⚠️ Membro dono do bot {data.bot_id} não tem Pushin ID configurado. Sem split.")
+
+        # Enviar Requisição
         req = requests.post(url, json=payload, headers=headers)
+        
         if req.status_code in [200, 201]:
             resp = req.json()
             txid = str(resp.get('id') or resp.get('txid'))
@@ -1362,6 +1519,7 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         else:
             logger.error(f"Erro PushinPay: {req.text}")
             raise HTTPException(status_code=400, detail="Erro Gateway")
+            
     except Exception as e:
         logger.error(f"Erro fatal PIX: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1375,112 +1533,6 @@ def check_status(txid: str, db: Session = Depends(get_db)):
 # =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO
 # =========================================================
-
-# =========================================================
-# ROTAS DE LOGIN E REGISTRO COM CLOUDFLARE TURNSTILE
-# =========================================================
-# Cole estas rotas no seu main.py
-# =========================================================
-
-# 🔑 SUBSTITUA pela sua Secret Key do Cloudflare Turnstile
-TURNSTILE_SECRET_KEY = "0x4AAAAAACOUmpPNTu0O44Tfoa_r8qOZzJs"
-
-def verify_turnstile(token: str) -> bool:
-    """
-    Verifica token do Cloudflare Turnstile
-    
-    Returns:
-        True se verificação passou
-        False se falhou
-    """
-    try:
-        response = requests.post(
-            'https://challenges.cloudflare.com/turnstile/v0/siteverify',
-            data={
-                'secret': TURNSTILE_SECRET_KEY,
-                'response': token
-            },
-            timeout=5
-        )
-        
-        result = response.json()
-        success = result.get('success', False)
-        
-        if success:
-            logger.info("✅ Turnstile: Verificação bem-sucedida")
-        else:
-            logger.warning(f"❌ Turnstile: Verificação falhou - {result.get('error-codes', [])}")
-        
-        return success
-        
-    except Exception as e:
-        logger.error(f"❌ Erro ao verificar Turnstile: {e}")
-        return False
-
-
-# =========================================================
-# 🔐 ROTA DE LOGIN COM TURNSTILE (VERSÃO FINAL)
-# =========================================================
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
-    turnstile_token: str
-
-@app.post("/api/auth/login")
-def login(data: LoginRequest, request: Request, db: Session = Depends(get_db)):
-    """Login com Turnstile - Versão Corrigida"""
-    try:
-        logger.info("🔐 LOGIN: Iniciando...")
-        logger.info(f"👤 Username: {data.username}")
-        
-        # Verifica Turnstile
-        logger.info("🛡️ Verificando Turnstile...")
-        if not verify_turnstile(data.turnstile_token):
-            logger.error("❌ Turnstile falhou!")
-            raise HTTPException(status_code=400, detail="Verificação de segurança falhou")
-        
-        logger.info("✅ Turnstile OK")
-        
-        # Busca usuário
-        from database import User
-        user = db.query(User).filter(User.username == data.username).first()
-        
-        if not user:
-            logger.error(f"❌ Usuário não encontrado: {data.username}")
-            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
-        
-        # Verifica senha
-        if not verify_password(data.password, user.password_hash):
-            logger.error("❌ Senha incorreta")
-            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
-        
-        logger.info("✅ Credenciais OK")
-        
-        # Gera token
-        access_token = create_access_token(
-            data={"sub": user.username, "user_id": user.id},
-            expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        )
-        
-        logger.info(f"✅ LOGIN SUCESSO: {user.username}")
-        
-        return {
-            "access_token": access_token,
-            "token_type": "bearer",
-            "user_id": user.id,
-            "username": user.username,
-            "full_name": user.full_name,
-            "email": user.email
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ ERRO: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail="Erro interno")
 
 # =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
@@ -1548,6 +1600,133 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
         "username": new_user.username
     }
 
+# =========================================================
+# 🔐 ROTA DE LOGIN COM TURNSTILE
+# =========================================================
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    turnstile_token: str
+
+@app.post("/api/auth/login")
+def login(data: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    """
+    Autentica usuário com verificação Turnstile
+    """
+    try:
+        logger.info("=" * 60)
+        logger.info("🔐 LOGIN: Requisição recebida")
+        logger.info(f"👤 Username: {data.username}")
+        
+        # 🛡️ ETAPA 1: Verificar Turnstile
+        logger.info("🛡️ Verificando Cloudflare Turnstile...")
+        
+        if not verify_turnstile(data.turnstile_token):
+            raise HTTPException(
+                status_code=400,
+                detail="Verificação de segurança falhou. Tente novamente."
+            )
+        
+        logger.info("✅ Turnstile verificado com sucesso")
+        
+        # 🔐 ETAPA 2: Verificar credenciais
+        logger.info("🔍 Buscando usuário no banco...")
+        from database import User
+        
+        user = db.query(User).filter(User.username == data.username).first()
+        
+        if not user:
+            logger.warning(f"❌ Usuário não encontrado: {data.username}")
+            
+            # 📋 AUDITORIA: Tentativa de login com usuário inexistente
+            log_action(
+                db=db,
+                user_id=0,
+                username=data.username,
+                action="login_failed",
+                resource_type="auth",
+                description=f"Tentativa de login falhou: usuário não encontrado",
+                success=False,
+                error_message="Usuário não encontrado",
+                ip_address=get_client_ip(request),
+                user_agent=request.headers.get("user-agent")
+            )
+            
+            raise HTTPException(
+                status_code=401,
+                detail="Usuário ou senha incorretos"
+            )
+        
+        # Verifica senha
+        if not verify_password(data.password, user.password_hash):
+            logger.warning(f"❌ Senha incorreta para: {data.username}")
+            
+            # 📋 AUDITORIA: Senha incorreta
+            log_action(
+                db=db,
+                user_id=user.id,
+                username=user.username,
+                action="login_failed",
+                resource_type="auth",
+                description=f"Tentativa de login falhou: senha incorreta",
+                success=False,
+                error_message="Senha incorreta",
+                ip_address=get_client_ip(request),
+                user_agent=request.headers.get("user-agent")
+            )
+            
+            raise HTTPException(
+                status_code=401,
+                detail="Usuário ou senha incorretos"
+            )
+        
+        logger.info(f"✅ Credenciais válidas para: {user.username}")
+        
+        # 📋 AUDITORIA: Login bem-sucedido
+        log_action(
+            db=db,
+            user_id=user.id,
+            username=user.username,
+            action="login_success",
+            resource_type="auth",
+            description=f"Login bem-sucedido com Turnstile",
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent")
+        )
+        
+        # 🎫 ETAPA 3: Gerar JWT
+        logger.info("🎫 Gerando token JWT...")
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user.username, "user_id": user.id},
+            expires_delta=access_token_expires
+        )
+        
+        # 📦 ETAPA 4: Retornar dados
+        response_data = {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_id": user.id,
+            "username": user.username
+        }
+        
+        logger.info(f"✅ LOGIN BEM-SUCEDIDO: {user.username}")
+        logger.info("=" * 60)
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ ERRO no login: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail="Erro interno no servidor"
+        )
+
 @app.get("/api/auth/me")
 async def get_current_user_info(current_user = Depends(get_current_user)):
     """
@@ -1565,6 +1744,7 @@ async def get_current_user_info(current_user = Depends(get_current_user)):
 
 # 👇 COLE ISSO LOGO APÓS A FUNÇÃO get_current_user_info TERMINAR
 
+# 🆕 ROTA PARA O MEMBRO ATUALIZAR SEU PRÓPRIO PERFIL FINANCEIRO
 # 🆕 ROTA PARA O MEMBRO ATUALIZAR SEU PRÓPRIO PERFIL FINANCEIRO
 @app.put("/api/auth/profile")
 def update_own_profile(
@@ -1608,74 +1788,127 @@ def configurar_menu_bot(token):
 # ⚙️ GESTÃO DE BOTS
 # ===========================
 
-@app.post("/api/admin/bots", response_model=BotResponse)
-def criar_bot(bot_data: BotCreate, db: Session = Depends(get_db)):
-    if db.query(Bot).filter(Bot.token == bot_data.token).first():
-        raise HTTPException(status_code=400, detail="Token já cadastrado.")
+# =========================================================
+# 🤖 ROTAS DE BOTS (ATUALIZADAS COM AUDITORIA 🆕)
+# =========================================================
 
+@app.post("/api/admin/bots")
+def criar_bot(
+    bot_data: BotCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Cria um novo bot e atribui automaticamente ao usuário logado
+    🆕 Agora com log de auditoria
+    """
     try:
-        tb = telebot.TeleBot(bot_data.token)
-        bot_info = tb.get_me()
-        username = bot_info.username if hasattr(bot_info, 'username') else None
+        novo_bot = Bot(
+            nome=bot_data.nome,
+            token=bot_data.token,
+            id_canal_vip=bot_data.id_canal_vip,
+            admin_principal_id=bot_data.admin_principal_id,
+            suporte_username=bot_data.suporte_username,
+            owner_id=current_user.id,  # 🔒 Atribui automaticamente
+            status="ativo"
+        )
         
-        # Configura webhook
-        public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
-        if public_url:
-            webhook_url = f"https://{public_url}/webhook/{bot_data.token}"
-            tb.set_webhook(url=webhook_url)
+        db.add(novo_bot)
+        db.commit()
+        db.refresh(novo_bot)
         
-        # 🔥 CONFIGURA MENU
-        configurar_menu_bot(bot_data.token)
+        # 📋 AUDITORIA: Bot criado
+        log_action(
+            db=db,
+            user_id=current_user.id,
+            username=current_user.username,
+            action="bot_created",
+            resource_type="bot",
+            resource_id=novo_bot.id,
+            description=f"Criou bot '{novo_bot.nome}'",
+            details={
+                "bot_name": novo_bot.nome,
+                "canal_vip": novo_bot.id_canal_vip,
+                "status": novo_bot.status
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent")
+        )
         
-        status = "ativo"
+        logger.info(f"✅ Bot criado: {novo_bot.nome} (Owner: {current_user.username})")
+        return {"id": novo_bot.id, "nome": novo_bot.nome, "status": "criado"}
+        
     except Exception as e:
+        db.rollback()
+        
+        # 📋 AUDITORIA: Falha ao criar bot
+        log_action(
+            db=db,
+            user_id=current_user.id,
+            username=current_user.username,
+            action="bot_create_failed",
+            resource_type="bot",
+            description=f"Falha ao criar bot '{bot_data.nome}'",
+            success=False,
+            error_message=str(e),
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent")
+        )
+        
         logger.error(f"Erro ao criar bot: {e}")
-        raise HTTPException(status_code=400, detail="Token inválido ou erro ao conectar.")
-
-    novo_bot = Bot(
-        nome=bot_data.nome,
-        token=bot_data.token,
-        username=username,
-        id_canal_vip=bot_data.id_canal_vip,
-        status=status,
-        admin_principal_id=bot_data.admin_principal_id,
-        suporte_username=bot_data.suporte_username # 🔥 SALVA
-    )
-    db.add(novo_bot)
-    db.commit()
-    db.refresh(novo_bot)
-    
-    return {
-        "id": novo_bot.id,
-        "nome": novo_bot.nome,
-        "token": novo_bot.token,
-        "username": novo_bot.username,
-        "id_canal_vip": novo_bot.id_canal_vip,
-        "admin_principal_id": novo_bot.admin_principal_id,
-        "status": novo_bot.status,
-        "leads": 0,
-        "revenue": 0.0,
-        "created_at": novo_bot.created_at
-    }
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/admin/bots/{bot_id}")
-def update_bot(bot_id: int, dados: BotUpdate, db: Session = Depends(get_db)):
-    bot_db = db.query(Bot).filter(Bot.id == bot_id).first()
-    if not bot_db: raise HTTPException(404, "Bot não encontrado")
+def update_bot(
+    bot_id: int, 
+    dados: BotUpdate, 
+    request: Request,  # 🆕 ADICIONADO para auditoria
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🆕 ADICIONADO para auditoria e verificação
+):
+    """
+    Atualiza bot (MANTÉM TODA A LÓGICA ORIGINAL + AUDITORIA 🆕)
+    """
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    bot_db = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # Guarda valores antigos para o log de auditoria
+    old_values = {
+        "nome": bot_db.nome,
+        "token": "***" if bot_db.token else None,  # Não loga token completo
+        "canal_vip": bot_db.id_canal_vip,
+        "admin_principal": bot_db.admin_principal_id,
+        "suporte": bot_db.suporte_username,
+        "status": bot_db.status
+    }
     
     old_token = bot_db.token
+    changes = {}  # Rastreia mudanças para auditoria
 
     # 1. Atualiza campos administrativos
-    if dados.id_canal_vip: bot_db.id_canal_vip = dados.id_canal_vip
-    if dados.admin_principal_id is not None: bot_db.admin_principal_id = dados.admin_principal_id
-    if dados.suporte_username is not None: bot_db.suporte_username = dados.suporte_username # 🔥 ATUALIZA
+    if dados.id_canal_vip and dados.id_canal_vip != bot_db.id_canal_vip:
+        changes["canal_vip"] = {"old": bot_db.id_canal_vip, "new": dados.id_canal_vip}
+        bot_db.id_canal_vip = dados.id_canal_vip
     
-    # 2. LÓGICA DE TROCA DE TOKEN
+    if dados.admin_principal_id is not None and dados.admin_principal_id != bot_db.admin_principal_id:
+        changes["admin_principal"] = {"old": bot_db.admin_principal_id, "new": dados.admin_principal_id}
+        bot_db.admin_principal_id = dados.admin_principal_id
+    
+    if dados.suporte_username is not None and dados.suporte_username != bot_db.suporte_username:
+        changes["suporte"] = {"old": bot_db.suporte_username, "new": dados.suporte_username}
+        bot_db.suporte_username = dados.suporte_username
+    
+    # 2. LÓGICA DE TROCA DE TOKEN (MANTIDA INTACTA)
     if dados.token and dados.token != old_token:
         try:
             logger.info(f"🔄 Detectada troca de token para o bot ID {bot_id}...")
             new_tb = telebot.TeleBot(dados.token)
             bot_info = new_tb.get_me()
+            
+            changes["token"] = {"old": "***", "new": "*** (alterado)"}
+            changes["nome_via_api"] = {"old": bot_db.nome, "new": bot_info.first_name}
+            changes["username_via_api"] = {"old": bot_db.username, "new": bot_info.username}
             
             bot_db.token = dados.token
             bot_db.nome = bot_info.first_name
@@ -1684,35 +1917,118 @@ def update_bot(bot_id: int, dados: BotUpdate, db: Session = Depends(get_db)):
             try:
                 old_tb = telebot.TeleBot(old_token)
                 old_tb.delete_webhook()
-            except: pass
+            except: 
+                pass
 
-            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-gbs-testes-production.up.railway.app")
-            if public_url.startswith("https://"): public_url = public_url.replace("https://", "")
+            public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "https://zenyx-gbs-testesv1-production.up.railway.app")
+            if public_url.startswith("https://"): 
+                public_url = public_url.replace("https://", "")
             
             webhook_url = f"https://{public_url}/webhook/{dados.token}"
             new_tb.set_webhook(url=webhook_url)
             
             bot_db.status = "ativo"
+            changes["status"] = {"old": old_values["status"], "new": "ativo"}
             
         except Exception as e:
+            # 📋 AUDITORIA: Falha ao trocar token
+            log_action(
+                db=db,
+                user_id=current_user.id,
+                username=current_user.username,
+                action="bot_token_change_failed",
+                resource_type="bot",
+                resource_id=bot_id,
+                description=f"Falha ao trocar token do bot '{bot_db.nome}'",
+                success=False,
+                error_message=str(e),
+                ip_address=get_client_ip(request),
+                user_agent=request.headers.get("user-agent")
+            )
             raise HTTPException(status_code=400, detail=f"Token inválido: {str(e)}")
             
     else:
-        if dados.nome: bot_db.nome = dados.nome
+        # Se não trocou token, permite atualizar nome manualmente
+        if dados.nome and dados.nome != bot_db.nome:
+            changes["nome"] = {"old": bot_db.nome, "new": dados.nome}
+            bot_db.nome = dados.nome
     
-    # 🔥 ATUALIZA O MENU SEMPRE QUE SALVAR
-    configurar_menu_bot(bot_db.token)
+    # 🔥 ATUALIZA O MENU SEMPRE QUE SALVAR (MANTIDO INTACTO)
+    try:
+        configurar_menu_bot(bot_db.token)
+    except Exception as e:
+        logger.warning(f"⚠️ Erro ao configurar menu do bot: {e}")
     
     db.commit()
     db.refresh(bot_db)
+    
+    # 📋 AUDITORIA: Bot atualizado com sucesso
+    log_action(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="bot_updated",
+        resource_type="bot",
+        resource_id=bot_id,
+        description=f"Atualizou bot '{bot_db.nome}'",
+        details={"changes": changes} if changes else {"message": "Nenhuma alteração detectada"},
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent")
+    )
+    
+    logger.info(f"✅ Bot atualizado: {bot_db.nome} (Owner: {current_user.username})")
     return {"status": "ok", "msg": "Bot atualizado com sucesso"}
 
-# --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
+@app.delete("/api/admin/bots/{bot_id}")
+def deletar_bot(
+    bot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Deleta bot apenas se pertencer ao usuário
+    🆕 Agora com log de auditoria
+    """
+    bot = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    nome_bot = bot.nome
+    canal_vip = bot.id_canal_vip
+    username = bot.username
+    
+    db.delete(bot)
+    db.commit()
+    
+    # 📋 AUDITORIA: Bot deletado
+    log_action(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="bot_deleted",
+        resource_type="bot",
+        resource_id=bot_id,
+        description=f"Deletou bot '{nome_bot}'",
+        details={
+            "bot_name": nome_bot,
+            "username": username,
+            "canal_vip": canal_vip
+        },
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent")
+    )
+    
+    logger.info(f"🗑 Bot deletado: {nome_bot} (Owner: {current_user.username})")
+    return {"status": "deletado", "bot_nome": nome_bot}
+
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 @app.post("/api/admin/bots/{bot_id}/toggle")
-def toggle_bot(bot_id: int, db: Session = Depends(get_db)):
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
-    if not bot: raise HTTPException(404, "Bot não encontrado")
+def toggle_bot(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE PERTENCE AO USUÁRIO
+    bot = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
     # Inverte o status
     novo_status = "ativo" if bot.status != "ativo" else "pausado"
@@ -1722,71 +2038,42 @@ def toggle_bot(bot_id: int, db: Session = Depends(get_db)):
     # 🔔 Notifica Admin (EM HTML)
     try:
         emoji = "🟢" if novo_status == "ativo" else "🔴"
-        # 🔥 Texto formatado com tags HTML
         msg = f"{emoji} <b>STATUS DO BOT ALTERADO</b>\n\nO bot <b>{bot.nome}</b> agora está: <b>{novo_status.upper()}</b>"
         notificar_admin_principal(bot, msg)
     except Exception as e:
         logger.error(f"Erro ao notificar admin sobre toggle: {e}")
     
+    logger.info(f"🔄 Bot toggled: {bot.nome} -> {novo_status} (Owner: {current_user.username})")
+    
     return {"status": novo_status}
 
-# --- NOVA ROTA: EXCLUIR BOT ---
-# --- NOVA ROTA: EXCLUIR BOT (COM LIMPEZA TOTAL) ---
-@app.delete("/api/admin/bots/{bot_id}")
-def deletar_bot(bot_id: int, db: Session = Depends(get_db)):
-    bot_db = db.query(Bot).filter(Bot.id == bot_id).first()
-    if not bot_db:
-        raise HTTPException(status_code=404, detail="Bot não encontrado")
-    
-    try:
-        # 1. Tenta remover o Webhook do Telegram para limpar no servidor deles
-        try:
-            tb = telebot.TeleBot(bot_db.token)
-            tb.delete_webhook()
-        except:
-            pass # Se der erro (ex: token inválido), continua e apaga do banco
-        
-        # 2. LIMPEZA PESADA (Exclui manualmente os dependentes para evitar erro de integridade)
-        # Apaga PEDIDOS vinculados
-        db.query(Pedido).filter(Pedido.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # Apaga LEADS vinculados
-        db.query(Lead).filter(Lead.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # Apaga CAMPANHAS de Remarketing vinculadas
-        db.query(RemarketingCampaign).filter(RemarketingCampaign.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # 3. Apaga o Bot (Planos, Fluxos e Admins já caem por cascade)
-        db.delete(bot_db)
-        db.commit()
-        
-        logger.info(f"🗑️ Bot {bot_id} e todos os seus dados foram excluídos com sucesso.")
-        return {"status": "deleted", "msg": "Bot e todos os dados vinculados removidos com sucesso"}
-        
-    except Exception as e:
-        db.rollback() # Desfaz se der erro no meio do caminho
-        logger.error(f"Erro ao deletar bot {bot_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro interno ao excluir bot: {str(e)}")
-
 # =========================================================
-# 🛡️ GESTÃO DE ADMINISTRADORES (FASE 2 - COM EDIÇÃO)
+# 🛡️ GESTÃO DE ADMINISTRADORES (BLINDADO)
 # =========================================================
 
 @app.get("/api/admin/bots/{bot_id}/admins")
-def listar_admins(bot_id: int, db: Session = Depends(get_db)):
-    """Lista todos os admins de um bot específico"""
+def listar_admins(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
     admins = db.query(BotAdmin).filter(BotAdmin.bot_id == bot_id).all()
     return admins
 
 @app.post("/api/admin/bots/{bot_id}/admins")
-def adicionar_admin(bot_id: int, dados: BotAdminCreate, db: Session = Depends(get_db)):
-    """Adiciona um novo admin ao bot"""
-    # Verifica se o bot existe
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
-    if not bot:
-        raise HTTPException(status_code=404, detail="Bot não encontrado")
+def adicionar_admin(
+    bot_id: int, 
+    dados: BotAdminCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
-    # Verifica se já é admin
+    # Verifica duplicidade
     existente = db.query(BotAdmin).filter(
         BotAdmin.bot_id == bot_id, 
         BotAdmin.telegram_id == dados.telegram_id
@@ -1795,59 +2082,50 @@ def adicionar_admin(bot_id: int, dados: BotAdminCreate, db: Session = Depends(ge
     if existente:
         raise HTTPException(status_code=400, detail="Este ID já é administrador deste bot.")
     
-    novo_admin = BotAdmin(
-        bot_id=bot_id,
-        telegram_id=dados.telegram_id,
-        nome=dados.nome
-    )
+    novo_admin = BotAdmin(bot_id=bot_id, telegram_id=dados.telegram_id, nome=dados.nome)
     db.add(novo_admin)
     db.commit()
     db.refresh(novo_admin)
     return novo_admin
 
-# 🔥 [NOVO] Rota para Editar Admin Existente
 @app.put("/api/admin/bots/{bot_id}/admins/{admin_id}")
-def atualizar_admin(bot_id: int, admin_id: int, dados: BotAdminCreate, db: Session = Depends(get_db)):
-    """Atualiza o ID ou Nome de um administrador existente"""
-    admin_db = db.query(BotAdmin).filter(
-        BotAdmin.id == admin_id,
-        BotAdmin.bot_id == bot_id
-    ).first()
+def atualizar_admin(
+    bot_id: int, 
+    admin_id: int, 
+    dados: BotAdminCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
+    admin_db = db.query(BotAdmin).filter(BotAdmin.id == admin_id, BotAdmin.bot_id == bot_id).first()
     if not admin_db:
         raise HTTPException(status_code=404, detail="Administrador não encontrado")
     
-    # Verifica duplicidade (se mudar o ID para um que já existe)
-    if dados.telegram_id != admin_db.telegram_id:
-        existente = db.query(BotAdmin).filter(
-            BotAdmin.bot_id == bot_id, 
-            BotAdmin.telegram_id == dados.telegram_id
-        ).first()
-        if existente:
-            raise HTTPException(status_code=400, detail="Este Telegram ID já está em uso.")
-
-    # Atualiza os dados
+    # Atualiza dados
     admin_db.telegram_id = dados.telegram_id
     admin_db.nome = dados.nome
-    
     db.commit()
-    db.refresh(admin_db)
     return admin_db
 
 @app.delete("/api/admin/bots/{bot_id}/admins/{telegram_id}")
-def remover_admin(bot_id: int, telegram_id: str, db: Session = Depends(get_db)):
-    """Remove um admin pelo Telegram ID"""
-    admin_db = db.query(BotAdmin).filter(
-        BotAdmin.bot_id == bot_id,
-        BotAdmin.telegram_id == telegram_id
-    ).first()
+def remover_admin(
+    bot_id: int, 
+    telegram_id: str, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
+    admin_db = db.query(BotAdmin).filter(BotAdmin.bot_id == bot_id, BotAdmin.telegram_id == telegram_id).first()
     if not admin_db:
         raise HTTPException(status_code=404, detail="Administrador não encontrado")
     
     db.delete(admin_db)
     db.commit()
-    return {"status": "deleted", "msg": "Administrador removido com sucesso"}
+    return {"status": "deleted"}
 
 # --- NOVA ROTA: LISTAR BOTS ---
 
@@ -1861,12 +2139,18 @@ def remover_admin(bot_id: int, telegram_id: str, db: Session = Depends(get_db)):
 # ============================================================
 
 @app.get("/api/admin/bots")
-def listar_bots(db: Session = Depends(get_db)):
+def listar_bots(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
     """
     🔥 [CORRIGIDO] Lista bots + Revenue (Pagos/Expirados) + Suporte Username
+    🔒 PROTEGIDO: Apenas bots do usuário logado
     """
-    bots = db.query(Bot).all()
+    # 🔒 FILTRA APENAS BOTS DO USUÁRIO
+    bots = db.query(Bot).filter(Bot.owner_id == current_user.id).all()
     
+    # ... RESTO DO CÓDIGO PERMANECE IGUAL (não mude nada abaixo daqui)
     result = []
     for bot in bots:
         # 1. CONTAGEM DE LEADS ÚNICOS
@@ -1899,7 +2183,7 @@ def listar_bots(db: Session = Depends(get_db)):
             "username": bot.username or None,
             "id_canal_vip": bot.id_canal_vip,
             "admin_principal_id": bot.admin_principal_id,
-            "suporte_username": bot.suporte_username, # 🔥 AQUI: Retorna o campo para o Front
+            "suporte_username": bot.suporte_username,
             "status": bot.status,
             "leads": leads_count,
             "revenue": revenue,
@@ -1923,41 +2207,58 @@ def listar_bots(db: Session = Depends(get_db)):
 
 # 1. LISTAR PLANOS
 @app.get("/api/admin/bots/{bot_id}/plans")
-def list_plans(bot_id: int, db: Session = Depends(get_db)):
+def list_plans(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # ... RESTO DO CÓDIGO PERMANECE IGUAL
     planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
     return planos
 
 # 2. CRIAR PLANO (CORRIGIDO)
 @app.post("/api/admin/bots/{bot_id}/plans")
-async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
+async def create_plan(
+    bot_id: int, 
+    req: Request, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # ... RESTO DO CÓDIGO PERMANECE EXATAMENTE IGUAL (NÃO MUDE NADA ABAIXO)
     try:
         data = await req.json()
         logger.info(f"📝 Criando plano para Bot {bot_id}: {data}")
         
         # Tenta pegar preco_original, se não tiver, usa 0.0
         preco_orig = float(data.get("preco_original", 0.0))
+        
         # Se o preço original for 0, define como o dobro do atual (padrão de marketing)
         if preco_orig == 0:
             preco_orig = float(data.get("preco_atual", 0.0)) * 2
-
+        
         novo_plano = PlanoConfig(
             bot_id=bot_id,
             nome_exibicao=data.get("nome_exibicao", "Novo Plano"),
             descricao=data.get("descricao", f"Acesso de {data.get('dias_duracao')} dias"),
             preco_atual=float(data.get("preco_atual", 0.0)),
-            # Tenta usar 'preco_cheio' se 'preco_original' falhar (adaptação ao banco)
-            preco_cheio=preco_orig, 
+            preco_cheio=preco_orig,
             dias_duracao=int(data.get("dias_duracao", 30)),
-            key_id=f"plan_{bot_id}_{int(time.time())}" # Garante chave única
+            key_id=f"plan_{bot_id}_{int(time.time())}"
         )
         
         db.add(novo_plano)
         db.commit()
         db.refresh(novo_plano)
+        
         return novo_plano
-
+        
     except TypeError as te:
-        # Se der erro de coluna inexistente, tenta criar sem o campo problemático
         logger.warning(f"⚠️ Tentando criar plano sem 'preco_cheio' devido a erro: {te}")
         db.rollback()
         try:
@@ -1976,17 +2277,25 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
         except Exception as e2:
             logger.error(f"Erro fatal ao criar plano: {e2}")
             raise HTTPException(status_code=500, detail=str(e2))
-            
     except Exception as e:
         logger.error(f"Erro genérico ao criar plano: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # 3. EDITAR PLANO (ROTA UNIFICADA)
 @app.put("/api/admin/bots/{bot_id}/plans/{plano_id}")
-async def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = Depends(get_db)):
+async def update_plan(
+    bot_id: int, 
+    plano_id: int, 
+    req: Request, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
     try:
         data = await req.json()
-        logger.info(f"✏️ Editando plano {plano_id} do Bot {bot_id}: {data}")
+        logger.info(f"✏️ Editando plano {plano_id} do Bot {bot_id}: {data} (Owner: {current_user.username})")
         
         plano = db.query(PlanoConfig).filter(
             PlanoConfig.id == plano_id, 
@@ -2005,7 +2314,11 @@ async def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = De
         
         db.commit()
         db.refresh(plano)
+        
+        logger.info(f"✅ Plano {plano_id} atualizado com sucesso")
+        
         return plano
+        
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -2013,36 +2326,62 @@ async def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = De
         raise HTTPException(status_code=500, detail=str(e))
 
 # 4. DELETAR PLANO (COM SEGURANÇA)
-@app.delete("/api/admin/bots/{bot_id}/plans/{plano_id}")
-def delete_plan(bot_id: int, plano_id: int, db: Session = Depends(get_db)):
+@app.delete("/api/admin/plans/{pid}")
+def del_plano(
+    pid: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
     try:
-        plano = db.query(PlanoConfig).filter(
-            PlanoConfig.id == plano_id, 
-            PlanoConfig.bot_id == bot_id
-        ).first()
+        # 1. Busca o plano
+        p = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
+        if not p:
+            return {"status": "deleted", "msg": "Plano não existia"}
         
-        if not plano:
-            raise HTTPException(status_code=404, detail="Plano não encontrado.")
-            
-        # Desvincula de campanhas e pedidos para evitar erro de integridade
-        db.query(RemarketingCampaign).filter(RemarketingCampaign.plano_id == plano_id).update({RemarketingCampaign.plano_id: None})
-        db.query(Pedido).filter(Pedido.plano_id == plano_id).update({Pedido.plano_id: None})
+        # 🔒 VERIFICA SE O BOT DO PLANO PERTENCE AO USUÁRIO
+        verificar_bot_pertence_usuario(p.bot_id, current_user.id, db)
         
-        db.delete(plano)
+        # 2. Desvincula de Campanhas de Remarketing (Para não travar)
+        db.query(RemarketingCampaign).filter(RemarketingCampaign.plano_id == pid).update(
+            {RemarketingCampaign.plano_id: None},
+            synchronize_session=False
+        )
+        
+        # 3. Desvincula de Pedidos/Vendas (Para manter o histórico mas permitir deletar)
+        db.query(Pedido).filter(Pedido.plano_id == pid).update(
+            {Pedido.plano_id: None},
+            synchronize_session=False
+        )
+        
+        # 4. Deleta o plano
+        db.delete(p)
         db.commit()
+        
+        logger.info(f"🗑️ Plano deletado: {pid} (Owner: {current_user.username})")
+        
         return {"status": "deleted"}
+        
     except Exception as e:
-        logger.error(f"Erro ao deletar plano: {e}")
-        raise HTTPException(status_code=500, detail="Erro ao deletar plano.")
+        logger.error(f"Erro ao deletar plano {pid}: {e}")
+        raise HTTPException(status_code=400, detail=f"Erro ao deletar: {str(e)}")
 
 # =========================================================
 # 🛒 ORDER BUMP API
 # =========================================================
+# =========================================================
+# 🛒 ORDER BUMP API (BLINDADO)
+# =========================================================
 @app.get("/api/admin/bots/{bot_id}/order-bump")
-def get_order_bump(bot_id: int, db: Session = Depends(get_db)):
+def get_order_bump(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
     bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
     if not bump:
-        # Retorna objeto vazio padrão se não existir
         return {
             "ativo": False, "nome_produto": "", "preco": 0.0, "link_acesso": "",
             "msg_texto": "", "msg_media": "", 
@@ -2051,9 +2390,16 @@ def get_order_bump(bot_id: int, db: Session = Depends(get_db)):
     return bump
 
 @app.post("/api/admin/bots/{bot_id}/order-bump")
-def save_order_bump(bot_id: int, dados: OrderBumpCreate, db: Session = Depends(get_db)):
-    bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
+def save_order_bump(
+    bot_id: int, 
+    dados: OrderBumpCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
+    bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
     if not bump:
         bump = OrderBumpConfig(bot_id=bot_id)
         db.add(bump)
@@ -2062,15 +2408,14 @@ def save_order_bump(bot_id: int, dados: OrderBumpCreate, db: Session = Depends(g
     bump.nome_produto = dados.nome_produto
     bump.preco = dados.preco
     bump.link_acesso = dados.link_acesso
-    bump.autodestruir = dados.autodestruir  # <--- ADICIONE AQUI
+    bump.autodestruir = dados.autodestruir
     bump.msg_texto = dados.msg_texto
     bump.msg_media = dados.msg_media
     bump.btn_aceitar = dados.btn_aceitar
     bump.btn_recusar = dados.btn_recusar
     
     db.commit()
-    db.refresh(bump)
-    return {"status": "ok", "msg": "Order Bump salvo com sucesso"}
+    return {"status": "ok"}
 
 # =========================================================
 # 🗑️ ROTA DELETAR PLANO (COM DESVINCULAÇÃO SEGURA)
@@ -2107,36 +2452,52 @@ def del_plano(pid: int, db: Session = Depends(get_db)):
 
 # --- ROTA NOVA: ATUALIZAR PLANO ---
 @app.put("/api/admin/plans/{plan_id}")
-# --- ROTA NOVA: ATUALIZAR PLANO ---
-@app.put("/api/admin/plans/{plan_id}")
-def atualizar_plano(plan_id: int, dados: PlanoUpdate, db: Session = Depends(get_db)):
+def atualizar_plano(
+    plan_id: int, 
+    dados: PlanoUpdate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
     plano = db.query(PlanoConfig).filter(PlanoConfig.id == plan_id).first()
     if not plano:
         raise HTTPException(status_code=404, detail="Plano não encontrado")
     
+    # 🔒 VERIFICA SE O BOT DO PLANO PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(plano.bot_id, current_user.id, db)
+    
     # Atualiza apenas se o campo foi enviado e não é None
     if dados.nome_exibicao is not None:
         plano.nome_exibicao = dados.nome_exibicao
-    
     if dados.preco is not None:
         plano.preco_atual = dados.preco
-        plano.preco_cheio = dados.preco * 2 
-        
+        plano.preco_cheio = dados.preco * 2
     if dados.dias_duracao is not None:
         plano.dias_duracao = dados.dias_duracao
         plano.key_id = f"plan_{plano.bot_id}_{dados.dias_duracao}d"
         plano.descricao = f"Acesso de {dados.dias_duracao} dias"
-
+    
     db.commit()
     db.refresh(plano)
+    
+    logger.info(f"✏️ Plano atualizado (rota legada): {plano.nome_exibicao} (Owner: {current_user.username})")
+    
     return {"status": "success", "msg": "Plano atualizado"}
 
 # =========================================================
 # 💬 FLUXO DO BOT (V2)
 # =========================================================
 @app.get("/api/admin/bots/{bot_id}/flow")
-def obter_fluxo(bot_id: int, db: Session = Depends(get_db)):
+def obter_fluxo(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # ... RESTO DO CÓDIGO PERMANECE IGUAL
     fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+    
     if not fluxo:
         # Retorna padrão se não existir
         return {
@@ -2152,6 +2513,7 @@ def obter_fluxo(bot_id: int, db: Session = Depends(get_db)):
             "miniapp_url": "",
             "miniapp_btn_text": "ABRIR LOJA"
         }
+    
     return fluxo
 
 class FlowUpdate(BaseModel):
@@ -2168,7 +2530,16 @@ class FlowUpdate(BaseModel):
     miniapp_btn_text: Optional[str] = None
 
 @app.post("/api/admin/bots/{bot_id}/flow")
-def salvar_fluxo(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
+def salvar_fluxo(
+    bot_id: int, 
+    flow: FlowUpdate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # ... RESTO DO CÓDIGO PERMANECE EXATAMENTE IGUAL
     fluxo_db = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
     
     if not fluxo_db:
@@ -2191,14 +2562,25 @@ def salvar_fluxo(bot_id: int, flow: FlowUpdate, db: Session = Depends(get_db)):
     if flow.miniapp_btn_text: fluxo_db.miniapp_btn_text = flow.miniapp_btn_text
     
     db.commit()
-    logger.info(f"💾 Fluxo do Bot {bot_id} salvo com sucesso.")
+    
+    logger.info(f"💾 Fluxo do Bot {bot_id} salvo com sucesso (Owner: {current_user.username})")
+    
     return {"status": "saved"}
 
 # =========================================================
 # 🔗 ROTAS DE TRACKING (RASTREAMENTO)
 # =========================================================
+# =========================================================
+# 🔗 ROTAS DE TRACKING (RASTREAMENTO) - VERSÃO CORRIGIDA
+# =========================================================
+# ⚠️ SUBSTITUIR AS LINHAS 2468-2553 DO SEU main.py POR ESTE CÓDIGO
+# =========================================================
+
 @app.get("/api/admin/tracking/folders")
-def list_tracking_folders(db: Session = Depends(get_db)):
+def list_tracking_folders(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     """Lista pastas com contagem de links E métricas somadas"""
     try:
         folders = db.query(TrackingFolder).all()
@@ -2231,7 +2613,11 @@ def list_tracking_folders(db: Session = Depends(get_db)):
         return []
 
 @app.post("/api/admin/tracking/folders")
-def create_tracking_folder(dados: TrackingFolderCreate, db: Session = Depends(get_db)):
+def create_tracking_folder(
+    dados: TrackingFolderCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     try:
         nova_pasta = TrackingFolder(nome=dados.nome, plataforma=dados.plataforma)
         db.add(nova_pasta)
@@ -2243,11 +2629,19 @@ def create_tracking_folder(dados: TrackingFolderCreate, db: Session = Depends(ge
         raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
 
 @app.get("/api/admin/tracking/links/{folder_id}")
-def list_tracking_links(folder_id: int, db: Session = Depends(get_db)):
+def list_tracking_links(
+    folder_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     return db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id).all()
 
 @app.post("/api/admin/tracking/links")
-def create_tracking_link(dados: TrackingLinkCreate, db: Session = Depends(get_db)):
+def create_tracking_link(
+    dados: TrackingLinkCreate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     # Gera código aleatório se não informado
     if not dados.codigo:
         import random, string
@@ -2271,7 +2665,11 @@ def create_tracking_link(dados: TrackingLinkCreate, db: Session = Depends(get_db
     return {"status": "ok", "link": novo_link}
 
 @app.delete("/api/admin/tracking/folders/{fid}")
-def delete_folder(fid: int, db: Session = Depends(get_db)):
+def delete_folder(
+    fid: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     # Apaga links dentro da pasta primeiro
     db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
     db.query(TrackingFolder).filter(TrackingFolder.id == fid).delete()
@@ -2279,121 +2677,11 @@ def delete_folder(fid: int, db: Session = Depends(get_db)):
     return {"status": "deleted"}
 
 @app.delete("/api/admin/tracking/links/{lid}")
-def delete_link(lid: int, db: Session = Depends(get_db)):
-    db.query(TrackingLink).filter(TrackingLink.id == lid).delete()
-    db.commit()
-    return {"status": "deleted"}
-
-# =========================================================
-# 🧩 ROTAS DE PASSOS DINÂMICOS (FLOW V2)
-# =========================================================
-@app.get("/api/admin/bots/{bot_id}/flow/steps")
-def listar_passos_flow(bot_id: int, db: Session = Depends(get_db)):
-    return db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
-
-@app.post("/api/admin/bots/{bot_id}/flow/steps")
-def adicionar_passo_flow(bot_id: int, payload: FlowStepCreate, db: Session = Depends(get_db)):
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
-    if not bot: raise HTTPException(404, "Bot não encontrado")
-    
-    # Cria o novo passo
-    novo_passo = BotFlowStep(
-        bot_id=bot_id, step_order=payload.step_order,
-        msg_texto=payload.msg_texto, msg_media=payload.msg_media,
-        btn_texto=payload.btn_texto
-    )
-    db.add(novo_passo)
-    db.commit()
-    return {"status": "success"}
-
-@app.put("/api/admin/bots/{bot_id}/flow/steps/{step_id}")
-def atualizar_passo_flow(bot_id: int, step_id: int, dados: FlowStepUpdate, db: Session = Depends(get_db)):
-    """Atualiza um passo intermediário existente"""
-    passo = db.query(BotFlowStep).filter(
-        BotFlowStep.id == step_id,
-        BotFlowStep.bot_id == bot_id
-    ).first()
-    
-    if not passo:
-        raise HTTPException(status_code=404, detail="Passo não encontrado")
-    
-    # Atualiza apenas os campos enviados
-    if dados.msg_texto is not None:
-        passo.msg_texto = dados.msg_texto
-    if dados.msg_media is not None:
-        passo.msg_media = dados.msg_media
-    if dados.btn_texto is not None:
-        passo.btn_texto = dados.btn_texto
-    if dados.autodestruir is not None:
-        passo.autodestruir = dados.autodestruir
-    if dados.mostrar_botao is not None:
-        passo.mostrar_botao = dados.mostrar_botao
-    if dados.delay_seconds is not None:
-        passo.delay_seconds = dados.delay_seconds
-    
-    db.commit()
-    db.refresh(passo)
-    return {"status": "success", "passo": passo}
-
-
-@app.delete("/api/admin/bots/{bot_id}/flow/steps/{sid}")
-def remover_passo_flow(bot_id: int, sid: int, db: Session = Depends(get_db)):
-    passo = db.query(BotFlowStep).filter(BotFlowStep.id == sid, BotFlowStep.bot_id == bot_id).first()
-    if passo:
-        db.delete(passo)
-        db.commit()
-    return {"status": "deleted"}
-
-@app.post("/api/admin/tracking/folders")
-def create_tracking_folder(dados: TrackingFolderCreate, db: Session = Depends(get_db)):
-    try:
-        nova_pasta = TrackingFolder(nome=dados.nome, plataforma=dados.plataforma)
-        db.add(nova_pasta)
-        db.commit()
-        db.refresh(nova_pasta)
-        return {"status": "ok", "id": nova_pasta.id}
-    except Exception as e:
-        logger.error(f"Erro ao criar pasta: {e}")
-        raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
-
-@app.get("/api/admin/tracking/links/{folder_id}")
-def list_tracking_links(folder_id: int, db: Session = Depends(get_db)):
-    return db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id).all()
-
-@app.post("/api/admin/tracking/links")
-def create_tracking_link(dados: TrackingLinkCreate, db: Session = Depends(get_db)):
-    # Gera código aleatório se não informado
-    if not dados.codigo:
-        import random, string
-        chars = string.ascii_lowercase + string.digits
-        dados.codigo = ''.join(random.choice(chars) for _ in range(8))
-    
-    # Verifica duplicidade
-    exists = db.query(TrackingLink).filter(TrackingLink.codigo == dados.codigo).first()
-    if exists:
-        raise HTTPException(400, "Este código de rastreamento já existe.")
-        
-    novo_link = TrackingLink(
-        folder_id=dados.folder_id,
-        bot_id=dados.bot_id,
-        nome=dados.nome,
-        codigo=dados.codigo,
-        origem=dados.origem
-    )
-    db.add(novo_link)
-    db.commit()
-    return {"status": "ok", "link": novo_link}
-
-@app.delete("/api/admin/tracking/folders/{fid}")
-def delete_folder(fid: int, db: Session = Depends(get_db)):
-    # Apaga links dentro da pasta primeiro
-    db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
-    db.query(TrackingFolder).filter(TrackingFolder.id == fid).delete()
-    db.commit()
-    return {"status": "deleted"}
-
-@app.delete("/api/admin/tracking/links/{lid}")
-def delete_link(lid: int, db: Session = Depends(get_db)):
+def delete_link(
+    lid: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     db.query(TrackingLink).filter(TrackingLink.id == lid).delete()
     db.commit()
     return {"status": "deleted"}
@@ -2490,7 +2778,15 @@ def switch_bot_mode(bot_id: int, dados: BotModeUpdate, db: Session = Depends(get
 
 # 2. Salvar Configuração Global
 @app.post("/api/admin/bots/{bot_id}/miniapp/config")
-def save_miniapp_config(bot_id: int, dados: MiniAppConfigUpdate, db: Session = Depends(get_db)):
+def save_miniapp_config(
+    bot_id: int, 
+    dados: MiniAppConfigUpdate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH
+):
+    # 🔒 VERIFICA PROPRIEDADE
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+
     config = db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).first()
     
     if not config:
@@ -2610,112 +2906,20 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
         db.commit()
     return {"status": "deleted"}
 
-# 🔔 WEBHOOK PIX (INTELIGENTE: RESOLVE IDS + ENTREGA BUMP)
+# =========================================================
+# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO FINAL BLINDADA
+# =========================================================
+# =========================================================
+# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO FINAL COM NOTIFICAÇÕES
+# =========================================================
+# =========================================================
+# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO FINAL ÚNICA
 # =========================================================
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     print("🔔 WEBHOOK PIX CHEGOU!") 
     try:
-        body_bytes = await request.body()
-        body_str = body_bytes.decode("utf-8")
-        try: data = json.loads(body_str)
-        except: 
-            try: data = {k: v[0] for k, v in urllib.parse.parse_qs(body_str).items()}
-            except: return {"status": "ignored"}
-
-        raw_tx_id = data.get("id") or data.get("external_reference") or data.get("uuid")
-        tx_id = str(raw_tx_id).lower() if raw_tx_id else None
-        status_pix = str(data.get("status", "")).lower()
-        
-        if status_pix not in ["paid", "approved", "completed", "succeeded"]: return {"status": "ignored"}
-
-        pedido = db.query(Pedido).filter((Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)).first()
-        if not pedido or pedido.status in ["approved", "paid"]: return {"status": "ok"}
-
-        now = datetime.utcnow()
-        pedido.status = "approved" 
-        pedido.data_aprovacao = now
-        pedido.pagou_em = now
-        pedido.status_funil = 'fundo'
-        
-        if pedido.plano_id:
-            pid = int(pedido.plano_id) if str(pedido.plano_id).isdigit() else None
-            if pid:
-                plano_db = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
-                if plano_db and plano_db.dias_duracao and plano_db.dias_duracao < 90000:
-                    pedido.data_expiracao = now + timedelta(days=plano_db.dias_duracao)
-                    pedido.custom_expiration = pedido.data_expiracao
-
-        pedido.mensagem_enviada = False 
-        db.commit()
-        
-        sucesso_entrega = False
-        try:
-            bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
-            if bot_data:
-                tb = telebot.TeleBot(bot_data.token)
-                target_id = str(pedido.telegram_id).strip()
-                
-                # 🔥 AUTO-CORREÇÃO DE ID
-                if not target_id.isdigit():
-                    logger.info(f"⚠️ ID '{target_id}' não é numérico. Buscando Lead correspondente...")
-                    clean_user = str(pedido.username).lower().replace("@", "").strip()
-                    lead = db.query(Lead).filter(
-                        Lead.bot_id == pedido.bot_id,
-                        (func.lower(Lead.username) == clean_user) | (func.lower(Lead.username) == f"@{clean_user}")
-                    ).order_by(desc(Lead.created_at)).first()
-                    if lead and lead.user_id and lead.user_id.isdigit():
-                        logger.info(f"✅ ID Resolvido via Lead: {lead.user_id}")
-                        target_id = lead.user_id
-                        pedido.telegram_id = target_id
-                        db.commit()
-
-                if target_id.isdigit():
-                    try:
-                        # 1. ENTREGA PRINCIPAL
-                        canal_str = str(bot_data.id_canal_vip).strip()
-                        canal_id = int(canal_str) if canal_str.lstrip('-').isdigit() else canal_str
-                        try: tb.unban_chat_member(canal_id, int(target_id))
-                        except: pass
-                        
-                        convite = tb.create_chat_invite_link(chat_id=canal_id, member_limit=1, name=f"Venda {pedido.first_name}")
-                        val_txt = pedido.data_expiracao.strftime("%d/%m/%Y") if pedido.data_expiracao else "VITALÍCIO"
-                        
-                        msg = f"✅ <b>Pagamento Confirmado!</b>\n📅 Validade: <b>{val_txt}</b>\n\nSeu acesso:\n👉 {convite.invite_link}"
-                        tb.send_message(int(target_id), msg, parse_mode="HTML")
-                        
-                        # 🔥 2. ENTREGA DO ORDER BUMP (NOVO)
-                        if pedido.tem_order_bump:
-                            bump_conf = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == pedido.bot_id).first()
-                            if bump_conf and bump_conf.link_acesso:
-                                msg_bump = f"🎁 <b>BÔNUS: {bump_conf.nome_produto}</b>\n\nAqui está seu acesso extra:\n👉 {bump_conf.link_acesso}"
-                                tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
-                                logger.info("✅ Order Bump entregue!")
-
-                        sucesso_entrega = True
-                        logger.info(f"✅ Entrega realizada para ID: {target_id}")
-                    except Exception as e_send:
-                        logger.error(f"Erro envio Telegram: {e_send}")
-        except Exception as e_bot:
-            logger.error(f"Erro lógica bot: {e_bot}")
-
-        if sucesso_entrega:
-            pedido.mensagem_enviada = True
-            db.commit()
-
-        return {"status": "received"}
-    except Exception as e:
-        logger.error(f"Erro webhook: {e}")
-        return {"status": "error"}
-
-# =========================================================
-# 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO HTML BLINDADA
-# =========================================================
-@app.post("/webhook/pix")
-async def webhook_pix(request: Request, db: Session = Depends(get_db)):
-    print("🔔 WEBHOOK PIX CHEGOU!") 
-    try:
-        # 1. PEGA O CORPO BRUTO (Mais seguro contra erros de parsing)
+        # 1. PEGA O CORPO BRUTO
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8")
         
@@ -2739,7 +2943,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         # Status
         status_pix = str(data.get("status", "")).lower()
         
-        # 🔥 AQUI ESTÁ O FILTRO: SÓ PASSA SE FOR PAGO
+        # 🔥 FILTRO: SÓ PASSA SE FOR PAGO
         if status_pix not in ["paid", "approved", "completed", "succeeded"]:
             return {"status": "ignored"}
 
@@ -2783,105 +2987,124 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         pedido.custom_expiration = data_validade
         pedido.mensagem_enviada = True
         
-        # 🔥 Atualiza Funil (Para os gráficos funcionarem)
+        # 🔥 Atualiza Funil
         pedido.status_funil = 'fundo'
         pedido.pagou_em = now
         
-        db.commit()
-        
-        # 🔥 ATUALIZA ESTATÍSTICAS DE TRACKING (VENDAS/FATURAMENTO)
+        # 🔥 ATUALIZA TRACKING
         if pedido.tracking_id:
             try:
                 t_link = db.query(TrackingLink).filter(TrackingLink.id == pedido.tracking_id).first()
                 if t_link:
                     t_link.vendas += 1
                     t_link.faturamento += pedido.valor
-                    db.commit()
                     logger.info(f"📈 Tracking atualizado: {t_link.nome} (+R$ {pedido.valor})")
             except Exception as e_track:
                 logger.error(f"Erro ao atualizar tracking: {e_track}")
 
+        db.commit()
+
         texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
-        print(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
+        logger.info(f"✅ Pagamento aprovado! Pedido: {tx_id}")
         
-        # 6. ENTREGA E NOTIFICAÇÕES (EM HTML)
+        # 6. BUSCA O BOT
+        bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
+        
+        if not bot_data:
+            logger.error(f"❌ Bot {pedido.bot_id} não encontrado!")
+            return {"status": "ok", "msg": "Bot not found"}
+        
+        # --- A) ENTREGA PRODUTO PRINCIPAL ---
         try:
-            bot_data = db.query(Bot).filter(Bot.id == pedido.bot_id).first()
-            if bot_data:
-                tb = telebot.TeleBot(bot_data.token)
-                
-                # --- A) ENTREGA PRODUTO PRINCIPAL ---
-                try: 
-                    # Limpeza e Desbanimento
-                    canal_id = bot_data.id_canal_vip
-                    if str(canal_id).replace("-","").isdigit():
-                         canal_id = int(str(canal_id).strip())
+            tb = telebot.TeleBot(bot_data.token)
+            
+            # Tratamento do ID do Canal
+            raw_cid = str(bot_data.id_canal_vip).strip()
+            canal_id = int(raw_cid) if raw_cid.lstrip('-').isdigit() else raw_cid
 
-                    try: tb.unban_chat_member(canal_id, int(pedido.telegram_id))
-                    except: pass
+            # 1. Tenta desbanir antes
+            try: 
+                tb.unban_chat_member(canal_id, int(pedido.telegram_id))
+            except: 
+                pass
 
-                    # Gera Link Único
-                    link_acesso = None
-                    try:
-                        convite = tb.create_chat_invite_link(
-                            chat_id=canal_id, 
-                            member_limit=1, 
-                            name=f"Venda {pedido.first_name}"
-                        )
-                        link_acesso = convite.invite_link
-                    except Exception as e_link:
-                        logger.warning(f"Erro ao gerar link: {e_link}. Usando link salvo.")
-                        link_acesso = pedido.link_acesso 
-
-                    if link_acesso:
-                        msg_cliente = (
-                            f"✅ <b>Pagamento Confirmado!</b>\n"
-                            f"📅 Validade: <b>{texto_validade}</b>\n\n"
-                            f"Seu acesso exclusivo:\n👉 {link_acesso}"
-                        )
-                        tb.send_message(int(pedido.telegram_id), msg_cliente, parse_mode="HTML")
-                    else:
-                        tb.send_message(int(pedido.telegram_id), f"✅ <b>Pagamento Confirmado!</b>\nVocê já pode acessar o canal VIP.", parse_mode="HTML")
-
-                except Exception as e_main:
-                    logger.error(f"Erro na entrega principal: {e_main}")
-
-                # --- B) ENTREGA DO ORDER BUMP (HTML) ---
-                if pedido.tem_order_bump:
-                    logger.info(f"🎁 [PIX] Entregando Order Bump...")
-                    try:
-                        bump_config = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_data.id).first()
-                        if bump_config and bump_config.link_acesso:
-                            msg_bump = f"""🎁 <b>BÔNUS LIBERADO!</b>
-
-Você também garantiu acesso ao: 
-👉 <b>{bump_config.nome_produto}</b>
-
-🔗 <b>Acesse seu conteúdo extra abaixo:</b>
-{bump_config.link_acesso}"""
-                            tb.send_message(int(pedido.telegram_id), msg_bump, parse_mode="HTML")
-                    except Exception as e_bump:
-                        logger.error(f"Erro ao entregar Bump: {e_bump}")
-
-                # --- C) NOTIFICAÇÃO AO ADMIN (CORRIGIDO: USA FUNÇÃO GLOBAL) ---
-                # 🔥 Agora avisa o admin principal E os admins extras
-                msg_admin = (
-                    f"💰 <b>VENDA REALIZADA!</b>\n\n"
-                    f"🤖 Bot: <b>{bot_data.nome}</b>\n"
-                    f"👤 Cliente: {pedido.first_name} (@{pedido.username})\n"
-                    f"📦 Plano: {pedido.plano_nome}\n"
-                    f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
-                    f"📅 Vence em: {texto_validade}"
+            # 2. Gera Link Único
+            link_acesso = None
+            try:
+                convite = tb.create_chat_invite_link(
+                    chat_id=canal_id, 
+                    member_limit=1, 
+                    name=f"Venda {pedido.first_name}"
                 )
-                notificar_admin_principal(bot_data, msg_admin)
+                link_acesso = convite.invite_link
+            except Exception as e_link:
+                logger.warning(f"Erro ao gerar link único: {e_link}")
+                link_acesso = pedido.link_acesso 
 
-        except Exception as e_tg:
-            print(f"❌ Erro Telegram/Entrega: {e_tg}")
+            # 3. Envia Mensagem ao Cliente
+            if link_acesso:
+                msg_cliente = (
+                    f"✅ <b>Pagamento Confirmado!</b>\n\n"
+                    f"🎉 Parabéns! Seu acesso foi liberado.\n"
+                    f"📅 Validade: <b>{texto_validade}</b>\n\n"
+                    f"👇 <b>Toque no link para entrar:</b>\n"
+                    f"👉 {link_acesso}\n\n"
+                    f"<i>Este link é exclusivo para você.</i>"
+                )
+                tb.send_message(int(pedido.telegram_id), msg_cliente, parse_mode="HTML")
+                logger.info(f"✅ Cliente notificado: {pedido.telegram_id}")
+            else:
+                tb.send_message(
+                    int(pedido.telegram_id), 
+                    f"✅ <b>Pagamento Confirmado!</b>\nTente entrar no canal agora ou digite /start.", 
+                    parse_mode="HTML"
+                )
+
+        except Exception as e_entrega:
+            logger.error(f"❌ Erro na entrega principal: {e_entrega}")
+
+        # --- B) ENTREGA DO ORDER BUMP ---
+        if pedido.tem_order_bump:
+            logger.info(f"🎁 Entregando Order Bump...")
+            try:
+                bump_config = db.query(OrderBumpConfig).filter(
+                    OrderBumpConfig.bot_id == bot_data.id
+                ).first()
+                
+                if bump_config and bump_config.link_acesso:
+                    msg_bump = (
+                        f"🎁 <b>BÔNUS LIBERADO!</b>\n\n"
+                        f"Você também garantiu acesso ao:\n"
+                        f"👉 <b>{bump_config.nome_produto}</b>\n\n"
+                        f"🔗 <b>Acesse seu conteúdo extra abaixo:</b>\n"
+                        f"{bump_config.link_acesso}"
+                    )
+                    tb.send_message(int(pedido.telegram_id), msg_bump, parse_mode="HTML")
+                    
+            except Exception as e_bump:
+                logger.error(f"❌ Erro ao entregar Order Bump: {e_bump}")
+
+        # --- C) NOTIFICAÇÃO AO ADMIN ---
+        logger.info(f"📢 Enviando notificação de venda...")
+        
+        msg_admin = (
+            f"💰 <b>VENDA REALIZADA!</b>\n\n"
+            f"🤖 Bot: <b>{bot_data.nome}</b>\n"
+            f"👤 Cliente: {pedido.first_name} (@{pedido.username or 'sem username'})\n"
+            f"📦 Plano: {pedido.plano_nome}\n"
+            f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
+            f"📅 Vence em: {texto_validade}"
+        )
+        
+        # 🔥 USA A FUNÇÃO HELPER
+        notificar_admin_principal(bot_data, msg_admin)
 
         return {"status": "received"}
 
     except Exception as e:
-        print(f"❌ ERRO CRÍTICO NO WEBHOOK: {e}")
+        logger.error(f"❌ ERRO CRÍTICO NO WEBHOOK: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return {"status": "error"}
 
 # =========================================================
@@ -3265,7 +3488,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     # PIX DIRETO
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>PIX</b>...", parse_mode="HTML")
                     mytx = str(uuid.uuid4())
-                    pix = gerar_pix_pushinpay(plano.preco_atual, mytx)
+                    pix = gerar_pix_pushinpay(plano.preco_atual, mytx, bot_db.id, db)
+
                     
                     if pix:
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
@@ -3315,7 +3539,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 
                 msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
                 mytx = str(uuid.uuid4())
-                pix = gerar_pix_pushinpay(valor_final, mytx)
+                pix = gerar_pix_pushinpay(valor_final, mytx, bot_db.id, db)
                 
                 if pix:
                     qr = pix.get('qr_code_text') or pix.get('qr_code')
@@ -3357,7 +3581,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
                         msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
                         mytx = str(uuid.uuid4())
-                        pix = gerar_pix_pushinpay(preco_final, mytx)
+                        pix = gerar_pix_pushinpay(preco_final, mytx, bot_db.id, db)
                         
                         if pix:
                             qr = pix.get('qr_code_text') or pix.get('qr_code')
@@ -4230,135 +4454,248 @@ def delete_remarketing_history(history_id: int, db: Session = Depends(get_db)):
 # =========================================================
 # 📊 ROTA DE DASHBOARD V2 (COM FILTRO DE DATA)
 # =========================================================
+# =========================================================
+# 📊 ROTA DE DASHBOARD V2 (COM FILTRO DE DATA E SUPORTE ADMIN)
+# =========================================================
 @app.get("/api/admin/dashboard/stats")
 def dashboard_stats(
     bot_id: Optional[int] = None, 
     start_date: Optional[str] = None, 
     end_date: Optional[str] = None, 
-    db: Session = Depends(get_db)
-): 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     """
-    Dashboard V2: Suporta filtro por período.
-    🔥 CORREÇÃO: Inclui 'expired' no cálculo financeiro.
+    Dashboard com filtros de data e bot.
+    
+    🆕 LÓGICA ESPECIAL PARA SUPER ADMIN:
+    - Se for super admin com split: calcula faturamento pelos splits (Taxas)
+    - Se for usuário normal: calcula pelos próprios pedidos (Valor Bruto)
+    
+    ✅ CORREÇÃO: Retorna valores em CENTAVOS (frontend divide por 100)
     """
     try:
-        # 1. DEFINIÇÃO DO PERÍODO
-        agora = datetime.utcnow()
-        
-        if start_date and end_date:
-            dt_inicio = datetime.fromisoformat(start_date.replace('Z', '+00:00')).replace(hour=0, minute=0, second=0, tzinfo=None)
-            dt_fim = datetime.fromisoformat(end_date.replace('Z', '+00:00')).replace(hour=23, minute=59, second=59, tzinfo=None)
+        # Converte datas
+        if start_date:
+            start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
         else:
-            dt_inicio = datetime(agora.year, agora.month, 1)
-            dt_fim = agora
-
-        hoje_inicio = datetime(agora.year, agora.month, agora.day)
-
-        query_leads = db.query(Lead)
-        query_pedidos = db.query(Pedido)
-
+            start = datetime.utcnow() - timedelta(days=30)
+        
+        if end_date:
+            end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+        else:
+            end = datetime.utcnow()
+        
+        logger.info(f"📊 Dashboard Stats - Período: {start.date()} a {end.date()}")
+        
+        # 🔥 VERIFICA SE É SUPER ADMIN COM SPLIT
+        is_super_with_split = (
+            current_user.is_superuser and 
+            current_user.pushin_pay_id is not None and
+            current_user.pushin_pay_id != ""
+        )
+        
+        logger.info(f"📊 User: {current_user.username}, Super: {is_super_with_split}, Bot ID: {bot_id}")
+        
+        # ============================================
+        # 🎯 DEFINE QUAIS BOTS BUSCAR
+        # ============================================
         if bot_id:
-            query_leads = query_leads.filter(Lead.bot_id == bot_id)
-            query_pedidos = query_pedidos.filter(Pedido.bot_id == bot_id)
-
-        # Leads no período
-        leads_periodo = query_leads.filter(
-            Lead.created_at >= dt_inicio,
-            Lead.created_at <= dt_fim
-        ).count()
-
-        leads_hoje = query_leads.filter(Lead.created_at >= hoje_inicio).count()
-        
-        # ============================================================
-        # 💰 [CORRIGIDO] LISTA DE STATUS PAGOS (INCLUI EXPIRADO)
-        # ============================================================
-        status_pagos = ['paid', 'active', 'approved', 'completed', 'succeeded', 'expired']
-        
-        # Vendas no período selecionado
-        vendas_periodo = query_pedidos.filter(
-            Pedido.status.in_(status_pagos),
-            Pedido.created_at >= dt_inicio,
-            Pedido.created_at <= dt_fim
-        )
-        
-        # Total Faturamento
-        total_revenue = db.query(func.sum(Pedido.valor)).filter(
-            Pedido.status.in_(status_pagos), # 🔥 AGORA CONTA EXPIRADOS
-            Pedido.created_at >= dt_inicio,
-            Pedido.created_at <= dt_fim
-        )
-        if bot_id: total_revenue = total_revenue.filter(Pedido.bot_id == bot_id)
-        valor_total_revenue = total_revenue.scalar() or 0.0
-
-        # Assinantes (Transações no período)
-        total_transactions = vendas_periodo.count()
-        
-        # Assinantes Ativos Totais (Base geral - AQUI NÃO CONTA EXPIRADO, POIS É "ATIVO")
-        # Para "Ativos", mantemos a lógica antiga (sem expired)
-        status_ativos_reais = ['paid', 'active', 'approved', 'completed', 'succeeded']
-        total_active_users = db.query(Pedido).filter(Pedido.status.in_(status_ativos_reais))
-        if bot_id: total_active_users = total_active_users.filter(Pedido.bot_id == bot_id)
-        count_active_users = total_active_users.count()
-
-        # Ticket Médio
-        ticket_medio = (valor_total_revenue / total_transactions) if total_transactions > 0 else 0.0
-
-        # Vendas Hoje
-        sales_today_query = db.query(func.sum(Pedido.valor)).filter(
-            Pedido.status.in_(status_pagos), # 🔥 AGORA CONTA EXPIRADOS (Se expirou hoje, conta)
-            Pedido.created_at >= hoje_inicio
-        )
-        if bot_id: sales_today_query = sales_today_query.filter(Pedido.bot_id == bot_id)
-        valor_sales_today = sales_today_query.scalar() or 0.0
-
-        # Taxa de Conversão
-        universo_total = leads_periodo + total_transactions
-        conversao = (total_transactions / universo_total * 100) if universo_total > 0 else 0.0
-
-        # --- DADOS DO GRÁFICO ---
-        chart_data = []
-        delta = (dt_fim - dt_inicio).days
-        dias_para_grafico = min(delta + 1, 366)
-        
-        for i in range(dias_para_grafico):
-            data_loop = dt_inicio + timedelta(days=i)
-            data_loop_fim = data_loop + timedelta(days=1)
+            # Visão de bot único
+            bot = db.query(Bot).filter(
+                Bot.id == bot_id,
+                # Admin vê qualquer bot, User só vê o seu
+                (Bot.owner_id == current_user.id) if not current_user.is_superuser else True
+            ).first()
             
-            soma_dia = db.query(func.sum(Pedido.valor)).filter(
-                Pedido.status.in_(status_pagos), # 🔥 AGORA CONTA EXPIRADOS
-                Pedido.created_at >= data_loop,
-                Pedido.created_at < data_loop_fim
+            if not bot:
+                raise HTTPException(status_code=404, detail="Bot não encontrado")
+            
+            bots_ids = [bot_id]
+            
+        else:
+            # Visão global
+            if is_super_with_split:
+                # Admin vê TUDO (mas vamos filtrar se precisar depois)
+                # Para estatísticas de split, não precisamos filtrar bots específicos se for visão geral
+                bots_ids = [] # Lista vazia sinaliza "todos" na lógica abaixo
+            else:
+                # Usuário vê SEUS bots
+                user_bots = db.query(Bot.id).filter(Bot.owner_id == current_user.id).all()
+                bots_ids = [b.id for b in user_bots]
+        
+        # Se for usuário comum e não tiver bots, retorna zeros
+        if not is_super_with_split and not bots_ids and not bot_id:
+            logger.info(f"📊 User {current_user.username}: Sem bots, retornando zeros")
+            return {
+                "total_revenue": 0,
+                "active_users": 0,
+                "sales_today": 0,
+                "leads_mes": 0,
+                "leads_hoje": 0,
+                "ticket_medio": 0,
+                "total_transacoes": 0,
+                "reembolsos": 0,
+                "taxa_conversao": 0,
+                "chart_data": []
+            }
+        
+        # ============================================
+        # 💰 CÁLCULO DE FATURAMENTO DO PERÍODO
+        # ============================================
+        if is_super_with_split and not bot_id:
+            # SUPER ADMIN (Visão Geral): Calcula pelos splits de TODAS as vendas da plataforma
+            vendas_periodo = db.query(Pedido).filter(
+                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.data_aprovacao >= start,
+                Pedido.data_aprovacao <= end
+            ).all()
+            
+            # Faturamento = Quantidade de Vendas * Taxa Fixa (ex: 60 centavos)
+            # Nota: Usamos a taxa configurada no perfil do admin como base
+            taxa_centavos = current_user.taxa_venda or 60
+            total_revenue = len(vendas_periodo) * taxa_centavos
+            
+            logger.info(f"💰 Super Admin - Período: {len(vendas_periodo)} vendas × R$ {taxa_centavos/100:.2f} = R$ {total_revenue/100:.2f} ({total_revenue} centavos)")
+            
+        else:
+            # USUÁRIO NORMAL (ou Admin vendo bot específico): Soma valor total dos pedidos
+            query = db.query(Pedido).filter(
+                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.data_aprovacao >= start,
+                Pedido.data_aprovacao <= end
             )
-            if bot_id: soma_dia = soma_dia.filter(Pedido.bot_id == bot_id)
             
-            val = soma_dia.scalar() or 0.0
+            if bots_ids:
+                query = query.filter(Pedido.bot_id.in_(bots_ids))
+            
+            vendas_periodo = query.all()
+            
+            # Se for admin vendo bot específico, ainda calcula como taxa ou valor cheio?
+            # Geralmente admin quer ver o faturamento do cliente, então valor cheio.
+            total_revenue = sum(int(p.valor * 100) if p.valor else 0 for p in vendas_periodo)
+            
+            logger.info(f"👤 User - Período: {len(vendas_periodo)} vendas = R$ {total_revenue/100:.2f} ({total_revenue} centavos)")
+        
+        # ============================================
+        # 📊 OUTRAS MÉTRICAS
+        # ============================================
+        
+        # Usuários ativos (assinaturas não expiradas)
+        query_active = db.query(Pedido).filter(
+            Pedido.status.in_(['approved', 'paid', 'active']),
+            Pedido.data_expiracao > datetime.utcnow()
+        )
+        if not is_super_with_split or bot_id:
+             if bots_ids: query_active = query_active.filter(Pedido.bot_id.in_(bots_ids))
+        active_users = query_active.count()
+        
+        # Vendas de hoje
+        hoje_start = datetime.utcnow().replace(hour=0, minute=0, second=0)
+        query_hoje = db.query(Pedido).filter(
+            Pedido.status.in_(['approved', 'paid', 'active']),
+            Pedido.data_aprovacao >= hoje_start
+        )
+        if not is_super_with_split or bot_id:
+            if bots_ids: query_hoje = query_hoje.filter(Pedido.bot_id.in_(bots_ids))
+            
+        vendas_hoje = query_hoje.all()
+        
+        if is_super_with_split and not bot_id:
+            sales_today = len(vendas_hoje) * (current_user.taxa_venda or 60)
+        else:
+            sales_today = sum(int(p.valor * 100) if p.valor else 0 for p in vendas_hoje)
+        
+        # Leads do mês
+        mes_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0)
+        query_leads_mes = db.query(Lead).filter(Lead.created_at >= mes_start)
+        if not is_super_with_split or bot_id:
+             if bots_ids: query_leads_mes = query_leads_mes.filter(Lead.bot_id.in_(bots_ids))
+        leads_mes = query_leads_mes.count()
+        
+        # Leads de hoje
+        query_leads_hoje = db.query(Lead).filter(Lead.created_at >= hoje_start)
+        if not is_super_with_split or bot_id:
+             if bots_ids: query_leads_hoje = query_leads_hoje.filter(Lead.bot_id.in_(bots_ids))
+        leads_hoje = query_leads_hoje.count()
+        
+        # Ticket médio
+        if vendas_periodo:
+            if is_super_with_split and not bot_id:
+                ticket_medio = (current_user.taxa_venda or 60) # Para admin, ticket médio é a taxa fixa
+            else:
+                ticket_medio = int(total_revenue / len(vendas_periodo))
+        else:
+            ticket_medio = 0
+        
+        # Total de transações
+        total_transacoes = len(vendas_periodo)
+        
+        # Reembolsos (Placeholder)
+        reembolsos = 0
+        
+        # Taxa de conversão
+        if leads_mes > 0:
+            taxa_conversao = round((total_transacoes / leads_mes) * 100, 2)
+        else:
+            taxa_conversao = 0
+        
+        # ============================================
+        # 📈 DADOS DO GRÁFICO (AGRUPADO POR DIA)
+        # ============================================
+        chart_data = []
+        current_date = start
+        
+        while current_date <= end:
+            day_start = current_date.replace(hour=0, minute=0, second=0)
+            day_end = current_date.replace(hour=23, minute=59, second=59)
+            
+            query_dia = db.query(Pedido).filter(
+                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.data_aprovacao >= day_start,
+                Pedido.data_aprovacao <= day_end
+            )
+            
+            if not is_super_with_split or bot_id:
+                if bots_ids: query_dia = query_dia.filter(Pedido.bot_id.in_(bots_ids))
+            
+            vendas_dia = query_dia.all()
+            
+            if is_super_with_split and not bot_id:
+                # Admin: Vendas * Taxa / 100 (para Reais)
+                valor_dia = len(vendas_dia) * ((current_user.taxa_venda or 60) / 100)
+            else:
+                # User: Soma dos valores
+                valor_dia = sum(p.valor for p in vendas_dia) if vendas_dia else 0
             
             chart_data.append({
-                "name": data_loop.strftime("%d/%m"), 
-                "value": val
+                "name": current_date.strftime("%d/%m"),
+                "value": round(valor_dia, 2)  # ✅ Em REAIS
             })
-
+            
+            current_date += timedelta(days=1)
+        
+        logger.info(f"📊 Retornando: revenue={total_revenue} centavos, active={active_users}, today={sales_today} centavos")
+        
         return {
-            "total_revenue": valor_total_revenue,
-            "active_users": count_active_users,
-            "sales_today": valor_sales_today,
-            "leads_mes": leads_periodo,
+            "total_revenue": total_revenue,  # ✅ EM CENTAVOS
+            "active_users": active_users,
+            "sales_today": sales_today,  # ✅ EM CENTAVOS
+            "leads_mes": leads_mes,
             "leads_hoje": leads_hoje,
-            "ticket_medio": ticket_medio,
-            "total_transacoes": total_transactions,
-            "reembolsos": 0.0,
-            "taxa_conversao": round(conversao, 2),
-            "chart_data": chart_data
+            "ticket_medio": ticket_medio,  # ✅ EM CENTAVOS
+            "total_transacoes": total_transacoes,
+            "reembolsos": reembolsos,
+            "taxa_conversao": taxa_conversao,
+            "chart_data": chart_data  # ✅ EM REAIS
         }
-
+        
     except Exception as e:
-        logger.error(f"❌ Erro no dashboard stats: {str(e)}")
-        return {
-            "total_revenue": 0.0, "active_users": 0, "sales_today": 0.0,
-            "leads_mes": 0, "leads_hoje": 0, "ticket_medio": 0.0,
-            "total_transacoes": 0, "reembolsos": 0.0, "taxa_conversao": 0.0,
-            "chart_data": []
-        }
+        logger.error(f"❌ Erro ao buscar stats do dashboard: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar estatísticas: {str(e)}")
+
 # =========================================================
 # 💸 WEBHOOK DE PAGAMENTO (BLINDADO E TAGARELA)
 # =========================================================
@@ -4594,95 +4931,220 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
             tb.send_message(cid, txt, reply_markup=mk)
     except:
         tb.send_message(cid, txt, reply_markup=mk)
+
 # =========================================================
-# 🏆 ROTA DE PERFIL & CONQUISTAS (PERFIL GLOBAL)
+# 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
 # =========================================================
-@app.get("/api/admin/profile")
-def get_profile_stats(db: Session = Depends(get_db)):
+# =========================================================
+# 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
+# =========================================================
+# =========================================================
+# 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
+# =========================================================
+@app.get("/api/profile/stats")
+def get_profile_stats(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
     """
-    Retorna dados do perfil + Estatísticas GLOBAIS.
-    🔥 CORREÇÃO: Faturamento inclui usuários expirados.
+    Retorna estatísticas do perfil do usuário logado.
+    
+    🆕 LÓGICA ESPECIAL PARA SUPER ADMIN:
+    - Se for super admin: calcula faturamento pelos splits (Todas as vendas * taxa)
+    - Se for usuário normal: calcula pelos próprios pedidos
     """
     try:
-        # 1. Busca Configurações
-        conf_name = db.query(SystemConfig).filter(SystemConfig.key == "admin_name").first()
-        conf_avatar = db.query(SystemConfig).filter(SystemConfig.key == "admin_avatar").first()
-        
-        admin_name = conf_name.value if conf_name else "Administrador"
-        admin_avatar = conf_avatar.value if conf_avatar else ""
+        # 👇 CORREÇÃO CRÍTICA: IMPORTAR OS MODELOS (User estava faltando)
+        from database import User, Bot, Pedido, Lead
 
-        # 2. Estatísticas GLOBAIS
-        total_bots = db.query(Bot).count()
+        user_id = current_user.id
         
-        q_leads = db.query(Lead.user_id).all()
-        q_pedidos = db.query(Pedido.telegram_id).all()
+        # 🔥 LÓGICA FLEXÍVEL: BASTA SER SUPERUSER PARA VER OS DADOS GLOBAIS
+        # (Não exige mais o ID preenchido para visualizar, apenas para sacar)
+        is_super_with_split = current_user.is_superuser
         
-        unique_members = set()
-        for r in q_leads:
-            if r[0]: unique_members.add(str(r[0]))
-        for r in q_pedidos:
-            if r[0]: unique_members.add(str(r[0]))
+        logger.info(f"📊 Profile Stats - User: {current_user.username}, Super: {is_super_with_split}")
+        
+        if is_super_with_split:
+            # ============================================
+            # 💰 CÁLCULO ESPECIAL PARA SUPER ADMIN (SPLIT)
+            # ============================================
             
-        total_members = len(unique_members)
+            # 1. Conta TODAS as vendas aprovadas da PLATAFORMA INTEIRA
+            total_vendas_sistema = db.query(Pedido).filter(
+                Pedido.status.in_(['approved', 'paid', 'active'])
+            ).count()
+            
+            # 2. Calcula faturamento: vendas × taxa (em centavos)
+            taxa_centavos = current_user.taxa_venda or 60
+            total_revenue = total_vendas_sistema * taxa_centavos
+            
+            # 3. Total de sales = todas as vendas do sistema
+            total_sales = total_vendas_sistema
+            
+            logger.info(f"💰 Super Admin {current_user.username}: {total_vendas_sistema} vendas × R$ {taxa_centavos/100:.2f} = R$ {total_revenue/100:.2f} (retornando {total_revenue} centavos)")
+            
+            # Total de bots da plataforma (Visão Macro)
+            total_bots = db.query(Bot).count()
+            
+            # Total de membros da plataforma (AGORA VAI FUNCIONAR POIS IMPORTAMOS 'User')
+            total_members = db.query(User).count()
+            
+        else:
+            # ============================================
+            # 👤 CÁLCULO NORMAL PARA USUÁRIO COMUM
+            # ============================================
+            
+            # Busca todos os bots do usuário
+            user_bots = db.query(Bot.id).filter(Bot.owner_id == user_id).all()
+            bots_ids = [bot.id for bot in user_bots]
+            
+            if not bots_ids:
+                logger.info(f"👤 User {current_user.username}: Sem bots, retornando zeros")
+                return {
+                    "total_bots": 0,
+                    "total_members": 0,
+                    "total_revenue": 0,
+                    "total_sales": 0
+                }
+            
+            # Soma pedidos aprovados dos bots do usuário
+            pedidos_aprovados = db.query(Pedido).filter(
+                Pedido.bot_id.in_(bots_ids),
+                Pedido.status.in_(['approved', 'paid', 'active'])
+            ).all()
+            
+            # Calcula revenue em centavos
+            total_revenue = sum(int(p.valor * 100) if p.valor else 0 for p in pedidos_aprovados)
+            total_sales = len(pedidos_aprovados)
+            
+            logger.info(f"👤 User {current_user.username}: {total_sales} vendas = R$ {total_revenue/100:.2f} (retornando {total_revenue} centavos)")
+            
+            # Total de bots do usuário
+            total_bots = len(bots_ids)
+            
+            # Total de membros dos bots dele
+            total_leads = db.query(Lead).filter(Lead.bot_id.in_(bots_ids)).count()
+            total_pedidos_unicos = db.query(Pedido.telegram_id).filter(Pedido.bot_id.in_(bots_ids)).distinct().count()
+            total_members = total_leads + total_pedidos_unicos
         
-        # ============================================================
-        # 💰 [CORRIGIDO] Status para Contar DINHEIRO (INCLUI EXPIRADO)
-        # ============================================================
-        status_financeiro = ['paid', 'approved', 'active', 'completed', 'succeeded', 'expired']
+        logger.info(f"📊 Retornando: bots={total_bots}, members={total_members}, revenue={total_revenue}, sales={total_sales}")
         
-        revenue_query = db.query(func.sum(Pedido.valor)).filter(Pedido.status.in_(status_financeiro))
-        total_revenue = revenue_query.scalar() or 0.0
+        return {
+            "total_bots": total_bots,
+            "total_members": total_members,
+            "total_revenue": total_revenue,  # ✅ EM CENTAVOS (frontend divide por 100)
+            "total_sales": total_sales
+        }
         
-        total_sales = db.query(Pedido).filter(Pedido.status.in_(status_financeiro)).count()
+    except Exception as e:
+        logger.error(f"❌ Erro ao buscar stats do perfil: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar estatísticas: {str(e)}")
+
+# =========================================================
+# 👤 PERFIL E ESTATÍSTICAS (BLINDADO FASE 2)
+# =========================================================
+@app.get("/api/admin/profile")
+def get_user_profile(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user) # 🔒 AUTH OBRIGATÓRIA
+):
+    """
+    Retorna dados do perfil, mas calcula estatísticas APENAS
+    dos bots que pertencem ao usuário logado.
+    """
+    try:
+        # 1. Identificar quais bots pertencem a este usuário
+        user_bots = db.query(Bot).filter(Bot.owner_id == current_user.id).all()
+        bot_ids = [b.id for b in user_bots]
         
-        # 3. Lógica de Gamificação
+        # Estatísticas Básicas (Filtradas pelo Dono)
+        total_bots = len(user_bots)
+        
+        # Se o usuário não tem bots, retornamos zerado para evitar erro de SQL (IN empty)
+        if total_bots == 0:
+            return {
+                "name": current_user.full_name or current_user.username,
+                "avatar_url": None,
+                "stats": {
+                    "total_bots": 0,
+                    "total_members": 0,
+                    "total_revenue": 0.0,
+                    "total_sales": 0
+                },
+                "gamification": {
+                    "current_level": {"name": "Iniciante", "target": 100},
+                    "next_level": {"name": "Empreendedor", "target": 1000},
+                    "progress_percentage": 0
+                }
+            }
+
+        # 2. Calcular Membros (Leads) apenas dos bots do usuário
+        total_members = db.query(Lead).filter(Lead.bot_id.in_(bot_ids)).count()
+
+        # 3. Calcular Vendas e Receita apenas dos bots do usuário
+        total_sales = db.query(Pedido).filter(
+            Pedido.bot_id.in_(bot_ids), 
+            Pedido.status == 'approved'
+        ).count()
+
+        total_revenue = db.query(func.sum(Pedido.valor)).filter(
+            Pedido.bot_id.in_(bot_ids), 
+            Pedido.status == 'approved'
+        ).scalar() or 0.0
+
+        # 4. Lógica de Gamificação (Níveis baseados no Faturamento do Usuário)
         levels = [
-            {"name": "Prodígio", "target": 100000, "slug": "prodigio"},
-            {"name": "Empreendedor", "target": 500000, "slug": "empreendedor"},
-            {"name": "Milionário", "target": 1000000, "slug": "milionario"},
-            {"name": "Magnata", "target": 10000000, "slug": "magnata"}
+            {"name": "Iniciante", "target": 100},
+            {"name": "Empreendedor", "target": 1000},
+            {"name": "Barão", "target": 5000},
+            {"name": "Magnata", "target": 10000},
+            {"name": "Imperador", "target": 50000}
         ]
         
-        current_level = None
-        next_level = levels[0]
+        current_level = levels[0]
+        next_level = levels[1]
         
-        for lvl in levels:
-            if total_revenue >= lvl["target"]:
-                current_level = lvl
-            else:
-                next_level = lvl
-                break
+        for i, level in enumerate(levels):
+            if total_revenue >= level["target"]:
+                current_level = level
+                next_level = levels[i+1] if i+1 < len(levels) else None
         
-        if total_revenue >= levels[-1]["target"]:
-            next_level = None 
-            
+        # Cálculo da porcentagem
+        progress = 0
         if next_level:
-            progress_pct = (total_revenue / next_level["target"]) * 100
-            progress_pct = min(progress_pct, 100)
+            # Quanto falta para o próximo nível
+            diff_target = next_level["target"] - current_level["target"]
+            diff_current = total_revenue - current_level["target"]
+            # Evita divisão por zero
+            if diff_target > 0:
+                progress = (diff_current / diff_target) * 100
+                if progress > 100: progress = 100
+                if progress < 0: progress = 0
         else:
-            progress_pct = 100
-            
+            progress = 100 # Nível máximo atingido
+
         return {
-            "profile": {
-                "name": admin_name,
-                "avatar_url": admin_avatar
-            },
+            "name": current_user.full_name or current_user.username,
+            "avatar_url": None, # Futuro: Adicionar campo no banco
             "stats": {
                 "total_bots": total_bots,
                 "total_members": total_members,
-                "total_revenue": total_revenue,
+                "total_revenue": float(total_revenue),
                 "total_sales": total_sales
             },
             "gamification": {
                 "current_level": current_level,
                 "next_level": next_level,
-                "progress_percentage": round(progress_pct, 2)
+                "progress_percentage": round(progress, 1)
             }
         }
 
     except Exception as e:
-        logger.error(f"Erro ao buscar perfil: {e}")
-        return {"error": str(e)}
+        logger.error(f"Erro ao carregar perfil: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao carregar perfil")
 
 @app.post("/api/admin/profile")
 def update_profile(data: ProfileUpdate, db: Session = Depends(get_db)):
@@ -4746,6 +5208,131 @@ def get_miniapp_config(bot_id: int, db: Session = Depends(get_db)):
             "miniapp_btn_text": getattr(flow, 'miniapp_btn_text', 'ABRIR LOJA')
         }
     }
+
+# =========================================================
+# 📋 ROTA DE CONSULTA DE AUDIT LOGS (🆕 FASE 3.3)
+# =========================================================
+class AuditLogFilters(BaseModel):
+    user_id: Optional[int] = None
+    action: Optional[str] = None
+    resource_type: Optional[str] = None
+    success: Optional[bool] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    page: int = 1
+    per_page: int = 50
+
+@app.get("/api/admin/audit-logs")
+def get_audit_logs(
+    user_id: Optional[int] = None,
+    action: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    success: Optional[bool] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 50,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Retorna logs de auditoria com filtros opcionais
+    
+    Filtros disponíveis:
+    - user_id: ID do usuário
+    - action: Tipo de ação (ex: "bot_created", "login_success")
+    - resource_type: Tipo de recurso (ex: "bot", "plano", "auth")
+    - success: true/false (apenas ações bem-sucedidas ou falhas)
+    - start_date: Data inicial (ISO format)
+    - end_date: Data final (ISO format)
+    - page: Página atual (padrão: 1)
+    - per_page: Logs por página (padrão: 50, máx: 100)
+    """
+    try:
+        # Limita per_page a 100
+        if per_page > 100:
+            per_page = 100
+        
+        # Query base
+        query = db.query(AuditLog)
+        
+        # 🔒 IMPORTANTE: Se não for superusuário, só mostra logs do próprio usuário
+        if not current_user.is_superuser:
+            query = query.filter(AuditLog.user_id == current_user.id)
+        
+        # Aplica filtros
+        if user_id is not None:
+            query = query.filter(AuditLog.user_id == user_id)
+        
+        if action:
+            query = query.filter(AuditLog.action == action)
+        
+        if resource_type:
+            query = query.filter(AuditLog.resource_type == resource_type)
+        
+        if success is not None:
+            query = query.filter(AuditLog.success == success)
+        
+        if start_date:
+            try:
+                start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                query = query.filter(AuditLog.created_at >= start)
+            except:
+                pass
+        
+        if end_date:
+            try:
+                end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                query = query.filter(AuditLog.created_at <= end)
+            except:
+                pass
+        
+        # Total de registros
+        total = query.count()
+        
+        # Paginação
+        offset = (page - 1) * per_page
+        logs = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(per_page).all()
+        
+        # Formata resposta
+        logs_data = []
+        for log in logs:
+            # Parse JSON details se existir
+            details_parsed = None
+            if log.details:
+                try:
+                    import json
+                    details_parsed = json.loads(log.details)
+                except:
+                    details_parsed = log.details
+            
+            logs_data.append({
+                "id": log.id,
+                "user_id": log.user_id,
+                "username": log.username,
+                "action": log.action,
+                "resource_type": log.resource_type,
+                "resource_id": log.resource_id,
+                "description": log.description,
+                "details": details_parsed,
+                "ip_address": log.ip_address,
+                "user_agent": log.user_agent,
+                "success": log.success,
+                "error_message": log.error_message,
+                "created_at": log.created_at.isoformat() if log.created_at else None
+            })
+        
+        return {
+            "data": logs_data,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar audit logs: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao buscar logs de auditoria")
 
 # =========================================================
 # 👑 ROTAS SUPER ADMIN (🆕 FASE 3.4)
@@ -5438,7 +6025,6 @@ def on_startup():
     print("="*60)
     print("✅ SISTEMA INICIADO E PRONTO!")
     print("="*60)
-
 
 @app.get("/")
 def home():
