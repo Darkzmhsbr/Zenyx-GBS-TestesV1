@@ -69,7 +69,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 # =========================================================
 # 🔑 CLOUDFLARE TURNSTILE - CONFIGURAÇÃO
 # =========================================================
-TURNSTILE_SECRET_KEY = "0x4AAAAAACOUmpPNTu0O44Tfoa_r8qOZzJs"
+TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0"
 
 def verify_turnstile(token: str) -> bool:
     """
