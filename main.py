@@ -344,32 +344,6 @@ def log_action(
         # Não propaga o erro para não quebrar a operação principal
         db.rollback()
 
-# =========================================================
-# 🔔 SISTEMA DE NOTIFICAÇÕES (HELPER)
-# =========================================================
-def create_notification(db: Session, user_id: int, title: str, message: str, type: str = "info"):
-    """
-    Cria uma notificação real para o usuário no painel.
-    Types: info (azul), success (verde), warning (amarelo), error (vermelho)
-    """
-    try:
-        notif = Notification(
-            user_id=user_id,
-            title=title,
-            message=message,
-            type=type
-        )
-        db.add(notif)
-        db.commit()
-        # Não damos refresh aqui para não travar processos rápidos, fire and forget
-    except Exception as e:
-        logger.error(f"Erro ao criar notificação: {e}")
-
-# ============================================================
-# 👇 COLE TODAS AS 5 FUNÇÕES AQUI (DEPOIS DO get_db)
-# ============================================================
-
-# FUNÇÃO 1: CRIAR OU ATUALIZAR LEAD (TOPO)
 # FUNÇÃO 1: CRIAR OU ATUALIZAR LEAD (TOPO) - ATUALIZADA
 def criar_ou_atualizar_lead(
     db: Session,
@@ -1551,6 +1525,25 @@ def check_status(txid: str, db: Session = Depends(get_db)):
 # =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO
 # =========================================================
+# =========================================================
+# 🔔 SISTEMA DE NOTIFICAÇÕES (HELPER)
+# =========================================================
+def create_notification(db: Session, user_id: int, title: str, message: str, type: str = "info"):
+    """
+    Cria uma notificação real para o usuário no painel.
+    Types: info (azul), success (verde), warning (amarelo), error (vermelho)
+    """
+    try:
+        notif = Notification(
+            user_id=user_id,
+            title=title,
+            message=message,
+            type=type
+        )
+        db.add(notif)
+        db.commit()
+    except Exception as e:
+        logger.error(f"Erro ao criar notificação: {e}")
 
 # =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
@@ -1945,7 +1938,6 @@ def deletar_bot(
     
     logger.info(f"🗑 Bot deletado: {nome_bot} (Owner: {current_user.username})")
     return {"status": "deletado", "bot_nome": nome_bot}
-
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 @app.post("/api/admin/bots/{bot_id}/toggle")
@@ -1970,14 +1962,11 @@ def toggle_bot(
     except Exception as e:
         logger.error(f"Erro ao notificar admin sobre toggle: {e}")
 
-    # =========================================================
-    # 🔔 SISTEMA DE NOTIFICAÇÃO (NOVO - PAINEL DO SITE)
-    # =========================================================
+    # 🔔 NOTIFICAÇÃO NO PAINEL (Sino)
     try:
         msg_status = "Ativado" if novo_status == "ativo" else "Pausado"
         tipo_notif = "success" if novo_status == "ativo" else "warning"
         
-        # Cria notificação para o dono do bot no painel (Sino)
         if bot.owner_id:
             create_notification(
                 db=db, 
@@ -1989,7 +1978,7 @@ def toggle_bot(
     except Exception as e:
         logger.error(f"Erro ao criar notificação interna: {e}")
     
-    # 👇 O ERRO ESTAVA AQUI (GARANTA QUE ESTA LINHA ESTEJA COMPLETA):
+    # 👇 A LINHA QUE ESTAVA QUEBRADA AGORA ESTÁ CORRIGIDA:
     logger.info(f"🔄 Bot toggled: {bot.nome} -> {novo_status} (Owner: {current_user.username})")
     
     return {"status": novo_status}
