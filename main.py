@@ -2519,33 +2519,45 @@ def salvar_fluxo(
 # ⚠️ SUBSTITUIR AS LINHAS 2468-2553 DO SEU main.py POR ESTE CÓDIGO
 # =========================================================
 
+# =========================================================
+# 🔗 ROTAS DE TRACKING (RASTREAMENTO) - VERSÃO FINAL CORRIGIDA
+# =========================================================
+
 @app.get("/api/admin/tracking/folders")
 async def list_tracking_folders(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Lista pastas com métricas FILTRADAS pelo usuário"""
+    """Lista pastas com métricas FILTRADAS pelo usuário - APENAS PASTAS COM LINKS DO USUÁRIO"""
     try:
-        # 🔥 Agora funciona porque bots já foi carregado no get_current_user
         user_bot_ids = [bot.id for bot in current_user.bots]
         
-        folders = db.query(TrackingFolder).all()
-        result = []
+        # 🔥 SE NÃO TEM BOTS → RETORNA LISTA VAZIA
+        if not user_bot_ids:
+            return []
         
+        # 🔥 BUSCA APENAS PASTAS QUE TÊM LINKS DOS BOTS DO USUÁRIO
+        folder_ids_with_user_links = db.query(TrackingLink.folder_id).filter(
+            TrackingLink.bot_id.in_(user_bot_ids)
+        ).distinct().all()
+        
+        folder_ids = [f[0] for f in folder_ids_with_user_links]
+        
+        # Se não tem links em nenhuma pasta, retorna vazio
+        if not folder_ids:
+            return []
+        
+        # Busca APENAS as pastas que o usuário tem links
+        folders = db.query(TrackingFolder).filter(
+            TrackingFolder.id.in_(folder_ids)
+        ).all()
+        
+        result = []
         for f in folders:
-            # Se usuário não tem bots, tudo é zero
-            if not user_bot_ids:
-                result.append({
-                    "id": f.id, "nome": f.nome, "plataforma": f.plataforma,
-                    "link_count": 0, "total_clicks": 0, "total_vendas": 0,
-                    "created_at": f.created_at
-                })
-                continue
-
             # Conta APENAS links dos bots do usuário nesta pasta
             link_count = db.query(TrackingLink).filter(
                 TrackingLink.folder_id == f.id,
-                TrackingLink.bot_id.in_(user_bot_ids) # 🔥 Filtro de dono
+                TrackingLink.bot_id.in_(user_bot_ids)
             ).count()
             
             # Soma métricas APENAS dos links do usuário
@@ -2554,7 +2566,7 @@ async def list_tracking_folders(
                 func.sum(TrackingLink.vendas).label('total_vendas')
             ).filter(
                 TrackingLink.folder_id == f.id,
-                TrackingLink.bot_id.in_(user_bot_ids) # 🔥 Filtro de dono
+                TrackingLink.bot_id.in_(user_bot_ids)
             ).first()
             
             result.append({
@@ -2566,41 +2578,65 @@ async def list_tracking_folders(
                 "total_vendas": stats.total_vendas or 0,
                 "created_at": f.created_at
             })
+        
+        logger.info(f"📂 Usuário {current_user.username} vê {len(result)} pastas")
         return result
+        
     except Exception as e:
         logger.error(f"Erro listar pastas: {e}")
         return []
 
+
 @app.post("/api/admin/tracking/folders")
-def create_tracking_folder(
+async def create_tracking_folder(
     dados: TrackingFolderCreate, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
     try:
         nova_pasta = TrackingFolder(nome=dados.nome, plataforma=dados.plataforma)
         db.add(nova_pasta)
         db.commit()
         db.refresh(nova_pasta)
+        logger.info(f"📁 Pasta '{dados.nome}' criada por {current_user.username}")
         return {"status": "ok", "id": nova_pasta.id}
     except Exception as e:
         logger.error(f"Erro ao criar pasta: {e}")
         raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
 
+
 @app.get("/api/admin/tracking/links/{folder_id}")
-def list_tracking_links(
+async def list_tracking_links(
     folder_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
-    return db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id).all()
+    """Lista links de uma pasta - APENAS OS LINKS DOS BOTS DO USUÁRIO"""
+    user_bot_ids = [bot.id for bot in current_user.bots]
+    
+    if not user_bot_ids:
+        return []
+    
+    # Retorna APENAS links dos bots do usuário
+    return db.query(TrackingLink).filter(
+        TrackingLink.folder_id == folder_id,
+        TrackingLink.bot_id.in_(user_bot_ids)
+    ).all()
+
 
 @app.post("/api/admin/tracking/links")
-def create_tracking_link(
+async def create_tracking_link(
     dados: TrackingLinkCreate, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
+    """Cria link de rastreamento - VALIDA SE BOT PERTENCE AO USUÁRIO"""
+    # 🔒 SEGURANÇA: Verifica se o bot pertence ao usuário
+    user_bot_ids = [bot.id for bot in current_user.bots]
+    
+    if dados.bot_id not in user_bot_ids:
+        raise HTTPException(403, "Você não tem permissão para criar links neste bot")
+    
     # Gera código aleatório se não informado
     if not dados.codigo:
         import random, string
@@ -2621,28 +2657,75 @@ def create_tracking_link(
     )
     db.add(novo_link)
     db.commit()
+    
+    logger.info(f"🔗 Link '{dados.nome}' criado (Bot {dados.bot_id}) por {current_user.username}")
+    
     return {"status": "ok", "link": novo_link}
 
+
 @app.delete("/api/admin/tracking/folders/{fid}")
-def delete_folder(
+async def delete_folder(
     fid: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
-    # Apaga links dentro da pasta primeiro
+    """Deleta pasta E seus links - APENAS SE PASTA CONTÉM SÓ LINKS DO USUÁRIO"""
+    user_bot_ids = [bot.id for bot in current_user.bots]
+    
+    # Busca a pasta
+    folder = db.query(TrackingFolder).filter(TrackingFolder.id == fid).first()
+    if not folder:
+        raise HTTPException(404, "Pasta não encontrada")
+    
+    # Busca TODOS os links da pasta
+    all_links = db.query(TrackingLink).filter(TrackingLink.folder_id == fid).all()
+    
+    if not all_links:
+        # Pasta vazia, pode deletar
+        db.delete(folder)
+        db.commit()
+        logger.info(f"🗑️ Pasta vazia {fid} deletada por {current_user.username}")
+        return {"status": "deleted"}
+    
+    # Verifica se TODOS os links são do usuário
+    for link in all_links:
+        if link.bot_id not in user_bot_ids:
+            raise HTTPException(403, "Esta pasta contém links de outros usuários")
+    
+    # Se chegou aqui, todos os links são do usuário - pode deletar tudo
     db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
-    db.query(TrackingFolder).filter(TrackingFolder.id == fid).delete()
+    db.delete(folder)
     db.commit()
+    
+    logger.info(f"🗑️ Pasta {fid} e {len(all_links)} links deletados por {current_user.username}")
+    
     return {"status": "deleted"}
 
+
 @app.delete("/api/admin/tracking/links/{lid}")
-def delete_link(
+async def delete_link(
     lid: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user: User = Depends(get_current_user)
 ):
-    db.query(TrackingLink).filter(TrackingLink.id == lid).delete()
+    """Deleta link - VALIDA SE LINK PERTENCE AO USUÁRIO"""
+    user_bot_ids = [bot.id for bot in current_user.bots]
+    
+    # Busca o link
+    link = db.query(TrackingLink).filter(TrackingLink.id == lid).first()
+    
+    if not link:
+        raise HTTPException(404, "Link não encontrado")
+    
+    # 🔒 SEGURANÇA: Verifica se o link pertence a um bot do usuário
+    if link.bot_id not in user_bot_ids:
+        raise HTTPException(403, "Você não tem permissão para deletar este link")
+    
+    db.delete(link)
     db.commit()
+    
+    logger.info(f"🗑️ Link {lid} deletado por {current_user.username}")
+    
     return {"status": "deleted"}
 
 # =========================================================
