@@ -31,7 +31,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 
 # Importa o banco e o script de reparo
-from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, Notification, engine
+from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, Notification, User, engine
 import update_db 
 
 from migration_v3 import executar_migracao_v3
@@ -3745,7 +3745,7 @@ def obter_estatisticas_funil(
     except Exception as e:
         logger.error(f"Erro ao obter estatísticas do funil: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-        
+
 # ============================================================
 # 🔥 ROTA ATUALIZADA: /api/admin/contacts
 # SUBSTITUA a rota existente por esta versão
