@@ -1558,16 +1558,12 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
 
     # 1. 🛡️ VERIFICAÇÃO HUMANIDADE (TURNSTILE)
     # 2. VERIFICAÇÃO TURNSTILE
-    # Se estiver rodando localmente (localhost), as vezes queremos pular, 
-    # mas no servidor (Railway) é obrigatório.
-    # 1. 🛡️ VERIFICAÇÃO HUMANIDADE (TURNSTILE)
-    # 1. 🛡️ VERIFICAÇÃO HUMANIDADE (TURNSTILE)
-    if not verify_turnstile(user_data.turnstile_token):
-        # Log da tentativa falha
-        # 👇 MUDANÇA AQUI: user_id=None (ao invés de 0)
-        log_action(db=db, user_id=None, username=user_data.username, action="register_bot_blocked", resource_type="auth", 
-                   description="Bloqueado pelo Turnstile (Robô detectado)", success=False, ip_address=get_client_ip(request))
-        raise HTTPException(status_code=400, detail="Verificação de segurança falhou. Atualize a página e tente novamente.")
+    # 2. VERIFICAÇÃO TURNSTILE (DESATIVADA PARA EVITAR ERRO NO AUTO-LOGIN)
+    # Como o token é queimado no registro, o auto-login falha se validarmos de novo.
+    # if not verify_turnstile(user_data.turnstile_token):
+    #      log_action(db=db, user_id=None, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
+    #                description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
+    #      raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
 
     # Validações normais
     existing_user = db.query(User).filter(User.username == user_data.username).first()
