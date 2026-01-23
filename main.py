@@ -107,8 +107,8 @@ TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0" # Sua chave secreta
 
 def verify_turnstile(token: str) -> bool:
     """Verifica token com tratamento de erro para não derrubar o servidor"""
-    # Se não tiver token, retornamos False (bloqueia), mas não crasha
-    if not token:
+    # Se não tiver token ou for muito curto, bloqueia sem crashar
+    if not token or len(str(token)) < 5:
         return False
         
     try:
@@ -117,12 +117,15 @@ def verify_turnstile(token: str) -> bool:
             "secret": TURNSTILE_SECRET_KEY,
             "response": token
         }
-        # Timeout de 5s é OBRIGATÓRIO. Se a Cloudflare demorar, seu site não pode travar.
+        # TIMEOUT É OBRIGATÓRIO: Se a Cloudflare demorar mais de 5s, 
+        # soltamos o servidor para ele não ficar preso.
         response = requests.post(url, data=payload, timeout=5) 
         result = response.json()
+        
         return result.get("success", False)
     except Exception as e:
-        # Se der erro de conexão, loga o erro mas mantém o servidor de pé
+        # Se der erro de conexão, apenas loga e retorna False (bloqueia por segurança)
+        # O print(e) ajuda a ver no log sem parar o site.
         print(f"⚠️ Erro silencioso no Turnstile: {e}")
         return False
 
