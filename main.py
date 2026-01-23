@@ -287,13 +287,11 @@ def get_client_ip(request: Request) -> str:
     return "unknown"
 
 # =========================================================
-# 📋 FUNÇÃO HELPER: REGISTRAR AÇÃO DE AUDITORIA (🆕 FASE 3.3)
+# 📋 FUNÇÃO HELPER: REGISTRAR AÇÃO DE AUDITORIA (BLINDADA)
 # =========================================================
-# No início do arquivo, garanta que tem: from typing import Optional
-
 def log_action(
     db: Session,
-    user_id: Optional[int], # <--- MUDANÇA AQUI: Aceita None agora
+    user_id: Optional[int], 
     username: str,
     action: str,
     resource_type: str,
@@ -306,18 +304,27 @@ def log_action(
     user_agent: str = None
 ):
     """
-    Registra uma ação de auditoria no banco de dados
+    Registra uma ação de auditoria.
+    BLINDAGEM: Se não tiver user_id, apenas loga no console e ignora o banco
+    para evitar erro de NotNullViolation.
     """
     try:
+        # 🔥 BLINDAGEM ANTI-CRASH
+        # Se não tem usuário logado (ex: erro de login/captcha), 
+        # não tenta salvar no banco para não violar a regra NOT NULL.
+        if user_id is None:
+            logger.warning(f"🚫 Audit (Anônimo/Bloqueado): {action} - {description} (IP: {ip_address})")
+            return # <--- PULO DO GATO: Sai da função antes de tentar gravar no banco
+
         # Converte details para JSON se for dict
         details_json = None
         if details:
             import json
             details_json = json.dumps(details, ensure_ascii=False)
         
-        # Cria o registro de auditoria
+        # Cria o registro de auditoria (Só chega aqui se tiver user_id)
         audit_log = AuditLog(
-            user_id=user_id, # Se for None, o banco grava NULL (Correto)
+            user_id=user_id,
             username=username,
             action=action,
             resource_type=resource_type,
@@ -335,6 +342,7 @@ def log_action(
         
     except Exception as e:
         logger.error(f"❌ Erro ao criar log de auditoria: {e}")
+        # Não propaga o erro para não quebrar a operação principal
         db.rollback()
 
 # FUNÇÃO 1: CRIAR OU ATUALIZAR LEAD (TOPO) - ATUALIZADA
