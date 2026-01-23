@@ -3596,25 +3596,45 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
     return {"status": "ok"}
 
 # ============================================================
-# ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
+# ROTA 1: LISTAR LEADS (TOPO DO FUNIL) - CORRIGIDA E SEGURA
 # ============================================================
 @app.get("/api/admin/leads")
 def listar_leads(
     bot_id: Optional[int] = None,
     page: int = 1,
     per_page: int = 50,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user) # 🔒 SEGURANÇA ADICIONADA
 ):
     """
-    Lista leads (usuários que só deram /start)
+    Lista leads (usuários que só deram /start), filtrados pelo usuário logado.
     """
     try:
-        # Query base
+        # 1. Identificar bots do usuário
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        
+        # Se conta nova (sem bots), retorna vazio imediatamente
+        if not user_bot_ids:
+            return {
+                "data": [],
+                "total": 0,
+                "page": page,
+                "per_page": per_page,
+                "total_pages": 0
+            }
+
+        # 2. Query base
         query = db.query(Lead)
         
-        # Filtro por bot
+        # 3. Aplica Filtros de Segurança
         if bot_id:
+            # Se escolheu um bot, verifica se pertence ao usuário
+            if bot_id not in user_bot_ids:
+                return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
             query = query.filter(Lead.bot_id == bot_id)
+        else:
+            # Se não escolheu, traz leads de TODOS os bots DO USUÁRIO (e não do sistema todo)
+            query = query.filter(Lead.bot_id.in_(user_bot_ids))
         
         # Contagem total
         total = query.count()
