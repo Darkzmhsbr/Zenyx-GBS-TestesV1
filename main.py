@@ -1655,8 +1655,13 @@ def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
     Cria conta automaticamente se não existir
     """
     try:
+        logger.info("🔍 INÍCIO: Google Login chamado")
+        logger.info(f"🔍 Token recebido (primeiros 50 chars): {data.credential[:50]}")
+        
         # 🔑 CLIENT ID do Google Cloud Console
         CLIENT_ID = "851618246810-npe0qg47u8stb2s269n0g5bfbr4e0lo1.apps.googleusercontent.com"
+        
+        logger.info("🔍 Iniciando validação do token com Google...")
         
         # 1️⃣ Valida o token com os servidores do Google
         idinfo = id_token.verify_oauth2_token(
@@ -1664,6 +1669,9 @@ def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
             google_requests.Request(), 
             CLIENT_ID
         )
+        
+        logger.info("✅ Token validado com sucesso!")
+        logger.info(f"🔍 Email extraído: {idinfo.get('email')}")
 
         # 2️⃣ Extrai informações do usuário
         email = idinfo['email']
@@ -1726,12 +1734,17 @@ def google_login(data: GoogleLoginRequest, db: Session = Depends(get_db)):
 
     except ValueError as e:
         # Token do Google inválido ou expirado
-        logger.error(f"❌ Token do Google inválido: {e}")
+        logger.error(f"❌ ERRO: Token do Google inválido: {e}")
+        logger.error(f"❌ DETALHES: {str(e)}")
         raise HTTPException(status_code=401, detail="Token do Google inválido ou expirado")
     
     except Exception as e:
         # Qualquer outro erro
-        logger.error(f"❌ Erro no Google Login: {e}")
+        logger.error(f"❌ ERRO GERAL no Google Login: {e}")
+        logger.error(f"❌ TIPO: {type(e).__name__}")
+        logger.error(f"❌ DETALHES: {str(e)}")
+        import traceback
+        logger.error(f"❌ TRACEBACK: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Erro interno no login com Google")
 
 # 👇 COLE ISSO LOGO APÓS A FUNÇÃO get_current_user_info TERMINAR
