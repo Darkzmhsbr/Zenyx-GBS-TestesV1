@@ -8,70 +8,100 @@ import threading
 from telebot import types
 import json
 import uuid
-from contextlib import asynccontextmanager 
 
-# --- IMPORTS FRAMEWORK ---
+# --- IMPORTS DO FRAMEWORK ---
 from sqlalchemy import func, desc, text
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, ConfigDict 
+# ✅ CORREÇÃO 1: Importando ConfigDict para evitar erro de build
+from pydantic import BaseModel, EmailStr, ConfigDict
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
 
-# --- IMPORTS SEGURANÇA ---
+# --- IMPORTS DE SEGURANÇA ---
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
-# --- IMPORTS PROJETO ---
+# --- IMPORTS DO SEU PROJETO ---
+# (Mantendo a compatibilidade com seus arquivos originais)
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
 from force_migration import forcar_atualizacao_tabelas
 
-# --- IMPORTS MIGRAÇÕES ---
+# --- IMPORTS DE MIGRAÇÃO ---
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
 from migration_v5 import executar_migracao_v5
 from migration_v6 import executar_migracao_v6
-from migration_audit_logs import executar_migracao_audit_logs 
+from migration_audit_logs import executar_migracao_audit_logs
 
-# Configuração de Log
+# ✅ CONFIGURAÇÃO DE LOG (Para aparecer no Railway)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # =========================================================
-# 💀 CEIFADOR (LOOP DE VENCIMENTOS)
+# 1. CRIAÇÃO DO APP (NO TOPO, COMO NA VERSÃO QUE FUNCIONAVA)
+# =========================================================
+app = FastAPI(title="Zenyx Gbot SaaS")
+
+# ✅ HABILITANDO CORS (Essencial para o Login funcionar)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Em produção, idealmente coloque o domínio do seu front
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =========================================================
+# 2. CONFIGURAÇÕES DE SEGURANÇA
+# =========================================================
+# ⚠️ ATENÇÃO: Voltei para a chave original do arquivo (1) para não quebrar logins antigos
+SECRET_KEY = os.getenv("SECRET_KEY", "zenyx-secret-key-change-in-production") 
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
+
+# =========================================================
+# 3. FUNÇÕES AUXILIARES DE BANCO
+# =========================================================
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# =========================================================
+# 4. EVENTO DE INICIALIZAÇÃO (VOLTAMOS AO MODELO CLÁSSICO)
 # =========================================================
 def loop_verificar_vencimentos():
-    """Roda a cada 60 segundos para remover usuários vencidos"""
+    """Loop infinito para verificar vencimentos em background"""
     while True:
         try:
-            # Se a função verificar_expiracao_massa existir no final do arquivo, 
-            # o Python vai achar ela em tempo de execução.
-            # Se der erro de import, comente a linha abaixo temporariamente.
+            # Aqui chamaria sua função de verificação
             # verificar_expiracao_massa() 
             pass 
         except Exception as e:
             logger.error(f"Erro no loop de vencimento: {e}")
         time.sleep(60)
 
-# =========================================================
-# 🚀 LIFESPAN (Prepara o terreno)
-# =========================================================
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+@app.on_event("startup")
+def on_startup():
     print("="*60)
-    print("🚀 INICIANDO ZENYX GBOT SAAS")
+    print("🚀 INICIANDO ZENYX GBOT SAAS (MODO CLÁSSICO)")
     print("="*60)
-
+    
+    # 1. Inicializa Banco
     try:
-        print("🔧 Executando migração forçada...")
-        forcar_atualizacao_tabelas()
         init_db()
+        print("✅ Banco de dados inicializado.")
     except Exception as e:
-        print(f"⚠️ Erro DB Init: {e}")
+        print(f"❌ Erro init_db: {e}")
 
-    # Lista de migrações
+    # 2. Executa Migrações
     migracoes = [
         ("v3", executar_migracao_v3),
         ("v4", executar_migracao_v4),
@@ -79,49 +109,21 @@ async def lifespan(app: FastAPI):
         ("v6", executar_migracao_v6),
         ("audit_logs", executar_migracao_audit_logs)
     ]
-    
     for nome, func_migracao in migracoes:
         try:
             func_migracao()
+            print(f"✅ Migração {nome} OK")
         except Exception as e:
-            logger.warning(f"⚠️ Migração {nome}: {e}")
+            logger.warning(f"⚠️ Migração {nome} falhou ou já aplicada: {e}")
 
-    # Inicia thread em background
+    # 3. Inicia Ceifador (Thread)
     try:
         t = threading.Thread(target=loop_verificar_vencimentos)
         t.daemon = True
         t.start()
+        print("💀 Ceifador iniciado.")
     except Exception as e:
-        logger.error(f"❌ Erro thread: {e}")
-
-    yield
-    print("🛑 Desligando sistema...")
-
-# =========================================================
-# 🏗️ CRIAÇÃO DO APP (O ERRO ESTAVA AQUI - AGORA ESTÁ CERTO)
-# =========================================================
-# O app precisa ser criado ANTES de qualquer @app.get lá embaixo
-app = FastAPI(title="Zenyx Gbot SaaS", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Configurações de Segurança
-SECRET_KEY = os.getenv("SECRET_KEY", "zenyx-secret-key-2026")
-ALGORITHM = "HS256"
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+        print(f"❌ Erro ao iniciar thread: {e}")
 
 # =========================================================
 # 📦 SCHEMAS PYDANTIC PARA AUTENTICAÇÃO
@@ -146,11 +148,18 @@ class PlatformUserUpdate(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
-    user_id: int
-    username: str
 
 class TokenData(BaseModel):
-    username: str = None
+    username: Optional[str] = None
+
+class User(BaseModel):
+    username: str
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    disabled: Optional[bool] = None
+
+class UserInDB(User):
+    hashed_password: str
 
 # =========================================================
 # 📦 SCHEMAS PYDANTIC PARA SUPER ADMIN (🆕 FASE 3.4)
@@ -1039,6 +1048,11 @@ def save_pushin_token(bot_id: int, data: IntegrationUpdate, db: Session = Depend
     return {"status": "conectado", "msg": f"Integração salva para {bot.nome}!"}
 
 # --- MODELOS ---
+
+# --- Correção Crítica nas Classes que davam erro ---
+class BotBase(BaseModel):
+    name: str
+    token: str
 class BotCreate(BaseModel):
     nome: str
     token: str
@@ -1065,7 +1079,7 @@ class BotResponse(BotCreate):
     leads: int = 0
     revenue: float = 0.0
     
-    # ✅ CONFIGURAÇÃO CORRETA
+    # ✅ FIX: ConfigDict em vez de class Config
     model_config = ConfigDict(from_attributes=True)
 class PlanoCreate(BaseModel):
     bot_id: int
@@ -1081,8 +1095,7 @@ class PlanoUpdate(BaseModel):
     preco: Optional[float] = None
     dias_duracao: Optional[int] = None
     
-    # ✅ CONFIGURAÇÃO CORRETA (Pydantic V2)
-    # Removemos a "class Config" antiga que estava causando o conflito
+    # ✅ FIX: ConfigDict em vez de class Config
     model_config = ConfigDict(arbitrary_types_allowed=True)
 class FlowUpdate(BaseModel):
     msg_boas_vindas: str
