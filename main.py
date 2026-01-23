@@ -28,6 +28,10 @@ from datetime import timedelta
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr
 
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+import secrets # Para gerar senha aleatória
+
 # Importa o banco e o script de reparo
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
 import update_db 
@@ -1637,9 +1641,241 @@ async def get_current_user_info(current_user = Depends(get_current_user)):
         "is_active": current_user.is_active
     }
 
+# =========================================================
+# ROTAS DE LOGIN E REGISTRO COM CLOUDFLARE TURNSTILE
+# =========================================================
+# Cole estas rotas no seu main.py
+# =========================================================
+
+# 🔑 SUBSTITUA pela sua Secret Key do Cloudflare Turnstile
+TURNSTILE_SECRET_KEY = "0x4AAAAAACOUmpPNTu0O44Tfoa_r8qOZzJs"
+
+def verify_turnstile(token: str) -> bool:
+    """
+    Verifica token do Cloudflare Turnstile
+    
+    Returns:
+        True se verificação passou
+        False se falhou
+    """
+    try:
+        response = requests.post(
+            'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+            data={
+                'secret': TURNSTILE_SECRET_KEY,
+                'response': token
+            },
+            timeout=5
+        )
+        
+        result = response.json()
+        success = result.get('success', False)
+        
+        if success:
+            logger.info("✅ Turnstile: Verificação bem-sucedida")
+        else:
+            logger.warning(f"❌ Turnstile: Verificação falhou - {result.get('error-codes', [])}")
+        
+        return success
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao verificar Turnstile: {e}")
+        return False
+
+
+# =========================================================
+# 🔐 ROTA DE LOGIN COM TURNSTILE
+# =========================================================
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+    turnstile_token: str
+
+@app.post("/api/auth/login")
+def login(data: LoginRequest, db: Session = Depends(get_db)):
+    """
+    Login com verificação Cloudflare Turnstile
+    """
+    try:
+        logger.info("=" * 60)
+        logger.info("🔐 LOGIN: Requisição recebida")
+        logger.info(f"📧 Email: {data.email}")
+        
+        # 🛡️ ETAPA 1: Verificar Turnstile
+        logger.info("🛡️ Verificando Cloudflare Turnstile...")
+        
+        if not verify_turnstile(data.turnstile_token):
+            raise HTTPException(
+                status_code=400,
+                detail="Verificação de segurança falhou. Tente novamente."
+            )
+        
+        # 🔐 ETAPA 2: Verificar credenciais
+        logger.info("🔍 Buscando usuário no banco...")
+        from database import User
+        
+        user = db.query(User).filter(User.email == data.email).first()
+        
+        if not user:
+            logger.warning(f"❌ Usuário não encontrado: {data.email}")
+            raise HTTPException(
+                status_code=401,
+                detail="Email ou senha incorretos"
+            )
+        
+        # Verifica senha
+        if not verify_password(data.password, user.password_hash):
+            logger.warning(f"❌ Senha incorreta para: {data.email}")
+            raise HTTPException(
+                status_code=401,
+                detail="Email ou senha incorretos"
+            )
+        
+        logger.info(f"✅ Credenciais válidas para: {user.username}")
+        
+        # 🎫 ETAPA 3: Gerar JWT
+        logger.info("🎫 Gerando token JWT...")
+        access_token = create_access_token(
+            data={"sub": user.username, "user_id": user.id},
+            expires_delta=timedelta(days=7)
+        )
+        
+        # 📦 ETAPA 4: Retornar dados
+        response_data = {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "email": user.email
+        }
+        
+        logger.info(f"✅ LOGIN BEM-SUCEDIDO: {user.username}")
+        logger.info("=" * 60)
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ ERRO no login: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail="Erro interno no servidor"
+        )
+
+
+# =========================================================
+# 📝 ROTA DE REGISTRO COM TURNSTILE
+# =========================================================
+
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    full_name: str
+    turnstile_token: str
+
+@app.post("/api/auth/register")
+def register(data: RegisterRequest, db: Session = Depends(get_db)):
+    """
+    Registro com verificação Cloudflare Turnstile
+    """
+    try:
+        logger.info("=" * 60)
+        logger.info("📝 REGISTRO: Requisição recebida")
+        logger.info(f"👤 Username: {data.username}")
+        logger.info(f"📧 Email: {data.email}")
+        
+        # 🛡️ ETAPA 1: Verificar Turnstile
+        logger.info("🛡️ Verificando Cloudflare Turnstile...")
+        
+        if not verify_turnstile(data.turnstile_token):
+            raise HTTPException(
+                status_code=400,
+                detail="Verificação de segurança falhou. Tente novamente."
+            )
+        
+        # 🔍 ETAPA 2: Verificar se usuário já existe
+        logger.info("🔍 Verificando duplicatas...")
+        from database import User
+        
+        # Verifica username
+        existing_user = db.query(User).filter(User.username == data.username).first()
+        if existing_user:
+            logger.warning(f"❌ Username já existe: {data.username}")
+            raise HTTPException(
+                status_code=400,
+                detail="Username já está em uso"
+            )
+        
+        # Verifica email
+        existing_email = db.query(User).filter(User.email == data.email).first()
+        if existing_email:
+            logger.warning(f"❌ Email já existe: {data.email}")
+            raise HTTPException(
+                status_code=400,
+                detail="Email já está cadastrado"
+            )
+        
+        # 🔐 ETAPA 3: Criar usuário
+        logger.info("🔐 Hasheando senha...")
+        password_hash = get_password_hash(data.password)
+        
+        logger.info("💾 Criando usuário no banco...")
+        new_user = User(
+            username=data.username,
+            email=data.email,
+            password_hash=password_hash,
+            full_name=data.full_name,
+            is_active=True
+        )
+        
+        db.add(new_user)
+        db.commit()
+        db.refresh(new_user)
+        
+        logger.info(f"✅ Usuário criado: {new_user.username} (ID: {new_user.id})")
+        
+        # 🎫 ETAPA 4: Gerar JWT (auto-login)
+        logger.info("🎫 Gerando token JWT...")
+        access_token = create_access_token(
+            data={"sub": new_user.username, "user_id": new_user.id},
+            expires_delta=timedelta(days=7)
+        )
+        
+        # 📦 ETAPA 5: Retornar dados
+        response_data = {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_id": new_user.id,
+            "username": new_user.username,
+            "full_name": new_user.full_name,
+            "email": new_user.email
+        }
+        
+        logger.info(f"✅ REGISTRO BEM-SUCEDIDO: {new_user.username}")
+        logger.info("=" * 60)
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ ERRO no registro: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500,
+            detail="Erro interno no servidor"
+        )
+
+
 # 👇 COLE ISSO LOGO APÓS A FUNÇÃO get_current_user_info TERMINAR
 
-# 🆕 ROTA PARA O MEMBRO ATUALIZAR SEU PRÓPRIO PERFIL FINANCEIRO
 # 🆕 ROTA PARA O MEMBRO ATUALIZAR SEU PRÓPRIO PERFIL FINANCEIRO
 @app.put("/api/auth/profile")
 def update_own_profile(
