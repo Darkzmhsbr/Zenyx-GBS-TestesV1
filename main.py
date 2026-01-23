@@ -1,7 +1,7 @@
 import os
 import logging
 import telebot
-import requests
+import requests  # <--- ESSA É A BIBLIOTECA QUE CAUSA O ERRO SE NÃO ESTIVER NO REQUIREMENTS.TXT
 import time
 import urllib.parse
 import threading
@@ -9,15 +9,17 @@ from telebot import types
 import json
 import uuid
 
-
-# --- IMPORTS CORRIGIDOS ---
 from sqlalchemy import func, desc, text
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+# Adicionamos 'Optional' aqui para evitar erro de validação bruta
+from pydantic import BaseModel, EmailStr, Field 
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional 
 from datetime import datetime, timedelta
+
+
+# --- IMPORTS CORRIGIDOS ---
 from database import Lead  # Não esqueça de importar Lead!
 from force_migration import forcar_atualizacao_tabelas
 
@@ -26,7 +28,7 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 from datetime import timedelta
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from pydantic import BaseModel, EmailStr
+
 
 # Importa o banco e o script de reparo
 from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, engine
@@ -69,17 +71,20 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 # =========================================================
 # 📦 SCHEMAS PYDANTIC PARA AUTENTICAÇÃO
 # =========================================================
+# --- MODELS ATUALIZADOS (COM OPTIONAL PARA NÃO QUEBRAR O PYDANTIC) ---
 class UserCreate(BaseModel):
     username: str
     email: EmailStr
     password: str
     full_name: str = None
-    turnstile_token: str # 🔥 NOVO CAMPO OBRIGATÓRIO
+    # Opcional para não dar erro de validação automática, validamos manualmente na rota
+    turnstile_token: Optional[str] = None 
 
 class UserLogin(BaseModel):
     username: str
     password: str
-    turnstile_token: str # 🔥 NOVO CAMPO OBRIGATÓRIO
+    # Opcional para não dar erro de validação automática
+    turnstile_token: Optional[str] = None
 
 # 👇 COLE ISSO LOGO APÓS A CLASSE UserCreate OU UserLogin
 class PlatformUserUpdate(BaseModel):
@@ -98,13 +103,14 @@ class TokenData(BaseModel):
     username: str = None
 
 # =========================================================
-# 🛡️ CONFIGURAÇÃO CLOUDFLARE TURNSTILE
+# 🛡️ CONFIGURAÇÃO CLOUDFLARE TURNSTILE (BLINDADA)
 # =========================================================
-TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0" # Peguei da sua imagem
+TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0" # Sua chave secreta
 
 def verify_turnstile(token: str) -> bool:
-    """Verifica se o token do Turnstile é válido"""
-    if not token:
+    """Verifica token com tratamento de erro para não derrubar o server"""
+    if not token or len(token) < 5:
+        logger.warning("⚠️ Turnstile: Token vazio ou inválido recebido.")
         return False
         
     try:
@@ -113,12 +119,19 @@ def verify_turnstile(token: str) -> bool:
             "secret": TURNSTILE_SECRET_KEY,
             "response": token
         }
-        response = requests.post(url, data=payload, timeout=5)
+        # Timeout é CRUCIAL. Se o Cloudflare demorar, seu servidor não pode travar.
+        response = requests.post(url, data=payload, timeout=5) 
         result = response.json()
         
-        return result.get("success", False)
+        if not result.get("success", False):
+            logger.warning(f"❌ Turnstile Rejeitado: {result.get('error-codes')}")
+            return False
+            
+        return True
     except Exception as e:
-        logger.error(f"Erro ao verificar Turnstile: {e}")
+        logger.error(f"❌ Erro de conexão com Cloudstile: {e}")
+        # Em caso de erro de conexão com a Cloudflare, decidimos se bloqueamos ou liberamos.
+        # Por segurança, bloqueamos.
         return False
 
 # =========================================================
@@ -1584,35 +1597,33 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
 
 @app.post("/api/auth/login", response_model=Token)
 def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db)):
-    """
-    Autentica usuário e retorna token JWT (COM PROTEÇÃO TURNSTILE)
-    """
     from database import User
     
-    # 1. 🛡️ VERIFICAÇÃO HUMANIDADE (TURNSTILE)
-    # Nota: Em desenvolvimento, as vezes queremos pular isso, mas em produção é essencial.
+    # 1. LOG PARA DEBUG (Ver se o token está chegando)
+    logger.info(f"🔑 Tentativa de login: {user_data.username} | Token: {str(user_data.turnstile_token)[:10]}...")
+
+    # 2. VERIFICAÇÃO TURNSTILE
+    # Se estiver rodando localmente (localhost), as vezes queremos pular, 
+    # mas no servidor (Railway) é obrigatório.
     if not verify_turnstile(user_data.turnstile_token):
          log_action(db=db, user_id=0, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
-                   description="Login bloqueado pelo Turnstile", success=False, ip_address=get_client_ip(request))
-         raise HTTPException(status_code=400, detail="Verificação de segurança falhou. Tente novamente.")
+                   description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
+         # Retornamos 400 com mensagem clara para o SweetAlert
+         raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
 
-    # Busca usuário
+    # 3. Lógica padrão de Login
     user = db.query(User).filter(User.username == user_data.username).first()
     
-    # Verifica credenciais
     if not user or not verify_password(user_data.password, user.password_hash):
         if user:
             log_action(db=db, user_id=user.id, username=user.username, action="login_failed", resource_type="auth", 
-                       description="Tentativa de login falhou: senha incorreta", success=False, error_message="Senha incorreta", 
+                       description="Senha incorreta", success=False, error_message="Senha incorreta", 
                        ip_address=get_client_ip(request), user_agent=request.headers.get("user-agent"))
-        
-        raise HTTPException(status_code=401, detail="Credenciais inválidas")
+        raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
     
-    # Auditoria Sucesso
     log_action(db=db, user_id=user.id, username=user.username, action="login_success", resource_type="auth", 
-               description="Login bem-sucedido", ip_address=get_client_ip(request), user_agent=request.headers.get("user-agent"))
+               description="Login realizado", ip_address=get_client_ip(request), user_agent=request.headers.get("user-agent"))
     
-    # Gera token JWT
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.username, "user_id": user.id},
@@ -1625,7 +1636,7 @@ def login(user_data: UserLogin, request: Request, db: Session = Depends(get_db))
         "user_id": user.id,
         "username": user.username
     }
-    
+
 @app.get("/api/auth/me")
 async def get_current_user_info(current_user = Depends(get_current_user)):
     """
