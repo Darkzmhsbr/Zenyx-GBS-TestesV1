@@ -1989,7 +1989,10 @@ def toggle_bot(
     except Exception as e:
         logger.error(f"Erro ao criar notificação interna: {e}")
     
-    logger.info(f"🔄 Bot toggled: {bot.nome} -> {novo_status} (Owner:
+    # 👇 O ERRO ESTAVA AQUI (GARANTA QUE ESTA LINHA ESTEJA COMPLETA):
+    logger.info(f"🔄 Bot toggled: {bot.nome} -> {novo_status} (Owner: {current_user.username})")
+    
+    return {"status": novo_status}
 
 # =========================================================
 # 🛡️ GESTÃO DE ADMINISTRADORES (BLINDADO)
