@@ -6021,6 +6021,41 @@ def mark_one_read(
     
     return {"status": "ok"}
 
+# ============================================================
+# 🚑 ROTA DE EMERGÊNCIA: RESGATAR DADOS ANTIGOS
+# ============================================================
+@app.post("/api/admin/fix-ownership")
+def resgatar_bots_orfaos(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Vincula todos os bots que estão 'sem dono' (NULL) ao usuário atual.
+    Use isso na conta ADMIN para recuperar o acesso aos dados antigos.
+    """
+    try:
+        # 1. Busca bots sem dono (owner_id é NULL)
+        bots_orfaos = db.query(Bot).filter(Bot.owner_id == None).all()
+        
+        count = 0
+        for bot in bots_orfaos:
+            bot.owner_id = current_user.id # Vincula ao usuário logado (Você)
+            count += 1
+            
+        db.commit()
+        
+        # 2. Atualiza também os Leads antigos que possam estar sem bot vinculado (opcional, mas bom)
+        # (Geralmente o lead já tem bot_id, então ao resgatar o bot, o lead vem junto)
+        
+        return {
+            "status": "success", 
+            "message": f"Sucesso! {count} bots antigos foram vinculados à sua conta ({current_user.username}). Os dados devem aparecer agora."
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "detail": str(e)}
+
 # =========================================================
 # ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)
 # =========================================================
