@@ -291,7 +291,7 @@ def get_client_ip(request: Request) -> str:
 # =========================================================
 def log_action(
     db: Session,
-    user_id: int,
+    user_id: Optional[int], # <--- ALTERADO DE 'int' PARA 'Optional[int]'
     username: str,
     action: str,
     resource_type: str,
@@ -305,19 +305,6 @@ def log_action(
 ):
     """
     Registra uma ação de auditoria no banco de dados
-    
-    Parâmetros:
-    - user_id: ID do usuário que executou a ação
-    - username: Nome do usuário (denormalizado para performance)
-    - action: Tipo de ação (ex: "bot_created", "login_success")
-    - resource_type: Tipo de recurso afetado (ex: "bot", "plano", "auth")
-    - resource_id: ID do recurso (opcional)
-    - description: Descrição legível da ação
-    - details: Dicionário com dados extras (será convertido para JSON)
-    - success: Se a ação foi bem-sucedida
-    - error_message: Mensagem de erro (se houver)
-    - ip_address: IP do cliente
-    - user_agent: Navegador/dispositivo do cliente
     """
     try:
         # Converte details para JSON se for dict
@@ -328,7 +315,7 @@ def log_action(
         
         # Cria o registro de auditoria
         audit_log = AuditLog(
-            user_id=user_id,
+            user_id=user_id, # Se vier None, o banco grava NULL (permitido se a coluna não for NOT NULL)
             username=username,
             action=action,
             resource_type=resource_type,
@@ -1563,11 +1550,15 @@ def register(user_data: UserCreate, request: Request, db: Session = Depends(get_
     from database import User 
 
     # 1. 🛡️ VERIFICAÇÃO HUMANIDADE (TURNSTILE)
+    # 2. VERIFICAÇÃO TURNSTILE
+    # Se estiver rodando localmente (localhost), as vezes queremos pular, 
+    # mas no servidor (Railway) é obrigatório.
     if not verify_turnstile(user_data.turnstile_token):
-        # Log da tentativa falha
-        log_action(db=db, user_id=0, username=user_data.username, action="register_bot_blocked", resource_type="auth", 
-                   description="Bloqueado pelo Turnstile (Robô detectado)", success=False, ip_address=get_client_ip(request))
-        raise HTTPException(status_code=400, detail="Verificação de segurança falhou. Atualize a página e tente novamente.")
+         # 👇 CORRIGIDO AQUI: user_id=None
+         log_action(db=db, user_id=None, username=user_data.username, action="login_bot_blocked", resource_type="auth", 
+                   description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
+         # Retornamos 400 com mensagem clara para o SweetAlert
+         raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
 
     # Validações normais
     existing_user = db.query(User).filter(User.username == user_data.username).first()
