@@ -1092,9 +1092,8 @@ class BotResponse(BotCreate):
     leads: int = 0
     revenue: float = 0.0
     
-    # ✅ CORREÇÃO PYDANTIC V2
+    # ✅ CONFIGURAÇÃO CORRETA
     model_config = ConfigDict(from_attributes=True)
-
 class PlanoCreate(BaseModel):
     bot_id: int
     nome_exibicao: str
@@ -1109,10 +1108,9 @@ class PlanoUpdate(BaseModel):
     preco: Optional[float] = None
     dias_duracao: Optional[int] = None
     
-    # ✅ CORREÇÃO PYDANTIC V2
+    # ✅ CONFIGURAÇÃO CORRETA (Pydantic V2)
+    # Removemos a "class Config" antiga que estava causando o conflito
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    class Config:
-        arbitrary_types_allowed = True
 class FlowUpdate(BaseModel):
     msg_boas_vindas: str
     media_url: Optional[str] = None
