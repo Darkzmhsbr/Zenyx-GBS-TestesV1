@@ -835,6 +835,113 @@ def get_plataforma_pushin_id(db: Session) -> str:
     except Exception as e:
         logger.error(f"Erro ao buscar pushin_pay_id da plataforma: {e}")
         return None
+# =========================================================
+# 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA)
+# =========================================================
+# =========================================================
+# 🔌 INTEGRAÇÃO PUSHIN PAY (COM SPLIT AUTOMÁTICO)
+# =========================================================
+def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db: Session):
+    """
+    Gera PIX com Split automático de taxa para a plataforma.
+    
+    Args:
+        valor_float: Valor do PIX em reais (ex: 100.50)
+        transaction_id: ID único da transação
+        bot_id: ID do bot que está gerando o PIX
+        db: Sessão do banco de dados
+    
+    Returns:
+        dict: Resposta da API Pushin Pay ou None em caso de erro
+    """
+    token = get_pushin_token()
+    
+    if not token:
+        logger.error("❌ Token Pushin Pay não configurado!")
+        return None
+    
+    url = "https://api.pushinpay.com.br/api/pix/cashIn"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    # URL do Webhook
+    seus_dominio = "zenyx-gbs-testesv1-production.up.railway.app" 
+    
+    # Valor em centavos
+    valor_centavos = int(valor_float * 100)
+    
+    # Monta payload básico
+    payload = {
+        "value": valor_centavos, 
+        "webhook_url": f"https://{seus_dominio}/webhook/pix",
+        "external_reference": transaction_id
+    }
+    
+    # ========================================
+    # 💰 LÓGICA DE SPLIT (TAXA DA PLATAFORMA)
+    # ========================================
+    try:
+        # 1. Busca o bot
+        bot = db.query(Bot).filter(Bot.id == bot_id).first()
+        
+        if bot and bot.owner_id:
+            # 2. Busca o dono do bot (membro)
+            from database import User
+            owner = db.query(User).filter(User.id == bot.owner_id).first()
+            
+            if owner:
+                # 3. Busca o pushin_pay_id da PLATAFORMA (para receber a taxa)
+                plataforma_id = get_plataforma_pushin_id(db)
+                
+                if plataforma_id:
+                    # 4. Define a taxa (padrão: R$ 0,60)
+                    taxa_centavos = owner.taxa_venda or 60
+                    
+                    # 5. Validação: Taxa não pode ser maior que o valor total
+                    if taxa_centavos >= valor_centavos:
+                        logger.warning(f"⚠️ Taxa ({taxa_centavos}) >= Valor Total ({valor_centavos}). Split ignorado.")
+                    else:
+                        # 6. Monta o split_rules
+                        payload["split_rules"] = [
+                            {
+                                "value": taxa_centavos,
+                                "account_id": plataforma_id
+                            }
+                        ]
+                        
+                        logger.info(f"💸 Split configurado: Taxa R$ {taxa_centavos/100:.2f} → Conta {plataforma_id[:8]}...")
+                        logger.info(f"   Membro receberá: R$ {(valor_centavos - taxa_centavos)/100:.2f}")
+                else:
+                    logger.warning("⚠️ Pushin Pay ID da plataforma não configurado. Gerando PIX SEM split.")
+            else:
+                logger.warning(f"⚠️ Owner do bot {bot_id} não encontrado. Gerando PIX SEM split.")
+        else:
+            logger.warning(f"⚠️ Bot {bot_id} sem owner_id. Gerando PIX SEM split.")
+            
+    except Exception as e:
+        logger.error(f"❌ Erro ao configurar split: {e}. Gerando PIX SEM split.")
+        # Continua sem split em caso de erro
+    
+    # ========================================
+    # 📤 ENVIA REQUISIÇÃO PARA PUSHIN PAY
+    # ========================================
+    try:
+        logger.info(f"📤 Gerando PIX de R$ {valor_float:.2f}. Webhook: https://{seus_dominio}/webhook/pix")
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        
+        if response.status_code in [200, 201]:
+            logger.info(f"✅ PIX gerado com sucesso! ID: {response.json().get('id')}")
+            return response.json()
+        else:
+            logger.error(f"❌ Erro PushinPay: {response.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Exceção ao gerar PIX: {e}")
+        return None
 
 # --- HELPER: Notificar Admin Principal ---
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
