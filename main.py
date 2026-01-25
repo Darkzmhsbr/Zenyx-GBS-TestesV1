@@ -3697,7 +3697,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
 # ============================================================
-# ROTA 1: LISTAR LEADS (TOPO DO FUNIL) - CORRIGIDO E DEDUPLICADO
+# ROTA 1: LISTAR LEADS (TOPO DO FUNIL) - VERSÃO DEDUPLICADA
 # ============================================================
 @app.get("/api/admin/leads")
 async def listar_leads(
@@ -3708,11 +3708,11 @@ async def listar_leads(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Lista leads únicos (uma linha por pessoa), filtrados pelo usuário logado.
-    Remove duplicatas visualmente usando lógica de dicionário.
+    Lista leads únicos. Se o usuário entrou 10 vezes no bot, 
+    mostra apenas a última vez (mais recente).
     """
     try:
-        # 1. Identifica bots do usuário
+        # 1. Identifica os Bots do Usuário
         user_bot_ids = [bot.id for bot in current_user.bots]
         
         # Se conta nova (sem bots), retorna vazio
@@ -3722,28 +3722,30 @@ async def listar_leads(
         # 2. Define Bots Alvo
         bots_alvo = [bot_id] if (bot_id and bot_id in user_bot_ids) else user_bot_ids
 
-        # 3. Busca TODOS os Leads Brutos (Sem limite no SQL para podermos limpar duplicatas)
-        # Ordenamos por Data DESC para que o primeiro processado seja o mais recente
+        # 3. BUSCA BRUTA (SEM LIMIT/OFFSET NO SQL)
+        # Trazemos tudo ordenado do mais recente para o mais antigo.
+        # Isso é essencial para que a deduplicação mantenha o registro mais novo.
         raw_leads = db.query(Lead).filter(
             Lead.bot_id.in_(bots_alvo)
         ).order_by(Lead.created_at.desc()).all()
         
-        # 4. Lógica de DEDUPLICAÇÃO (O Segredo) 🧠
+        # 4. LÓGICA DE DEDUPLICAÇÃO (O "LIQUIDIFICADOR") 🌪️
         leads_unicos = {}
         
         for lead in raw_leads:
+            # Normaliza o ID
             tid = str(lead.user_id).strip()
             # Chave única: Bot + Usuário
             key = f"{lead.bot_id}_{tid}"
             
-            # Como ordenamos por DESC (mais novo primeiro), se a chave já existe,
-            # significa que é uma versão mais antiga (duplicata). Nós ignoramos.
-            # Se não existe, nós adicionamos.
+            # Se essa chave AINDA NÃO existe no dicionário, adicionamos.
+            # Como a lista está ordenada por Data DESC, o primeiro que aparece é o mais novo.
+            # Os próximos (mais velhos) serão ignorados pelo 'if key not in leads_unicos'.
             if key not in leads_unicos:
                 leads_unicos[key] = {
                     "id": lead.id,
                     "user_id": tid,
-                    "nome": lead.nome or "Sem nome",
+                    "nome": lead.nome,
                     "username": lead.username,
                     "bot_id": lead.bot_id,
                     "status": lead.status,
@@ -3755,12 +3757,17 @@ async def listar_leads(
                     "created_at": lead.created_at.isoformat() if lead.created_at else None
                 }
         
-        # 5. Paginação manual na lista limpa
+        # 5. PAGINAÇÃO MANUAL (NA LISTA LIMPA)
+        # Transforma o dicionário em lista
         lista_final = list(leads_unicos.values())
+        
+        # Totais reais (sem duplicatas)
         total = len(lista_final)
         
-        offset = (page - 1) * per_page
-        paginated_data = lista_final[offset:offset + per_page]
+        # Recorte da página
+        start = (page - 1) * per_page
+        end = start + per_page
+        paginated_data = lista_final[start:end]
         
         return {
             "data": paginated_data,
@@ -3772,7 +3779,7 @@ async def listar_leads(
     
     except Exception as e:
         logger.error(f"Erro ao listar leads: {str(e)}")
-        # Retorna vazio para não quebrar a tela
+        # Retorna lista vazia para não quebrar o front
         return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
 # ============================================================
