@@ -3697,7 +3697,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
 # ============================================================
-# ROTA 1: LISTAR LEADS (TOPO DO FUNIL) - CORRIGIDO
+# ROTA 1: LISTAR LEADS (TOPO DO FUNIL) - CORRIGIDO E DEDUPLICADO
 # ============================================================
 @app.get("/api/admin/leads")
 async def listar_leads(
@@ -3707,53 +3707,63 @@ async def listar_leads(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Lista leads únicos (uma linha por pessoa), filtrados pelo usuário logado.
+    Remove duplicatas visualmente usando lógica de dicionário.
+    """
     try:
+        # 1. Identifica bots do usuário
         user_bot_ids = [bot.id for bot in current_user.bots]
+        
+        # Se conta nova (sem bots), retorna vazio
         if not user_bot_ids:
             return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
-        # Query Base
-        query = db.query(Lead)
+        # 2. Define Bots Alvo
+        bots_alvo = [bot_id] if (bot_id and bot_id in user_bot_ids) else user_bot_ids
 
-        # Filtros de Bot
-        if bot_id:
-            if bot_id not in user_bot_ids:
-                return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
-            query = query.filter(Lead.bot_id == bot_id)
-        else:
-            query = query.filter(Lead.bot_id.in_(user_bot_ids))
+        # 3. Busca TODOS os Leads Brutos (Sem limite no SQL para podermos limpar duplicatas)
+        # Ordenamos por Data DESC para que o primeiro processado seja o mais recente
+        raw_leads = db.query(Lead).filter(
+            Lead.bot_id.in_(bots_alvo)
+        ).order_by(Lead.created_at.desc()).all()
         
-        # 🔥 FIX DUPLICATAS: Garante unicidade por user_id + bot_id
-        # No Postgres, DISTINCT ON requer que o ORDER BY comece pelas mesmas colunas
-        query = query.distinct(Lead.bot_id, Lead.user_id)
+        # 4. Lógica de DEDUPLICAÇÃO (O Segredo) 🧠
+        leads_unicos = {}
         
-        # Ordenação Obrigatória para o DISTINCT ON funcionar (Bot > User > Data Recente)
-        query = query.order_by(Lead.bot_id, Lead.user_id, Lead.created_at.desc())
+        for lead in raw_leads:
+            tid = str(lead.user_id).strip()
+            # Chave única: Bot + Usuário
+            key = f"{lead.bot_id}_{tid}"
+            
+            # Como ordenamos por DESC (mais novo primeiro), se a chave já existe,
+            # significa que é uma versão mais antiga (duplicata). Nós ignoramos.
+            # Se não existe, nós adicionamos.
+            if key not in leads_unicos:
+                leads_unicos[key] = {
+                    "id": lead.id,
+                    "user_id": tid,
+                    "nome": lead.nome or "Sem nome",
+                    "username": lead.username,
+                    "bot_id": lead.bot_id,
+                    "status": lead.status,
+                    "funil_stage": lead.funil_stage,
+                    "primeiro_contato": lead.primeiro_contato.isoformat() if lead.primeiro_contato else None,
+                    "ultimo_contato": lead.ultimo_contato.isoformat() if lead.ultimo_contato else None,
+                    "total_remarketings": lead.total_remarketings,
+                    "ultimo_remarketing": lead.ultimo_remarketing.isoformat() if lead.ultimo_remarketing else None,
+                    "created_at": lead.created_at.isoformat() if lead.created_at else None
+                }
         
-        # Total Real (Pessoas únicas)
-        total = query.count()
+        # 5. Paginação manual na lista limpa
+        lista_final = list(leads_unicos.values())
+        total = len(lista_final)
         
-        # Paginação
         offset = (page - 1) * per_page
-        leads = query.offset(offset).limit(per_page).all()
-        
-        # Formata resposta
-        leads_data = []
-        for lead in leads:
-            leads_data.append({
-                "id": lead.id,
-                "user_id": lead.user_id,
-                "nome": lead.nome,
-                "username": lead.username,
-                "bot_id": lead.bot_id,
-                "status": lead.status,
-                "funil_stage": lead.funil_stage,
-                "primeiro_contato": lead.primeiro_contato.isoformat() if lead.primeiro_contato else None,
-                "created_at": lead.created_at.isoformat() if lead.created_at else None
-            })
+        paginated_data = lista_final[offset:offset + per_page]
         
         return {
-            "data": leads_data,
+            "data": paginated_data,
             "total": total,
             "page": page,
             "per_page": per_page,
@@ -3762,9 +3772,8 @@ async def listar_leads(
     
     except Exception as e:
         logger.error(f"Erro ao listar leads: {str(e)}")
-        # Retorna vazio em caso de erro de SQL complexo para não quebrar o front
+        # Retorna vazio para não quebrar a tela
         return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
-
 
 # ============================================================
 # ROTA 2: ESTATÍSTICAS DO FUNIL
