@@ -835,7 +835,7 @@ def get_plataforma_pushin_id(db: Session) -> str:
     except Exception as e:
         logger.error(f"Erro ao buscar pushin_pay_id da plataforma: {e}")
         return None
-        
+
 # --- HELPER: Notificar Admin Principal ---
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
@@ -1274,6 +1274,10 @@ class UserUpdate(BaseModel):
     role: Optional[str] = None
     status: Optional[str] = None
     custom_expiration: Optional[str] = None # 'vitalicio', 'remover' ou data YYYY-MM-DD
+
+# =========================================================
+# 💰 ROTA DE PAGAMENTO (PIX) - CRÍTICO PARA O MINI APP
+# =========================================================
 
 # =========================================================
 # 💰 ROTA DE PAGAMENTO (PIX) - CRÍTICO PARA O MINI APP
