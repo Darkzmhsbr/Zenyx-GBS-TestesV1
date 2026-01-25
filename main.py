@@ -6357,3 +6357,57 @@ def limpar_leads_que_viraram_pedidos(db: Session = Depends(get_db)):
         db.rollback()
         logger.error(f"Erro: {e}")
         return {"status": "error", "mensagem": str(e)}
+
+# =========================================================
+# 🚑 ROTA DE EMERGÊNCIA: RESTAURAR ADMIN E CONFIGURAR ID
+# =========================================================
+@app.get("/api/admin/fix-account-emergency")
+def fix_admin_account_emergency(db: Session = Depends(get_db)):
+    try:
+        # SEU ID DA PUSHIN PAY (FIXO)
+        MY_PUSHIN_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
+        USERNAME_ALVO = "AdminZenyx" 
+        
+        # 1. Tenta achar o usuário
+        user = db.query(User).filter(User.username == USERNAME_ALVO).first()
+        
+        if user:
+            # CENÁRIO A: Usuário existe, mas estava sem o ID
+            msg_anterior = f"ID anterior: {user.pushin_pay_id}"
+            user.pushin_pay_id = MY_PUSHIN_ID
+            user.is_superuser = True
+            user.role = "admin"
+            db.commit()
+            return {
+                "status": "restored", 
+                "msg": f"✅ Usuário {USERNAME_ALVO} encontrado e atualizado!",
+                "detail": f"{msg_anterior} -> Novo ID: {MY_PUSHIN_ID}"
+            }
+        
+        else:
+            # CENÁRIO B: Usuário sumiu (Recriar)
+            from passlib.context import CryptContext
+            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+            hashed_password = pwd_context.hash("123456") # Senha temporária
+            
+            new_user = User(
+                username=USERNAME_ALVO,
+                email="admin@zenyx.com",
+                hashed_password=hashed_password,
+                is_active=True,
+                is_superuser=True,
+                role="admin",
+                pushin_pay_id=MY_PUSHIN_ID, # 🔥 GRAVA O ID AQUI
+                created_at=datetime.utcnow()
+            )
+            db.add(new_user)
+            db.commit()
+            return {
+                "status": "created", 
+                "msg": f"⚠️ Usuário {USERNAME_ALVO} foi RECRIADO com sucesso.",
+                "senha_temporaria": "123456",
+                "pushin_id": MY_PUSHIN_ID
+            }
+
+    except Exception as e:
+        return {"status": "error", "msg": str(e)}
