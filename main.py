@@ -6411,3 +6411,34 @@ def fix_admin_account_emergency(db: Session = Depends(get_db)):
 
     except Exception as e:
         return {"status": "error", "msg": str(e)}
+
+# =========================================================
+# 🕵️‍♂️ RAIO-X: LISTAR USUÁRIOS E CONEXÃO ATUAL
+# =========================================================
+@app.get("/api/admin/debug-users-list")
+def debug_users_list(db: Session = Depends(get_db)):
+    try:
+        # 1. Descobre em qual banco estamos conectados
+        db_url = str(engine.url)
+        # Esconde a senha para segurança, mostra só o HOST e NOME
+        host_info = db_url.split("@")[-1] 
+        
+        # 2. Busca TODOS os usuários brutos
+        users = db.query(User).all()
+        
+        lista_users = []
+        for u in users:
+            lista_users.append({
+                "id": u.id,
+                "username": u.username,
+                "role": u.role,
+                "pushin_pay_id": u.pushin_pay_id
+            })
+            
+        return {
+            "ESTOU_CONECTADO_EM": host_info,
+            "TOTAL_USUARIOS": len(users),
+            "LISTA_COMPLETA": lista_users
+        }
+    except Exception as e:
+        return {"erro": str(e)}
