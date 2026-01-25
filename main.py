@@ -6709,3 +6709,62 @@ def cron_check_expired(db: Session = Depends(get_db)):
         "removidos_sucesso": removidos, 
         "erros": erros
     }
+# =========================================================
+# 🧹 FAXINA GERAL: REMOVE DUPLICATAS E CORRIGE DATAS
+# =========================================================
+@app.get("/api/admin/fix-duplicates-and-dates")
+def fix_duplicates_and_dates(db: Session = Depends(get_db)):
+    try:
+        # 1. Busca TODOS os Leads
+        leads = db.query(Lead).order_by(Lead.bot_id, Lead.user_id, desc(Lead.created_at)).all()
+        
+        unicos = {}
+        deletados = 0
+        atualizados = 0
+        
+        # 2. Lógica de Deduplicação
+        for lead in leads:
+            # Chave única: Bot + Telegram ID
+            chave = f"{lead.bot_id}_{lead.user_id}"
+            
+            if chave not in unicos:
+                # Se é a primeira vez que vemos este usuário, guardamos ele como o "OFICIAL"
+                unicos[chave] = lead
+            else:
+                # Se já vimos, este é uma DUPLICATA (e como ordenamos por desc, é o mais antigo)
+                lead_oficial = unicos[chave]
+                
+                # Se a duplicata tiver uma data melhor que o oficial, a gente rouba a data dela
+                if lead.expiration_date and (not lead_oficial.expiration_date or lead.expiration_date > lead_oficial.expiration_date):
+                    lead_oficial.expiration_date = lead.expiration_date
+                    lead_oficial.status = 'active'
+                
+                # Marca para deletar do banco
+                db.delete(lead)
+                deletados += 1
+
+        # 3. Agora varre os Pedidos para garantir que o Lead Oficial tenha a data certa
+        # (Isso resolve o problema do "Vitalício")
+        pedidos = db.query(Pedido).filter(Pedido.status == 'approved').all()
+        for p in pedidos:
+            chave_p = f"{p.bot_id}_{p.telegram_id}"
+            if chave_p in unicos:
+                lead_alvo = unicos[chave_p]
+                # Se a data do pedido for melhor/mais nova, atualiza o lead
+                if p.data_expiracao:
+                    lead_alvo.expiration_date = p.data_expiracao
+                    lead_alvo.status = 'active'
+                    atualizados += 1
+
+        db.commit()
+        
+        return {
+            "status": "sucesso",
+            "duplicatas_removidas": deletados,
+            "leads_corrigidos_pelo_pedido": atualizados,
+            "mensagem": "Sua tabela de contatos agora tem apenas 1 linha por cliente e as datas estão corretas."
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {"erro": str(e)}
