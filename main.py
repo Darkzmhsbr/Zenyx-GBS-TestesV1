@@ -2970,6 +2970,11 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
 # =========================================================
 # 💳 WEBHOOK PIX (PUSHIN PAY) - VERSÃO BLINDADA + CORREÇÃO DE THREAD
 # =========================================================
+# =========================================================
+# 💳 WEBHOOK PIX (PUSHIN PAY) - ROTA DUPLA CORRIGIDA
+# =========================================================
+# 🔥 O SEGREDO: Adicionamos a rota que estava dando 404 no log!
+@app.post("/api/webhooks/pushinpay") 
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     print("🔔 WEBHOOK PIX CHEGOU!") 
