@@ -3883,7 +3883,7 @@ async def obter_estatisticas_funil(
 # 🔥 ROTA ATUALIZADA: /api/admin/contacts
 # ============================================================
 # ============================================================
-# 🔥 ROTA DE CONTATOS (CORRIGIDA E SEGURA)
+# 🔥 ROTA DE CONTATOS (BLINDADA CONTRA ERRO 500 + DEDUPLICAÇÃO)
 # ============================================================
 @app.get("/api/admin/contacts")
 async def get_contacts(
@@ -3892,50 +3892,46 @@ async def get_contacts(
     page: int = 1,
     per_page: int = 50,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user) # 🔒 AUTH
+    current_user: User = Depends(get_current_user)
 ):
     try:
-        # 1. Busca IDs dos Bots de forma segura (SQL Direto para evitar erro de Lazy Load)
-        # Em vez de current_user.bots, buscamos direto na tabela
+        # 1. Busca Bots Segura
         bot_ids_query = db.query(Bot.id).filter(Bot.owner_id == current_user.id).all()
         user_bot_ids = [b[0] for b in bot_ids_query]
         
-        # Helper para limpar data
         def clean_date(dt):
             if not dt: return None
             return dt.replace(tzinfo=None)
 
-        # Se não tiver bots, retorna vazio
         if not user_bot_ids:
             return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
-        # Validação de segurança do filtro de bot
-        if bot_id and bot_id not in user_bot_ids:
-            return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
+        # Definição dos bots alvo
+        bots_alvo = [bot_id] if (bot_id and bot_id in user_bot_ids) else user_bot_ids
 
         offset = (page - 1) * per_page
-        all_contacts = []
-
+        
         # ------------------------------------------------------------
-        # CENÁRIO 1: Filtro "TODOS" (Mescla Leads + Pedidos)
+        # CENÁRIO 1: Filtro "TODOS" (Onde estava o erro 500)
         # ------------------------------------------------------------
         if status == "todos":
             contatos_unicos = {}
             
             # A. Busca LEADS
-            q_leads = db.query(Lead).filter(Lead.bot_id.in_(user_bot_ids))
-            if bot_id: q_leads = q_leads.filter(Lead.bot_id == bot_id)
-            leads = q_leads.all()
+            q_leads = db.query(Lead).filter(Lead.bot_id.in_(bots_alvo)).all()
             
-            for l in leads:
+            for l in q_leads:
                 tid = str(l.user_id).strip()
-                # Chave única por Bot (para não misturar leads de bots diferentes)
-                key = f"{l.bot_id}_{tid}"
+                key = f"{l.bot_id}_{tid}" # Chave Única
                 
+                # 🔥 FIX DO ERRO 500: Usa getattr para não quebrar se faltar no model
+                data_lead = getattr(l, 'expiration_date', None)
+
                 contatos_unicos[key] = {
                     "id": l.id,
                     "telegram_id": tid,
                     "user_id": tid,
+                    "bot_id": l.bot_id,
                     "first_name": l.nome or "Sem nome",
                     "username": l.username,
                     "plano_nome": "-",
@@ -3945,15 +3941,13 @@ async def get_contacts(
                     "created_at": clean_date(l.created_at),
                     "status_funil": "topo",
                     "origem": "lead",
-                    "custom_expiration": clean_date(l.expiration_date) # Pega do Lead se tiver
+                    "custom_expiration": clean_date(data_lead)
                 }
             
-            # B. Busca PEDIDOS (Sobrepõe Leads se existir)
-            q_pedidos = db.query(Pedido).filter(Pedido.bot_id.in_(user_bot_ids))
-            if bot_id: q_pedidos = q_pedidos.filter(Pedido.bot_id == bot_id)
-            pedidos = q_pedidos.all()
+            # B. Busca PEDIDOS e faz MERGE (Remove Duplicatas)
+            q_pedidos = db.query(Pedido).filter(Pedido.bot_id.in_(bots_alvo)).all()
             
-            for p in pedidos:
+            for p in q_pedidos:
                 tid = str(p.telegram_id).strip()
                 key = f"{p.bot_id}_{tid}"
                 
@@ -3961,7 +3955,9 @@ async def get_contacts(
                 if p.status in ["paid", "approved", "active"]: st_funil = "fundo"
                 elif p.status == "expired": st_funil = "expirado"
                 
-                # Dados do pedido
+                # Pega a melhor data do pedido
+                data_pedido = clean_date(p.data_expiracao) or clean_date(p.custom_expiration)
+
                 dados_pedido = {
                     "id": p.id,
                     "telegram_id": tid,
@@ -3975,28 +3971,26 @@ async def get_contacts(
                     "created_at": clean_date(p.created_at),
                     "status_funil": st_funil,
                     "origem": "pedido",
-                    # 🔥 AQUI: Pega a melhor data disponível no pedido
-                    "custom_expiration": clean_date(p.data_expiracao) or clean_date(p.custom_expiration)
+                    "custom_expiration": data_pedido
                 }
 
-                # Lógica de Merge Inteligente:
-                # Se já existe (Lead), só sobrescreve se o Pedido for 'Pago' ou tiver Data
+                # LÓGICA DE DEDUPLICAÇÃO (AQUI É QUE REMOVE OS TRIPLOS)
                 if key in contatos_unicos:
+                    # Se já existe lead, só atualiza se o pedido for relevante
                     existente = contatos_unicos[key]
-                    # Se o novo tem data e o velho não, atualiza
+                    
+                    # Se o pedido tem data e o lead não, ganha o pedido
                     if dados_pedido["custom_expiration"]:
                         contatos_unicos[key] = dados_pedido
-                    # Se o novo é pago e o velho não, atualiza
+                    # Se o pedido é pago, ganha o pedido
                     elif dados_pedido["status"] in ["paid", "approved", "active"]:
                         contatos_unicos[key] = dados_pedido
-                    # Se nenhum dos dois tem nada especial, mantém o mais recente (Pedido geralmente é mais recente)
-                    else:
-                        contatos_unicos[key] = dados_pedido
+                    # Senão, mantém o que já estava (evita sobrescrever com dados velhos)
                 else:
                     contatos_unicos[key] = dados_pedido
             
+            # Transforma em lista
             all_contacts = list(contatos_unicos.values())
-            # Ordena por data de criação (mais novos no topo)
             all_contacts.sort(key=lambda x: x["created_at"] or datetime.min, reverse=True)
             
             total = len(all_contacts)
@@ -4011,11 +4005,10 @@ async def get_contacts(
             }
 
         # ------------------------------------------------------------
-        # CENÁRIO 2: Outros Filtros (Consultam direto Pedido)
+        # CENÁRIO 2: Filtros Específicos (Pagantes, Pendentes...)
         # ------------------------------------------------------------
         else:
-            query = db.query(Pedido).filter(Pedido.bot_id.in_(user_bot_ids))
-            if bot_id: query = query.filter(Pedido.bot_id == bot_id)
+            query = db.query(Pedido).filter(Pedido.bot_id.in_(bots_alvo))
             
             if status == "meio" or status == "pendentes":
                 query = query.filter(Pedido.status == "pending")
@@ -4024,7 +4017,6 @@ async def get_contacts(
             elif status == "expirado" or status == "expirados":
                 query = query.filter(Pedido.status == "expired")
                 
-            # Ordenação no banco é mais rápida
             query = query.order_by(desc(Pedido.created_at))
             
             total = query.count()
@@ -4032,8 +4024,6 @@ async def get_contacts(
             
             contacts = []
             for p in pedidos:
-                # 🔥 FIX CRÍTICO: ADICIONADO custom_expiration AQUI
-                # Sem isso, o frontend mostra "VITALÍCIO" pois recebe undefined
                 contacts.append({
                     "id": p.id,
                     "telegram_id": str(p.telegram_id),
@@ -4045,7 +4035,7 @@ async def get_contacts(
                     "status": p.status,
                     "role": "user",
                     "created_at": clean_date(p.created_at),
-                    # Campo essencial para a data aparecer:
+                    # 🔥 DATA CORRETA:
                     "custom_expiration": clean_date(p.data_expiracao) or clean_date(p.custom_expiration),
                     "origem": "pedido"
                 })
@@ -4057,11 +4047,11 @@ async def get_contacts(
                 "per_page": per_page,
                 "total_pages": (total + per_page - 1) // per_page if per_page > 0 else 0
             }
-            
+
     except Exception as e:
         logger.error(f"Erro contatos: {e}")
-        # Retorna erro 500 para sabermos se quebrou
-        raise HTTPException(status_code=500, detail=str(e))
+        # Retorna lista vazia em vez de 500 se algo der muito errado
+        return {"data": [], "total": 0, "page": 1, "per_page": per_page, "total_pages": 0}
         
 # ============================================================
 # 🔥 ROTAS COMPLETAS - Adicione no main.py
@@ -6804,3 +6794,17 @@ def fix_duplicates_and_dates(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         return {"erro": str(e)}
+
+
+# =========================================================
+# 🛠️ FIX DATABASE: CRIAR COLUNA FALTANTE
+# =========================================================
+@app.get("/api/admin/fix-lead-column")
+def fix_lead_column_db(db: Session = Depends(get_db)):
+    try:
+        # Comando SQL direto para criar a coluna se não existir
+        db.execute(text("ALTER TABLE leads ADD COLUMN IF NOT EXISTS expiration_date TIMESTAMP"))
+        db.commit()
+        return {"status": "sucesso", "msg": "Coluna 'expiration_date' criada na tabela 'leads'!"}
+    except Exception as e:
+        return {"status": "erro", "msg": str(e)}

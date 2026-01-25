@@ -333,8 +333,9 @@ class Lead(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(String, nullable=False)  # Telegram ID
-    nome = Column(String)
-    username = Column(String)
+    nome = Column(String, nullable=True)
+    username = Column(String, nullable=True)
+    phone = Column(String, nullable=True)     # Telefone (Adicionado para evitar erro na API)
     bot_id = Column(Integer, ForeignKey('bots.id'))
     
     # Classificação
@@ -353,6 +354,14 @@ class Lead(Base):
     
     # Rastreamento
     tracking_id = Column(Integer, ForeignKey("tracking_links.id"), nullable=True)
+    
+    # 🔥 CAMPO NOVO (CORREÇÃO DO VITALÍCIO/ERRO 500)
+    expiration_date = Column(DateTime, nullable=True)
+
+    # Relacionamentos (Essencial para o SQLAlchemy não se perder)
+    bot = relationship("Bot", back_populates="leads")
+    # Se TrackingLink tiver back_populates="leads", descomente abaixo:
+    # tracking_link = relationship("TrackingLink", back_populates="leads")
 
 # =========================================================
 # 📱 MINI APP (TEMPLATE PERSONALIZÁVEL)
