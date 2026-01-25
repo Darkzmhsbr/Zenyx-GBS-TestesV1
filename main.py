@@ -6808,3 +6808,25 @@ def fix_lead_column_db(db: Session = Depends(get_db)):
         return {"status": "sucesso", "msg": "Coluna 'expiration_date' criada na tabela 'leads'!"}
     except Exception as e:
         return {"status": "erro", "msg": str(e)}
+
+# =========================================================
+# 🛠️ FIX FINAL: CRIAR COLUNAS QUE FALTAM (PHONE E EXPIRATION)
+# =========================================================
+@app.get("/api/admin/fix-database-structure")
+def fix_database_structure(db: Session = Depends(get_db)):
+    try:
+        # 1. Cria a coluna PHONE (que está causando o erro agora)
+        db.execute(text("ALTER TABLE leads ADD COLUMN IF NOT EXISTS phone VARCHAR"))
+        
+        # 2. Cria a coluna EXPIRATION_DATE (para garantir o vitalício)
+        db.execute(text("ALTER TABLE leads ADD COLUMN IF NOT EXISTS expiration_date TIMESTAMP"))
+        
+        db.commit()
+        
+        return {
+            "status": "sucesso", 
+            "msg": "✅ Colunas 'phone' e 'expiration_date' criadas com sucesso na tabela LEADS!"
+        }
+    except Exception as e:
+        db.rollback()
+        return {"status": "erro", "msg": str(e)}
