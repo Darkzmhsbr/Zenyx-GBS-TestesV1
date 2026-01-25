@@ -6359,7 +6359,7 @@ def limpar_leads_que_viraram_pedidos(db: Session = Depends(get_db)):
         return {"status": "error", "mensagem": str(e)}
 
 # =========================================================
-# 🚑 ROTA DE EMERGÊNCIA: RESTAURAR ADMIN E CONFIGURAR ID
+# 🚑 ROTA DE EMERGÊNCIA V2 (SEM O CAMPO 'ROLE')
 # =========================================================
 @app.get("/api/admin/fix-account-emergency")
 def fix_admin_account_emergency(db: Session = Depends(get_db)):
@@ -6372,23 +6372,25 @@ def fix_admin_account_emergency(db: Session = Depends(get_db)):
         user = db.query(User).filter(User.username == USERNAME_ALVO).first()
         
         if user:
-            # CENÁRIO A: Usuário existe, mas estava sem o ID
-            msg_anterior = f"ID anterior: {user.pushin_pay_id}"
+            # CENÁRIO A: Atualiza APENAS o ID e o Superuser
+            msg_anterior = f"ID anterior: {getattr(user, 'pushin_pay_id', 'Não existe')}"
+            
             user.pushin_pay_id = MY_PUSHIN_ID
             user.is_superuser = True
-            user.role = "admin"
+            # REMOVIDO: user.role = "admin" (Isso causava o erro!)
+            
             db.commit()
             return {
                 "status": "restored", 
-                "msg": f"✅ Usuário {USERNAME_ALVO} encontrado e atualizado!",
+                "msg": f"✅ Usuário {USERNAME_ALVO} corrigido!",
                 "detail": f"{msg_anterior} -> Novo ID: {MY_PUSHIN_ID}"
             }
         
         else:
-            # CENÁRIO B: Usuário sumiu (Recriar)
+            # CENÁRIO B: Recria o usuário (Sem o campo role)
             from passlib.context import CryptContext
             pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            hashed_password = pwd_context.hash("123456") # Senha temporária
+            hashed_password = pwd_context.hash("123456")
             
             new_user = User(
                 username=USERNAME_ALVO,
@@ -6396,49 +6398,49 @@ def fix_admin_account_emergency(db: Session = Depends(get_db)):
                 hashed_password=hashed_password,
                 is_active=True,
                 is_superuser=True,
-                role="admin",
-                pushin_pay_id=MY_PUSHIN_ID, # 🔥 GRAVA O ID AQUI
+                # role="admin", <--- REMOVIDO DAQUI TAMBÉM
+                pushin_pay_id=MY_PUSHIN_ID,
                 created_at=datetime.utcnow()
             )
             db.add(new_user)
             db.commit()
             return {
                 "status": "created", 
-                "msg": f"⚠️ Usuário {USERNAME_ALVO} foi RECRIADO com sucesso.",
-                "senha_temporaria": "123456",
-                "pushin_id": MY_PUSHIN_ID
+                "msg": f"⚠️ Usuário {USERNAME_ALVO} RECRIADO.",
+                "info": "Senha temporária: 123456"
             }
 
     except Exception as e:
         return {"status": "error", "msg": str(e)}
 
 # =========================================================
-# 🕵️‍♂️ RAIO-X: LISTAR USUÁRIOS E CONEXÃO ATUAL
+# 🕵️‍♂️ RAIO-X BLINDADO (SEM ACESSAR 'ROLE')
 # =========================================================
 @app.get("/api/admin/debug-users-list")
 def debug_users_list(db: Session = Depends(get_db)):
     try:
-        # 1. Descobre em qual banco estamos conectados
+        # 1. Conexão
         db_url = str(engine.url)
-        # Esconde a senha para segurança, mostra só o HOST e NOME
-        host_info = db_url.split("@")[-1] 
+        host_info = db_url.split("@")[-1]
         
-        # 2. Busca TODOS os usuários brutos
+        # 2. Busca Usuários
         users = db.query(User).all()
         
         lista_users = []
         for u in users:
-            lista_users.append({
-                "id": u.id,
-                "username": u.username,
-                "role": u.role,
-                "pushin_pay_id": u.pushin_pay_id
-            })
+            # 🔥 TÉCNICA SEGURA: Converte o objeto para Dicionário
+            # Isso pega apenas as colunas que REALMENTE existem no banco
+            dados_usuario = {}
+            for key, value in u.__dict__.items():
+                if not key.startswith('_'): # Ignora campos internos do SQLAlchemy
+                    dados_usuario[key] = value
+            
+            lista_users.append(dados_usuario)
             
         return {
-            "ESTOU_CONECTADO_EM": host_info,
-            "TOTAL_USUARIOS": len(users),
-            "LISTA_COMPLETA": lista_users
+            "CONEXAO": host_info,
+            "TOTAL": len(users),
+            "DADOS_REAIS": lista_users
         }
     except Exception as e:
-        return {"erro": str(e)}
+        return {"erro_fatal": str(e)}
