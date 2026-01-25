@@ -3278,7 +3278,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
     try:
         body = await req.json()
         update = telebot.types.Update.de_json(body)
-        bot_temp = telebot.TeleBot(token)
+        # 🔥 FIX: threaded=False obriga o envio a acontecer AGORA, sem criar thread paralela
+        bot_temp = telebot.TeleBot(token, threaded=False)
         message = update.message if update.message else None
         
         # ----------------------------------------
@@ -3444,23 +3445,34 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     url = flow.miniapp_url.replace("http://", "https://")
                     mk.add(types.InlineKeyboardButton(text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️", web_app=types.WebAppInfo(url=url)))
                 
-                # SE FOR PADRÃO (AQUI ESTÁ A CORREÇÃO DOS PREÇOS ✅)
+                # SE FOR PADRÃO
                 else:
                     if flow and flow.mostrar_planos_1:
                         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
                         for pl in planos: 
-                            # Formata preço igual ao seu outro projeto
                             preco_txt = f"R$ {pl.preco_atual:.2f}".replace('.', ',')
                             mk.add(types.InlineKeyboardButton(f"💎 {pl.nome_exibicao} - {preco_txt}", callback_data=f"checkout_{pl.id}"))
                     else: 
                         mk.add(types.InlineKeyboardButton(flow.btn_text_1 if flow else "Ver Conteúdo", callback_data="step_1"))
 
+                # 🔥 BLOCO DE ENVIO COM LOG DE ERRO REAL
                 try:
+                    logger.info(f"📤 Tentando enviar menu para {chat_id}...")
                     if media:
-                        if media.endswith(('.mp4', '.mov')): bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
-                        else: bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
-                    else: bot_temp.send_message(chat_id, msg_txt, reply_markup=mk, parse_mode="HTML")
-                except: bot_temp.send_message(chat_id, msg_txt, reply_markup=mk)
+                        if media.endswith(('.mp4', '.mov')): 
+                            bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
+                        else: 
+                            bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
+                    else: 
+                        bot_temp.send_message(chat_id, msg_txt, reply_markup=mk, parse_mode="HTML")
+                    
+                    logger.info("✅ Menu enviado com sucesso!")
+
+                except Exception as e_envio:
+                    logger.error(f"❌ ERRO AO ENVIAR MENSAGEM: {e_envio}")
+                    # Tenta fallback sem HTML
+                    try: bot_temp.send_message(chat_id, msg_txt, reply_markup=mk)
+                    except: pass
 
                 return {"status": "ok"}
 
