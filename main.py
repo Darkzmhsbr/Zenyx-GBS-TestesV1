@@ -2567,62 +2567,72 @@ def salvar_fluxo(
 
 # --- 1. PASTAS (FOLDERS) ---
 
+# =========================================================
+# 🎯 RASTREAMENTO (TRACKING) - V4 (MODO CHEFE SUPREMO)
+# =========================================================
+
+# --- 1. PASTAS (FOLDERS) ---
+
 @app.get("/api/admin/tracking/folders")
 async def list_tracking_folders(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Lista TODAS as pastas para garantir que pastas recém-criadas (vazias) apareçam.
-    As métricas (cliques/vendas) continuam filtradas APENAS pelos bots do usuário.
+    Lista pastas.
+    🔥 TRUQUE: Se for Admin, o sistema assume que TODOS os bots são seus.
     """
     try:
-        user_bot_ids = [bot.id for bot in current_user.bots]
+        # 👑 MODO CHEFE: Se for Admin, pega TODOS os IDs de bots do sistema
+        if current_user.is_superuser:
+            all_bots = db.query(Bot.id).all()
+            user_bot_ids = [b[0] for b in all_bots] # Lista com todos os IDs
+        else:
+            user_bot_ids = [bot.id for bot in current_user.bots]
         
-        # 1. Busca TODAS as pastas (Para garantir que a vazia apareça)
+        # Busca todas as pastas (da mais nova para mais antiga)
         folders = db.query(TrackingFolder).order_by(desc(TrackingFolder.created_at)).all()
         
         result = []
         for f in folders:
-            # 2. Mas calcula métricas APENAS dos SEUS links
-            # Se a pasta for de outro, vai aparecer zerada para você (segurança de dados)
+            # Conta links totais na pasta
+            total_links_absoluto = db.query(TrackingLink).filter(TrackingLink.folder_id == f.id).count()
+            
+            # Conta links "meus" (Para o Admin, "meus" = "todos")
+            meus_links_count = 0
             stats = None
-            link_count = 0
             
             if user_bot_ids:
-                link_count = db.query(TrackingLink).filter(
+                meus_links_count = db.query(TrackingLink).filter(
                     TrackingLink.folder_id == f.id,
                     TrackingLink.bot_id.in_(user_bot_ids)
                 ).count()
                 
-                stats = db.query(
-                    func.sum(TrackingLink.clicks).label('total_clicks'),
-                    func.sum(TrackingLink.vendas).label('total_vendas')
-                ).filter(
-                    TrackingLink.folder_id == f.id,
-                    TrackingLink.bot_id.in_(user_bot_ids)
-                ).first()
+                if meus_links_count > 0:
+                    stats = db.query(
+                        func.sum(TrackingLink.clicks).label('total_clicks'),
+                        func.sum(TrackingLink.vendas).label('total_vendas')
+                    ).filter(
+                        TrackingLink.folder_id == f.id,
+                        TrackingLink.bot_id.in_(user_bot_ids)
+                    ).first()
             
-            # Lógica de Exibição: 
-            # Mostra se tiver links SEUS ou se a pasta estiver VAZIA (recém criada)
-            # (Isso evita poluir sua tela com pastas cheias de outros usuários)
+            # EXIBIÇÃO:
+            # Mostra se for Admin, OU se tiver links meus, OU se for pasta vazia
+            should_show = current_user.is_superuser or (meus_links_count > 0) or (total_links_absoluto == 0)
             
-            total_links_na_pasta = db.query(TrackingLink).filter(TrackingLink.folder_id == f.id).count()
-            eh_pasta_minha = link_count > 0
-            eh_pasta_vazia = total_links_na_pasta == 0
-            
-            if eh_pasta_minha or eh_pasta_vazia:
+            if should_show:
                 result.append({
                     "id": f.id, 
                     "nome": f.nome, 
                     "plataforma": f.plataforma, 
-                    "link_count": link_count,
+                    "link_count": meus_links_count,
                     "total_clicks": (stats.total_clicks if stats else 0) or 0,
                     "total_vendas": (stats.total_vendas if stats else 0) or 0,
                     "created_at": f.created_at
                 })
         
-        logger.info(f"📂 Usuário {current_user.username} listou {len(result)} pastas visíveis")
+        logger.info(f"📂 Usuário {current_user.username} (Super={current_user.is_superuser}) vê {len(result)} pastas")
         return result
         
     except Exception as e:
@@ -2635,17 +2645,14 @@ async def create_tracking_folder(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Cria uma nova pasta. 
-    """
     try:
-        # Verifica se já existe (Nome exato)
+        # Verifica duplicidade (case insensitive)
         existe = db.query(TrackingFolder).filter(
             func.lower(TrackingFolder.nome) == dados.nome.lower()
         ).first()
         
         if existe:
-            # Retorna a existente para não dar erro no frontend
+            # Retorna sucesso fake para não travar o front, mas avisa no log
             return {"status": "ok", "id": existe.id, "msg": "Pasta já existia"}
 
         nova_pasta = TrackingFolder(
@@ -2669,26 +2676,29 @@ async def delete_tracking_folder(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Deleta pasta. Só permite deletar se NÃO tiver links de outros usuários.
-    """
     try:
-        user_bot_ids = [bot.id for bot in current_user.bots]
+        # 👑 MODO CHEFE: Admin tem todos os bots na mão
+        if current_user.is_superuser:
+            all_bots = db.query(Bot.id).all()
+            user_bot_ids = [b[0] for b in all_bots]
+        else:
+            user_bot_ids = [bot.id for bot in current_user.bots]
         
         folder = db.query(TrackingFolder).filter(TrackingFolder.id == fid).first()
         if not folder:
             raise HTTPException(404, "Pasta não encontrada")
         
-        # Verifica se tem links de OUTROS (Proteção contra apagar pasta dos outros)
-        links_outros = db.query(TrackingLink).filter(
-            TrackingLink.folder_id == fid,
-            TrackingLink.bot_id.notin_(user_bot_ids)
-        ).count()
+        # Proteção: Se não for admin, verifica se tem links de "estranhos"
+        if not current_user.is_superuser:
+            links_outros = db.query(TrackingLink).filter(
+                TrackingLink.folder_id == fid,
+                TrackingLink.bot_id.notin_(user_bot_ids)
+            ).count()
+            
+            if links_outros > 0:
+                raise HTTPException(403, "Pasta contém links de outros usuários.")
         
-        if links_outros > 0:
-            raise HTTPException(403, "Você não pode deletar esta pasta pois ela contém links de outros usuários.")
-        
-        # Se chegou aqui, ou é vazia ou só tem links meus. Pode apagar.
+        # Deleta tudo (Cascade manual)
         db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
         db.delete(folder)
         db.commit()
@@ -2709,11 +2719,17 @@ async def list_tracking_links(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Lista APENAS os links que pertencem aos bots do usuário.
+    Lista links. Admin vê TUDO. Usuário vê SEUS.
     """
+    if current_user.is_superuser:
+        # Admin vê tudo sem filtro
+        return db.query(TrackingLink).filter(
+            TrackingLink.folder_id == folder_id
+        ).order_by(desc(TrackingLink.created_at)).all()
+    
+    # Usuário normal
     user_bot_ids = [bot.id for bot in current_user.bots]
-    if not user_bot_ids:
-        return []
+    if not user_bot_ids: return []
     
     return db.query(TrackingLink).filter(
         TrackingLink.folder_id == folder_id,
@@ -2726,13 +2742,15 @@ async def create_tracking_link(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Cria link validando se o Bot pertence ao usuário.
-    """
     try:
-        user_bot_ids = [bot.id for bot in current_user.bots]
-        if dados.bot_id not in user_bot_ids:
-            raise HTTPException(403, "Você não tem permissão para criar links neste bot.")
+        # 👑 MODO CHEFE: Admin pode criar link para qualquer bot
+        if current_user.is_superuser:
+            # Não fazemos check de propriedade se for admin
+            pass
+        else:
+            user_bot_ids = [bot.id for bot in current_user.bots]
+            if dados.bot_id not in user_bot_ids:
+                raise HTTPException(403, "Você não tem permissão para criar links neste bot.")
 
         if not dados.codigo:
             import random, string
@@ -2757,7 +2775,6 @@ async def create_tracking_link(
         db.commit()
         db.refresh(novo_link)
         
-        logger.info(f"🔗 Link '{dados.nome}' criado por {current_user.username}")
         return {"status": "ok", "link": novo_link}
 
     except HTTPException as he:
@@ -2772,17 +2789,15 @@ async def delete_link(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Deleta link validando propriedade.
-    """
-    user_bot_ids = [bot.id for bot in current_user.bots]
-    
     link = db.query(TrackingLink).filter(TrackingLink.id == lid).first()
     if not link:
         raise HTTPException(404, "Link não encontrado")
     
-    if link.bot_id not in user_bot_ids:
-        raise HTTPException(403, "Acesso negado")
+    # Se não for admin, verifica propriedade
+    if not current_user.is_superuser:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        if link.bot_id not in user_bot_ids:
+            raise HTTPException(403, "Acesso negado")
     
     db.delete(link)
     db.commit()
