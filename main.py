@@ -2179,64 +2179,53 @@ def listar_bots(
 # =========================================================
 
 # 1. LISTAR PLANOS
+# 1. LISTAR PLANOS
+# =========================================================
+# 💎 GERENCIAMENTO DE PLANOS (CORRIGIDO E UNIFICADO)
+# =========================================================
+
+# 1. LISTAR PLANOS
 # =========================================================
 # 💎 GERENCIAMENTO DE PLANOS (CORRIGIDO E UNIFICADO)
 # =========================================================
 
 # 1. LISTAR PLANOS
 @app.get("/api/admin/bots/{bot_id}/plans")
-def list_plans(
-    bot_id: int, 
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
-):
-    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
-    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
-    
-    # ... RESTO DO CÓDIGO PERMANECE IGUAL
+def list_plans(bot_id: int, db: Session = Depends(get_db)):
     planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
     return planos
 
 # 2. CRIAR PLANO (CORRIGIDO)
 @app.post("/api/admin/bots/{bot_id}/plans")
-async def create_plan(
-    bot_id: int, 
-    req: Request, 
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
-):
-    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
-    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
-    
-    # ... RESTO DO CÓDIGO PERMANECE EXATAMENTE IGUAL (NÃO MUDE NADA ABAIXO)
+async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
     try:
         data = await req.json()
         logger.info(f"📝 Criando plano para Bot {bot_id}: {data}")
         
         # Tenta pegar preco_original, se não tiver, usa 0.0
         preco_orig = float(data.get("preco_original", 0.0))
-        
         # Se o preço original for 0, define como o dobro do atual (padrão de marketing)
         if preco_orig == 0:
             preco_orig = float(data.get("preco_atual", 0.0)) * 2
-        
+
         novo_plano = PlanoConfig(
             bot_id=bot_id,
             nome_exibicao=data.get("nome_exibicao", "Novo Plano"),
             descricao=data.get("descricao", f"Acesso de {data.get('dias_duracao')} dias"),
             preco_atual=float(data.get("preco_atual", 0.0)),
-            preco_cheio=preco_orig,
+            # Tenta usar 'preco_cheio' se 'preco_original' falhar (adaptação ao banco)
+            preco_cheio=preco_orig, 
             dias_duracao=int(data.get("dias_duracao", 30)),
-            key_id=f"plan_{bot_id}_{int(time.time())}"
+            key_id=f"plan_{bot_id}_{int(time.time())}" # Garante chave única
         )
         
         db.add(novo_plano)
         db.commit()
         db.refresh(novo_plano)
-        
         return novo_plano
-        
+
     except TypeError as te:
+        # Se der erro de coluna inexistente, tenta criar sem o campo problemático
         logger.warning(f"⚠️ Tentando criar plano sem 'preco_cheio' devido a erro: {te}")
         db.rollback()
         try:
@@ -2255,25 +2244,17 @@ async def create_plan(
         except Exception as e2:
             logger.error(f"Erro fatal ao criar plano: {e2}")
             raise HTTPException(status_code=500, detail=str(e2))
+            
     except Exception as e:
         logger.error(f"Erro genérico ao criar plano: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # 3. EDITAR PLANO (ROTA UNIFICADA)
 @app.put("/api/admin/bots/{bot_id}/plans/{plano_id}")
-async def update_plan(
-    bot_id: int, 
-    plano_id: int, 
-    req: Request, 
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
-):
-    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
-    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
-    
+async def update_plan(bot_id: int, plano_id: int, req: Request, db: Session = Depends(get_db)):
     try:
         data = await req.json()
-        logger.info(f"✏️ Editando plano {plano_id} do Bot {bot_id}: {data} (Owner: {current_user.username})")
+        logger.info(f"✏️ Editando plano {plano_id} do Bot {bot_id}: {data}")
         
         plano = db.query(PlanoConfig).filter(
             PlanoConfig.id == plano_id, 
@@ -2292,11 +2273,7 @@ async def update_plan(
         
         db.commit()
         db.refresh(plano)
-        
-        logger.info(f"✅ Plano {plano_id} atualizado com sucesso")
-        
         return plano
-        
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -2304,44 +2281,28 @@ async def update_plan(
         raise HTTPException(status_code=500, detail=str(e))
 
 # 4. DELETAR PLANO (COM SEGURANÇA)
-@app.delete("/api/admin/plans/{pid}")
-def del_plano(
-    pid: int, 
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
-):
+@app.delete("/api/admin/bots/{bot_id}/plans/{plano_id}")
+def delete_plan(bot_id: int, plano_id: int, db: Session = Depends(get_db)):
     try:
-        # 1. Busca o plano
-        p = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
-        if not p:
-            return {"status": "deleted", "msg": "Plano não existia"}
+        plano = db.query(PlanoConfig).filter(
+            PlanoConfig.id == plano_id, 
+            PlanoConfig.bot_id == bot_id
+        ).first()
         
-        # 🔒 VERIFICA SE O BOT DO PLANO PERTENCE AO USUÁRIO
-        verificar_bot_pertence_usuario(p.bot_id, current_user.id, db)
+        if not plano:
+            raise HTTPException(status_code=404, detail="Plano não encontrado.")
+            
+        # Desvincula de campanhas e pedidos para evitar erro de integridade
+        db.query(RemarketingCampaign).filter(RemarketingCampaign.plano_id == plano_id).update({RemarketingCampaign.plano_id: None})
+        db.query(Pedido).filter(Pedido.plano_id == plano_id).update({Pedido.plano_id: None})
         
-        # 2. Desvincula de Campanhas de Remarketing (Para não travar)
-        db.query(RemarketingCampaign).filter(RemarketingCampaign.plano_id == pid).update(
-            {RemarketingCampaign.plano_id: None},
-            synchronize_session=False
-        )
-        
-        # 3. Desvincula de Pedidos/Vendas (Para manter o histórico mas permitir deletar)
-        db.query(Pedido).filter(Pedido.plano_id == pid).update(
-            {Pedido.plano_id: None},
-            synchronize_session=False
-        )
-        
-        # 4. Deleta o plano
-        db.delete(p)
+        db.delete(plano)
         db.commit()
-        
-        logger.info(f"🗑️ Plano deletado: {pid} (Owner: {current_user.username})")
-        
         return {"status": "deleted"}
-        
     except Exception as e:
-        logger.error(f"Erro ao deletar plano {pid}: {e}")
-        raise HTTPException(status_code=400, detail=f"Erro ao deletar: {str(e)}")
+        logger.error(f"Erro ao deletar plano: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao deletar plano.")
+
 
 # =========================================================
 # 🛒 ORDER BUMP API
