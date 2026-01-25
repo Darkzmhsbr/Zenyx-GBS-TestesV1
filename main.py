@@ -3697,7 +3697,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
 # ============================================================
-# ROTA 1: LISTAR LEADS (VERSÃO PÓS-LIMPEZA)
+# ROTA 1: LISTAR LEADS (DEDUPLICAÇÃO FORÇADA NA MEMÓRIA)
 # ============================================================
 @app.get("/api/admin/leads")
 async def listar_leads(
@@ -3708,48 +3708,78 @@ async def listar_leads(
     current_user: User = Depends(get_current_user)
 ):
     try:
+        # 1. Autenticação e Permissões
         user_bot_ids = [bot.id for bot in current_user.bots]
         if not user_bot_ids:
             return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
-        # Query Base
-        query = db.query(Lead)
+        bots_alvo = [bot_id] if (bot_id and bot_id in user_bot_ids) else user_bot_ids
 
-        # Filtros
-        if bot_id:
-            if bot_id not in user_bot_ids:
-                return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
-            query = query.filter(Lead.bot_id == bot_id)
-        else:
-            query = query.filter(Lead.bot_id.in_(user_bot_ids))
+        # 2. BUSCA TUDO (Sem paginação no SQL)
+        # Trazemos ordenado por data DESC (do mais novo para o mais velho)
+        raw_leads = db.query(Lead).filter(
+            Lead.bot_id.in_(bots_alvo)
+        ).order_by(Lead.created_at.desc()).all()
         
-        # Ordenação Simples (Mais novos primeiro)
-        query = query.order_by(Lead.created_at.desc())
+        # 3. O FILTRO "PENTE FINO" 🧹
+        leads_unicos = {}
         
-        # Paginação SQL Direta (Agora segura pois removemos duplicatas fisicamente)
-        total = query.count()
+        for lead in raw_leads:
+            # TRATAMENTO AGRESSIVO DE ID
+            # Remove espaços, converte pra string, força minúsculo
+            tid_sujo = str(lead.user_id)
+            tid_limpo = tid_sujo.strip().replace(" ", "")
+            
+            # Chave única: Bot + ID Limpo
+            key = f"{lead.bot_id}_{tid_limpo}"
+            
+            # Se a chave ainda não existe, adicionamos.
+            # Como a lista vem ordenada do MAIS NOVO, o primeiro que entra é o atual.
+            # Os próximos (mais velhos) serão ignorados.
+            if key not in leads_unicos:
+                
+                # Tratamento de datas seguro
+                data_criacao = None
+                if lead.created_at:
+                    data_criacao = lead.created_at.isoformat()
+
+                primeiro_contato = None
+                if lead.primeiro_contato:
+                    primeiro_contato = lead.primeiro_contato.isoformat()
+                    
+                ultimo_contato = None
+                if lead.ultimo_contato:
+                    ultimo_contato = lead.ultimo_contato.isoformat()
+
+                # Tenta pegar expiration com segurança
+                expiration = getattr(lead, 'expiration_date', None)
+                expiration_str = expiration.isoformat() if expiration else None
+
+                leads_unicos[key] = {
+                    "id": lead.id,
+                    "user_id": tid_limpo, # Retorna o ID limpo
+                    "nome": lead.nome or "Sem nome",
+                    "username": lead.username,
+                    "bot_id": lead.bot_id,
+                    "status": lead.status,
+                    "funil_stage": lead.funil_stage,
+                    "primeiro_contato": primeiro_contato,
+                    "ultimo_contato": ultimo_contato,
+                    "total_remarketings": lead.total_remarketings,
+                    "ultimo_remarketing": lead.ultimo_remarketing.isoformat() if lead.ultimo_remarketing else None,
+                    "created_at": data_criacao,
+                    "expiration_date": expiration_str
+                }
+        
+        # 4. PAGINAÇÃO MANUAL
+        lista_final = list(leads_unicos.values())
+        total = len(lista_final)
+        
         offset = (page - 1) * per_page
-        leads = query.offset(offset).limit(per_page).all()
-        
-        # Formata resposta
-        leads_data = []
-        for lead in leads:
-            leads_data.append({
-                "id": lead.id,
-                "user_id": lead.user_id,
-                "nome": lead.nome or "Sem nome",
-                "username": lead.username,
-                "bot_id": lead.bot_id,
-                "status": lead.status,
-                "funil_stage": lead.funil_stage,
-                "primeiro_contato": lead.primeiro_contato.isoformat() if lead.primeiro_contato else None,
-                "created_at": lead.created_at.isoformat() if lead.created_at else None,
-                 # Adicionei expiração para garantir que venha tudo
-                "expiration_date": lead.expiration_date.isoformat() if getattr(lead, 'expiration_date', None) else None 
-            })
+        paginated_data = lista_final[offset:offset + per_page]
         
         return {
-            "data": leads_data,
+            "data": paginated_data,
             "total": total,
             "page": page,
             "per_page": per_page,
@@ -3758,6 +3788,7 @@ async def listar_leads(
     
     except Exception as e:
         logger.error(f"Erro ao listar leads: {str(e)}")
+        # Em caso de erro, retorna vazio em vez de quebrar a tela
         return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
 # ============================================================
