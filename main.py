@@ -1404,23 +1404,40 @@ class PixCreateRequest(BaseModel):
 # =========================================================
 # 1. GERAÇÃO DE PIX (COM SPLIT E WEBHOOK CORRIGIDO)
 # =========================================================
+# =========================================================
+# 📦 1. MODELO DE DADOS (CRÍTICO: DEVE VIR ANTES DA FUNÇÃO)
+# =========================================================
+class PixCreateRequest(BaseModel):
+    bot_id: int
+    valor: float
+    first_name: str
+    telegram_id: str
+    username: Optional[str] = None
+    plano_id: Optional[int] = None
+    plano_nome: Optional[str] = None
+    tem_order_bump: Optional[bool] = False
+
+# =========================================================
+# 💰 2. GERAÇÃO DE PIX (COM SPLIT RIGOROSO E LOGS DE DEBUG)
+# =========================================================
 @app.post("/api/pagamento/pix")
 def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
     try:
-        logger.info(f"💰 Iniciando pagamento com SPLIT para: {data.first_name} (R$ {data.valor})")
+        logger.info(f"💰 Iniciando pagamento: {data.first_name} (R$ {data.valor})")
         
-        # 1. Buscar o Bot e o Dono (Membro)
+        # 1. Buscar o Bot
         bot_atual = db.query(Bot).filter(Bot.id == data.bot_id).first()
         if not bot_atual:
             raise HTTPException(status_code=404, detail="Bot não encontrado")
 
-        # 2. Definir Token da API (Prioridade: Bot > Config > Env)
+        # 2. Definir Token do Vendedor (Dono do Bot)
+        # Prioridade: Token no Bot > Token na Config do Sistema > Env
         pushin_token = bot_atual.pushin_token 
         if not pushin_token:
             config_sys = db.query(SystemConfig).filter(SystemConfig.key == "pushin_pay_token").first()
             pushin_token = config_sys.value if (config_sys and config_sys.value) else os.getenv("PUSHIN_PAY_TOKEN")
 
-        # Tratamento de usuário anonimo
+        # Tratamento de ID de usuário
         user_clean = str(data.username).strip().lower().replace("@", "") if data.username else "anonimo"
         tid_clean = str(data.telegram_id).strip()
         if not tid_clean.isdigit(): tid_clean = user_clean
@@ -1437,69 +1454,80 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             db.commit()
             return {"txid": fake_txid, "copia_cola": "pix-fake", "qr_code": "https://fake.com/qr.png"}
 
-        # 3. LÓGICA DE SPLIT E TAXAS
-        valor_total_centavos = int(data.valor * 100) # Valor da venda em centavos
+        # 3. PREPARAÇÃO DO PAYLOAD
+        valor_total_centavos = int(data.valor * 100)
         
-        # ID DA SUA CONTA PRINCIPAL (ZENYX)
-        ADMIN_PUSHIN_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
-        
-        # Pegar dados do Dono do Bot
-        membro_dono = bot_atual.owner
-        
-        # Definir a Taxa (Padrão 60 centavos ou valor personalizado do usuário)
-        taxa_plataforma = 60 # Default
-        if membro_dono and membro_dono.taxa_venda:
-            taxa_plataforma = membro_dono.taxa_venda
-            
-        # Regra de Segurança: Taxa não pode ser maior que 50% (Regra Pushin)
-        if taxa_plataforma > (valor_total_centavos * 0.5):
-            taxa_plataforma = int(valor_total_centavos * 0.5)
-
-        # 👇👇👇 CORREÇÃO DA URL DO WEBHOOK AQUI 👇👇👇
-        # 1. Pega o domínio (pode vir com https ou sem, com barra no final ou sem)
+        # URL do Webhook (Corrigida e Limpa)
         raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
-        
-        # 2. Limpa TUDO (tira http, https e barras do final)
         clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
-        
-        # 3. Reconstrói a URL do jeito certo (Garante https único e a rota correta)
         webhook_url_final = f"https://{clean_domain}/api/webhooks/pushinpay"
-        
-        logger.info(f"🔗 Webhook Configurado: {webhook_url_final}")
-
-        url = "https://api.pushinpay.com.br/api/pix/cashIn"
-        headers = { "Authorization": f"Bearer {pushin_token}", "Content-Type": "application/json", "Accept": "application/json" }
         
         payload = {
             "value": valor_total_centavos,
-            "webhook_url": webhook_url_final, # Usando a URL corrigida e limpa
+            "webhook_url": webhook_url_final,
             "external_reference": f"bot_{data.bot_id}_{user_clean}_{int(time.time())}"
         }
 
-        # 4. APLICAR SPLIT SE O MEMBRO TIVER CONTA CONFIGURADA
-        if membro_dono and membro_dono.pushin_pay_id:
-            valor_membro = valor_total_centavos - taxa_plataforma
-            
-            payload["split"] = [
-                {
-                    "receiver_id": ADMIN_PUSHIN_ID, # Sua Conta (Recebe a Taxa)
-                    "amount": taxa_plataforma,
-                    "liable": True,
-                    "charge_processing_fee": True # Você assume a taxa de processamento do Pix sobre sua parte?
-                },
-                {
-                    "receiver_id": membro_dono.pushin_pay_id, # Conta do Membro (Recebe o Resto)
-                    "amount": valor_membro,
-                    "liable": False,
-                    "charge_processing_fee": False
-                }
-            ]
-            logger.info(f"🔀 Split Configurado: Admin={taxa_plataforma}, Membro={valor_membro}")
-        else:
-            logger.warning(f"⚠️ Membro dono do bot {data.bot_id} não tem Pushin ID configurado. Sem split.")
+        # ======================================================================
+        # 💸 LÓGICA DE SPLIT (SEPARAÇÃO DO DINHEIRO)
+        # ======================================================================
+        
+        # 🔥 SEU ID DA PUSHIN PAY (CONTA DA PLATAFORMA)
+        PLATAFORMA_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
+        
+        # Busca o Membro Dono do Bot
+        membro_dono = None
+        if bot_atual.owner_id:
+            membro_dono = db.query(User).filter(User.id == bot_atual.owner_id).first()
 
-        # Enviar Requisição
-        req = requests.post(url, json=payload, headers=headers)
+        # Define valor da taxa (Padrão 60 centavos ou Personalizado)
+        taxa_centavos = 60 
+        if membro_dono and hasattr(membro_dono, 'taxa_venda') and membro_dono.taxa_venda:
+            taxa_centavos = int(membro_dono.taxa_venda)
+
+        # Regra de Segurança: Não cobrar taxa se for > 50% do valor (Regra Pushin)
+        if taxa_centavos >= (valor_total_centavos * 0.5):
+            logger.warning(f"⚠️ Taxa ({taxa_centavos}) muito alta para o valor ({valor_total_centavos}). Split cancelado.")
+        
+        # Verifica se o Dono tem ID configurado para receber o resto
+        elif membro_dono and membro_dono.pushin_pay_id:
+            
+            # Evita split para a mesma conta (Se você for o dono do bot de teste)
+            if membro_dono.pushin_pay_id == PLATAFORMA_ID:
+                logger.info("ℹ️ Dono do bot é a própria Plataforma. Split desnecessário.")
+            else:
+                # MONTA O SPLIT CONFORME DOCUMENTAÇÃO
+                payload["split"] = [
+                    {
+                        "recipient_id": PLATAFORMA_ID,    # VOCÊ (R$ 0,60)
+                        "amount": taxa_centavos,
+                        "liable": True,
+                        "charge_processing_fee": False    # Você NÃO paga a taxa do PIX
+                    },
+                    {
+                        "recipient_id": membro_dono.pushin_pay_id, # CLIENTE (Resto)
+                        "remainder": True,                # Recebe todo o resto
+                        "liable": True,
+                        "charge_processing_fee": True     # Cliente paga a taxa do PIX
+                    }
+                ]
+                logger.info(f"✅ SPLIT ATIVADO: Admin ganha R$ {taxa_centavos/100:.2f} | Cliente: {membro_dono.pushin_pay_id}")
+        
+        else:
+            # LOG DE ALERTA: ISSO AVISA SE O CLIENTE NÃO TIVER CONTA CONFIGURADA
+            logger.error("❌ ERRO SPLIT: O Dono do Bot não tem 'pushin_pay_id' salvo no banco 'users'. O valor irá 100% para o token informado.")
+
+        # ======================================================================
+
+        # 4. Envia Requisição para PushinPay
+        url = "https://api.pushinpay.com.br/api/pix/cashIn"
+        headers = { 
+            "Authorization": f"Bearer {pushin_token}", 
+            "Content-Type": "application/json", 
+            "Accept": "application/json" 
+        }
+        
+        req = requests.post(url, json=payload, headers=headers, timeout=15)
         
         if req.status_code in [200, 201]:
             resp = req.json()
@@ -1516,11 +1544,15 @@ def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             db.commit()
             return {"txid": txid, "copia_cola": copia_cola, "qr_code": qr_image}
         else:
-            logger.error(f"Erro PushinPay: {req.text}")
-            raise HTTPException(status_code=400, detail="Erro Gateway")
-            
+            logger.error(f"❌ Erro PushinPay: {req.text}")
+            try:
+                detalhe = req.json().get('message', req.text)
+            except:
+                detalhe = req.text
+            raise HTTPException(status_code=400, detail=f"Erro Gateway: {detalhe}")
+
     except Exception as e:
-        logger.error(f"Erro fatal PIX: {e}")
+        logger.error(f"❌ Erro fatal PIX: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/pagamento/status/{txid}")
