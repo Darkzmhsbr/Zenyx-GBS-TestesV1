@@ -1440,7 +1440,7 @@ class PixCreateRequest(BaseModel):
 # 💰 2. GERAÇÃO DE PIX (SINTAXE ANTIGA: SPLIT_RULES)
 # =========================================================
 @app.post("/api/pagamento/pix")
-def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
+async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
     try:
         logger.info(f"💰 Iniciando pagamento: {data.first_name} (R$ {data.valor})")
         
