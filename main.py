@@ -3844,16 +3844,10 @@ async def listar_leads(
 # ROTA 2: ESTATÍSTICAS DO FUNIL
 # ============================================================
 # ============================================================
-# 🔥 ROTA ATUALIZADA: /api/admin/contacts/funnel-stats
-# SUBSTITUA a rota existente por esta versão
-# Calcula estatísticas baseando-se no campo 'status' (não status_funil)
-# ============================================================
-
-# ============================================================
-# 🔥 ROTA 2: ESTATÍSTICAS DO FUNIL (DEDUPLICAÇÃO VIA PYTHON)
-# ============================================================
-# ============================================================
 # 🔥 ROTA DEFINITIVA: ESTATÍSTICAS DO FUNIL (DEDUPLICAÇÃO REAL)
+# ============================================================
+# ============================================================
+# 🔥 ROTA DEFINITIVA: ESTATÍSTICAS DO FUNIL (CONTTAGEM REAL DE HUMANOS)
 # ============================================================
 @app.get("/api/admin/contacts/funnel-stats")
 async def obter_estatisticas_funil(
@@ -3866,51 +3860,56 @@ async def obter_estatisticas_funil(
         if not user_bot_ids:
             return {"topo": 0, "meio": 0, "fundo": 0, "expirados": 0, "total": 0}
 
-        # Validação de segurança
-        if bot_id and bot_id not in user_bot_ids:
-             return {"topo": 0, "meio": 0, "fundo": 0, "expirados": 0, "total": 0}
+        bots_alvo = [bot_id] if (bot_id and bot_id in user_bot_ids) else user_bot_ids
 
-        bots_alvo = [bot_id] if bot_id else user_bot_ids
-
-        # 1. TOPO: Leads únicos que NÃO viraram clientes (Exclui convertidos)
-        topo = db.query(Lead.user_id).filter(
+        # 1. Busca IDs únicos de cada etapa no banco
+        # TOPO (Leads que não converteram)
+        ids_topo = db.query(Lead.user_id).filter(
             Lead.bot_id.in_(bots_alvo),
             Lead.status != "convertido"
-        ).distinct().count()
+        ).distinct().all()
         
-        # 2. MEIO: Pedidos PENDENTES únicos
-        meio = db.query(Pedido.telegram_id).filter(
+        # MEIO (Pedidos pendentes)
+        ids_meio = db.query(Pedido.telegram_id).filter(
             Pedido.bot_id.in_(bots_alvo),
             Pedido.status == 'pending'
-        ).distinct().count()
+        ).distinct().all()
         
-        # 3. FUNDO: Clientes PAGOS únicos
-        fundo = db.query(Pedido.telegram_id).filter(
+        # FUNDO (Clientes pagos)
+        ids_fundo = db.query(Pedido.telegram_id).filter(
             Pedido.bot_id.in_(bots_alvo),
             Pedido.status.in_(['paid', 'active', 'approved'])
-        ).distinct().count()
+        ).distinct().all()
         
-        # 4. EXPIRADOS: Pedidos EXPIRADOS únicos
-        expirados = db.query(Pedido.telegram_id).filter(
+        # EXPIRADOS
+        ids_expirados = db.query(Pedido.telegram_id).filter(
             Pedido.bot_id.in_(bots_alvo),
             Pedido.status == 'expired'
-        ).distinct().count()
-        
-        # 5. TOTAL REAL (Soma das etapas deduplicadas)
-        total = topo + meio + fundo + expirados
-        
-        return {
-            "topo": topo,
-            "meio": meio,
-            "fundo": fundo,
-            "expirados": expirados,
-            "total": total
-        }
-    
-    except Exception as e:
-        logger.error(f"Erro ao obter estatísticas do funil: {str(e)}")
-        return {"topo": 0, "meio": 0, "fundo": 0, "expirados": 0, "total": 0}
+        ).distinct().all()
 
+        # 2. Converte para Sets para garantir unicidade e limpeza de strings
+        def extrair_e_limpar(lista_tuplas):
+            return {str(item[0]).strip() for item in lista_tuplas if item[0]}
+
+        set_topo = extrair_e_limpar(ids_topo)
+        set_meio = extrair_e_limpar(ids_meio)
+        set_fundo = extrair_e_limpar(ids_fundo)
+        set_expirados = extrair_e_limpar(ids_expirados)
+
+        # 3. O GRANDE TRUQUE: O Total é a união de todos os IDs sem repetir ninguém
+        total_unicos = set_topo.union(set_meio).union(set_fundo).union(set_expirados)
+
+        return {
+            "topo": len(set_topo),
+            "meio": len(set_meio),
+            "fundo": len(set_fundo),
+            "expirados": len(set_expirados),
+            "total": len(total_unicos) # <--- Agora vai mostrar 6 e não 14!
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro stats funil: {e}")
+        return {"topo": 0, "meio": 0, "fundo": 0, "expirados": 0, "total": 0}
 
 # ============================================================
 # ROTA 3: ATUALIZAR ROTA DE CONTATOS EXISTENTE
