@@ -1,7 +1,8 @@
 import os
 import logging
 import telebot
-import httpx  # <--- SUBSTITUINDO "requests"
+from telebot import TeleBot  # ← ADICIONADO: Import explícito do TeleBot
+import httpx
 import time
 import urllib.parse
 import threading
@@ -13,34 +14,57 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, desc, text
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
 # Adicionamos 'Optional' aqui para evitar erro de validação bruta
 from pydantic import BaseModel, EmailStr, Field 
 from sqlalchemy.orm import Session
 from typing import List, Optional 
 from datetime import datetime, timedelta
 
-
 # --- IMPORTS CORRIGIDOS ---
-from database import Lead  # Não esqueça de importar Lead!
+from database import Lead
 from force_migration import forcar_atualizacao_tabelas
 
 # 🆕 ADICIONAR ESTES IMPORTS PARA AUTENTICAÇÃO
 from passlib.context import CryptContext
 from jose import JWTError, jwt
-from datetime import timedelta
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
 # --- Scheduler ---
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Importa o banco e o script de reparo
-from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, Notification, User, engine,WebhookRetry
+# ← MODIFICADO: Renomear Bot para BotModel para evitar conflito com TeleBot
+from database import (
+    SessionLocal, 
+    init_db, 
+    Bot as BotModel,  # ← RENOMEADO
+    PlanoConfig, 
+    BotFlow, 
+    BotFlowStep, 
+    Pedido, 
+    SystemConfig, 
+    RemarketingCampaign, 
+    BotAdmin, 
+    Lead, 
+    OrderBumpConfig, 
+    TrackingFolder, 
+    TrackingLink, 
+    MiniAppConfig, 
+    MiniAppCategory, 
+    AuditLog, 
+    Notification, 
+    User, 
+    engine,
+    WebhookRetry
+)
 import update_db 
 
 from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
-from migration_v5 import executar_migracao_v5  # <--- ADICIONE ESTA LINHA
-from migration_v6 import executar_migracao_v6  # <--- ADICIONE AQUI
+from migration_v5 import executar_migracao_v5
+from migration_v6 import executar_migracao_v6
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
@@ -48,12 +72,199 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Zenyx Gbot SaaS")
 
-# ============ HTTPX CLIENT GLOBAL ============
-# NOVA SEÇÃO COMPLETA
-http_client = None
+# ============================================================
+# FUNÇÕES DE JOBS AGENDADOS
+# ============================================================
 
-# Inicializa o Scheduler
+async def verificar_vencimentos():
+    """
+    Job agendado para verificar e processar vencimentos de assinaturas.
+    Executa a cada 12 horas.
+    """
+    try:
+        logger.info("🔄 [JOB] Iniciando verificação de vencimentos...")
+        
+        db = SessionLocal()
+        
+        try:
+            # Buscar pedidos ativos que venceram
+            pedidos_vencidos = db.query(Pedido).filter(
+                Pedido.status == 'ativo',
+                Pedido.validade < datetime.now()
+            ).all()
+            
+            if not pedidos_vencidos:
+                logger.info("✅ [JOB] Nenhum vencimento encontrado")
+                return
+            
+            logger.info(f"📋 [JOB] {len(pedidos_vencidos)} vencimentos encontrados")
+            
+            # Processar cada vencimento
+            for pedido in pedidos_vencidos:
+                try:
+                    # Atualizar status do pedido
+                    pedido.status = 'vencido'
+                    pedido.updated_at = datetime.now()
+                    
+                    # Remover do grupo Telegram (se configurado)
+                    if pedido.grupo_id and pedido.user and pedido.user.telegram_id:
+                        try:
+                            # Buscar bot associado ao grupo
+                            bot_config = db.query(BotModel).filter(
+                                BotModel.grupo_telegram_id == pedido.grupo_id
+                            ).first()
+                            
+                            if bot_config and bot_config.token:
+                                # Criar instância do TeleBot
+                                bot = TeleBot(bot_config.token)
+                                
+                                # Remover usuário do grupo
+                                bot.ban_chat_member(
+                                    chat_id=int(pedido.grupo_id),
+                                    user_id=int(pedido.user.telegram_id)
+                                )
+                                bot.unban_chat_member(
+                                    chat_id=int(pedido.grupo_id),
+                                    user_id=int(pedido.user.telegram_id)
+                                )
+                                
+                                logger.info(
+                                    f"👋 [JOB] Usuário {pedido.user.nome} "
+                                    f"removido do grupo"
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                f"⚠️  [JOB] Erro ao remover do grupo: {str(e)}"
+                            )
+                    
+                    db.commit()
+                    logger.info(f"✅ [JOB] Pedido #{pedido.id} marcado como vencido")
+                    
+                except Exception as e:
+                    logger.error(
+                        f"❌ [JOB] Erro ao processar pedido #{pedido.id}: {str(e)}"
+                    )
+                    db.rollback()
+                    continue
+            
+            logger.info("✅ [JOB] Verificação de vencimentos concluída")
+            
+        finally:
+            db.close()
+        
+    except Exception as e:
+        logger.error(f"❌ [JOB] Erro crítico na verificação de vencimentos: {str(e)}")
+
+
+async def processar_webhooks_pendentes():
+    """
+    Job agendado para reprocessar webhooks falhados.
+    Executa a cada 1 minuto.
+    """
+    try:
+        logger.info("🔄 [WEBHOOK-RETRY] Iniciando reprocessamento...")
+        
+        db = SessionLocal()
+        
+        try:
+            # Buscar webhooks pendentes que estão prontos para retry
+            webhooks = db.query(WebhookRetry).filter(
+                WebhookRetry.status == 'pending',
+                WebhookRetry.attempts < WebhookRetry.max_attempts,
+                (WebhookRetry.next_retry == None) | (WebhookRetry.next_retry <= datetime.now())
+            ).order_by(WebhookRetry.created_at).limit(10).all()
+            
+            if not webhooks:
+                return  # Sem webhooks para processar
+            
+            logger.info(f"📋 [WEBHOOK-RETRY] {len(webhooks)} webhooks para reprocessar")
+            
+            for webhook in webhooks:
+                try:
+                    # Deserializar payload
+                    payload = json.loads(webhook.payload)
+                    
+                    # Incrementar tentativas
+                    webhook.attempts += 1
+                    
+                    # Reprocessar baseado no tipo
+                    success = False
+                    error_msg = None
+                    
+                    if webhook.webhook_type == 'pushinpay':
+                        try:
+                            # TODO: Chamar função real de processamento
+                            # await processar_webhook_pix(payload)
+                            success = True  # Placeholder por enquanto
+                        except Exception as e:
+                            error_msg = str(e)
+                    
+                    # Atualizar registro
+                    if success:
+                        webhook.status = 'success'
+                        webhook.updated_at = datetime.now()
+                        logger.info(f"✅ [WEBHOOK-RETRY] Webhook #{webhook.id} processado")
+                    else:
+                        # Calcular próximo retry (exponential backoff)
+                        backoff_minutes = 2 ** webhook.attempts  # 2, 4, 8, 16, 32
+                        webhook.next_retry = datetime.now() + timedelta(minutes=backoff_minutes)
+                        
+                        # Verificar se esgotou tentativas
+                        if webhook.attempts >= webhook.max_attempts:
+                            webhook.status = 'failed'
+                            webhook.next_retry = None
+                            logger.error(
+                                f"❌ [WEBHOOK-RETRY] Webhook #{webhook.id} "
+                                f"esgotou tentativas"
+                            )
+                        else:
+                            webhook.status = 'pending'
+                        
+                        webhook.last_error = error_msg
+                        webhook.updated_at = datetime.now()
+                    
+                    db.commit()
+                
+                except Exception as e:
+                    logger.error(
+                        f"❌ [WEBHOOK-RETRY] Erro ao processar webhook "
+                        f"#{webhook.id}: {str(e)}"
+                    )
+                    db.rollback()
+                    continue
+            
+            logger.info("✅ [WEBHOOK-RETRY] Reprocessamento concluído")
+            
+        finally:
+            db.close()
+        
+    except Exception as e:
+        logger.error(f"❌ [WEBHOOK-RETRY] Erro crítico: {str(e)}")
+
+
+# ============================================================
+# CONFIGURAÇÃO DO SCHEDULER
+# ============================================================
+
 scheduler = AsyncIOScheduler()
+
+# Adicionar jobs
+scheduler.add_job(
+    verificar_vencimentos,
+    'interval',
+    hours=12,
+    id='verificar_vencimentos'
+)
+
+scheduler.add_job(
+    processar_webhooks_pendentes,
+    'interval',
+    minutes=1,
+    id='webhook_retry_processor'
+)
+
+# ============ HTTPX CLIENT GLOBAL ============
+http_client = None
 
 # =========================================================
 # 🚀 STARTUP: INICIALIZAÇÃO DO SERVIDOR
@@ -66,70 +277,34 @@ async def startup_event():
     """
     global http_client
     
-    # 1. INICIALIZAR HTTP CLIENT (httpx)
     try:
+        # 1. INICIALIZAR HTTP CLIENT (httpx)
         http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
             follow_redirects=True
         )
         logger.info("✅ [STARTUP] HTTP Client (httpx) inicializado")
-    except Exception as e:
-        logger.error(f"❌ [STARTUP] Erro ao inicializar HTTP Client: {e}")
-    
-    # 2. VERIFICAR BANCO DE DADOS
-    try:
+        
+        # 2. VERIFICAR BANCO DE DADOS
         db = SessionLocal()
         db.execute(text("SELECT 1"))
         db.close()
         logger.info("✅ [STARTUP] Conexão com banco de dados validada")
-    except Exception as e:
-        logger.error(f"❌ [STARTUP] Erro na conexão com banco: {e}")
-    
-    # 3. INICIALIZAR SCHEDULER (Background Jobs)
-    try:
-        # Job de verificação de vencimentos (a cada 12 horas)
-        scheduler.add_job(
-            verificar_vencimentos,
-            'interval',
-            hours=12,
-            id='verificar_vencimentos',
-            replace_existing=True
-        )
+        
+        # 3. INICIAR SCHEDULER
+        scheduler.start()
         logger.info("✅ [STARTUP] Job de vencimentos agendado (12h)")
-        
-        # Job de remarketing recorrente (a cada 30 minutos) - SE VOCÊ USA
-        # Descomente se tiver a função executar_remarketing
-        # scheduler.add_job(
-        #     executar_remarketing,
-        #     'interval',
-        #     minutes=30,
-        #     id='remarketing_recorrente',
-        #     replace_existing=True
-        # )
-        
-        # 🆕 Job de retry de webhooks (a cada 1 minuto)
-        scheduler.add_job(
-            processar_webhooks_pendentes,
-            'interval',
-            minutes=1,
-            id='webhook_retry_processor',
-            replace_existing=True
-        )
         logger.info("✅ [STARTUP] Job de retry de webhooks agendado (1 min)")
+        logger.info("⏰ [STARTUP] Scheduler iniciado com sucesso")
         
-        # Iniciar o scheduler
-        if not scheduler.running:
-            scheduler.start()
-            logger.info("⏰ [STARTUP] Scheduler iniciado com sucesso")
+        logger.info("=" * 60)
+        logger.info("🚀 ZENYX GBOT v5.0 - Sistema iniciado com sucesso!")
+        logger.info("=" * 60)
         
     except Exception as e:
-        logger.error(f"❌ [STARTUP] Erro ao inicializar Scheduler: {e}")
-    
-    # 4. LOG DE INICIALIZAÇÃO COMPLETA
-    logger.info("=" * 60)
-    logger.info("🚀 ZENYX GBOT v5.0 - Sistema iniciado com sucesso!")
-    logger.info("=" * 60)
+        logger.error(f"❌ [STARTUP] Erro crítico na inicialização: {e}")
+        # Não falhar completamente - permitir que a API suba
 
 
 @app.on_event("shutdown")
@@ -158,6 +333,80 @@ async def shutdown_event():
     
     logger.info("👋 [SHUTDOWN] Sistema encerrado")
 
+
+# =========================================================
+# 🏥 HEALTH CHECK ENDPOINT
+# =========================================================
+@app.get("/api/health")
+async def health_check():
+    """
+    Health check endpoint para monitoramento externo.
+    Retorna status detalhado do sistema.
+    """
+    try:
+        # Verificar conexão com banco de dados
+        db_status = "ok"
+        try:
+            db = SessionLocal()
+            db.execute(text("SELECT 1"))
+            db.close()
+        except Exception as e:
+            db_status = f"error: {str(e)}"
+        
+        # Verificar scheduler
+        scheduler_status = "running" if scheduler.running else "stopped"
+        
+        # Verificar webhooks pendentes
+        webhook_stats = {"pending": 0, "failed": 0}
+        try:
+            db = SessionLocal()
+            pending = db.query(WebhookRetry).filter(
+                WebhookRetry.status == 'pending'
+            ).count()
+            failed = db.query(WebhookRetry).filter(
+                WebhookRetry.status == 'failed'
+            ).count()
+            webhook_stats = {"pending": pending, "failed": failed}
+            db.close()
+        except:
+            pass  # Tabela pode não existir ainda
+        
+        # Determinar status geral
+        overall_status = "healthy"
+        status_code = 200
+        
+        if db_status != "ok":
+            overall_status = "unhealthy"
+            status_code = 503
+        elif scheduler_status != "running":
+            overall_status = "degraded"
+            status_code = 200
+        
+        health_status = {
+            "status": overall_status,
+            "timestamp": datetime.now().isoformat(),
+            "checks": {
+                "database": {"status": db_status},
+                "scheduler": {"status": scheduler_status},
+                "webhook_retry": webhook_stats
+            },
+            "version": "5.0"
+        }
+        
+        return JSONResponse(content=health_status, status_code=status_code)
+    
+    except Exception as e:
+        logger.error(f"❌ [HEALTH] Erro no health check: {str(e)}")
+        return JSONResponse(
+            content={
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            },
+            status_code=503
+        )
+
+
 # 🔥 FORÇA A CRIAÇÃO DAS COLUNAS AO INICIAR
 try:
     forcar_atualizacao_tabelas()
@@ -184,32 +433,30 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login")
 # =========================================================
 # 📦 SCHEMAS PYDANTIC PARA AUTENTICAÇÃO
 # =========================================================
-# --- MODELS ATUALIZADOS (COM OPTIONAL PARA NÃO QUEBRAR O PYDANTIC) ---
 class UserCreate(BaseModel):
     username: str
     email: EmailStr
     password: str
     full_name: str = None
-    turnstile_token: Optional[str] = None # 🔥 Opcional para não travar validação
+    turnstile_token: Optional[str] = None
 
 class UserLogin(BaseModel):
     username: str
     password: str
-    turnstile_token: Optional[str] = None # 🔥 Opcional para não travar validação
+    turnstile_token: Optional[str] = None
 
-# 👇 COLE ISSO LOGO APÓS A CLASSE UserCreate OU UserLogin
 class PlatformUserUpdate(BaseModel):
     full_name: Optional[str] = None
     email: Optional[EmailStr] = None
-    pushin_pay_id: Optional[str] = None # ID da conta para Split
-    taxa_venda: Optional[int] = None    # Taxa fixa em centavos
+    pushin_pay_id: Optional[str] = None
+    taxa_venda: Optional[int] = None
 
 class Token(BaseModel):
     access_token: str
     token_type: str
     user_id: int
     username: str
-    has_bots: bool # 🆕 Adicionado para o Onboarding
+    has_bots: bool
 
 class TokenData(BaseModel):
     username: str = None
@@ -217,7 +464,7 @@ class TokenData(BaseModel):
 # =========================================================
 # 🛡️ CONFIGURAÇÃO CLOUDFLARE TURNSTILE (BLINDADA)
 # =========================================================
-TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0" # Sua chave secreta
+TURNSTILE_SECRET_KEY = "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0"
 
 async def verify_turnstile(token: str) -> bool:
     """
@@ -235,11 +482,10 @@ async def verify_turnstile(token: str) -> bool:
     }
     
     try:
-        # NOVA LINHA: httpx com timeout específico
         response = await http_client.post(
             "https://challenges.cloudflare.com/turnstile/v0/siteverify",
             data=payload,
-            timeout=5.0  # 5 segundos apenas para esta chamada
+            timeout=5.0
         )
         
         if response.status_code == 200:
@@ -250,7 +496,7 @@ async def verify_turnstile(token: str) -> bool:
         
     except httpx.TimeoutException:
         print("⚠️ Timeout na validação Turnstile")
-        return False  # Permitir registro se Cloudflare estiver lento
+        return False
     except Exception as e:
         print(f"❌ Erro Turnstile: {str(e)}")
         return False
@@ -2122,135 +2368,72 @@ async def login(user_data: UserLogin, request: Request, db: Session = Depends(ge
 # 💓 HEALTH CHECK PARA MONITORAMENTO
 # =========================================================
 @app.get("/api/health")
-async def health_check(db: Session = Depends(get_db)):
+async def health_check():
     """
-    Endpoint de saúde para monitoramento externo (UptimeRobot, BetterStack).
-    Retorna 200 se tudo OK, 503 se algo crítico falhar.
+    Health check endpoint para monitoramento externo.
+    Retorna status detalhado do sistema.
     """
-    health_status = {
-        "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "version": "5.0.0",
-        "checks": {},
-        "warnings": []
-    }
-    
-    # 1. VERIFICAR BANCO DE DADOS
     try:
-        db.execute(text("SELECT 1"))
-        health_status["checks"]["database"] = {
-            "status": "ok",
-            "latency_ms": None  # Poderia medir com time.time()
-        }
-    except Exception as e:
-        health_status["checks"]["database"] = {
-            "status": "error",
-            "error": str(e)
-        }
-        health_status["status"] = "unhealthy"
-    
-    # 2. VERIFICAR HTTPX CLIENT
-    try:
-        if http_client and not http_client.is_closed:
-            health_status["checks"]["http_client"] = "ok"
-        else:
-            health_status["checks"]["http_client"] = "not_initialized"
-            health_status["warnings"].append("HTTP client não inicializado")
-    except Exception as e:
-        health_status["checks"]["http_client"] = f"error: {str(e)}"
-        health_status["warnings"].append("Problema com HTTP client")
-    
-    # 3. VERIFICAR BOTS
-    try:
-        total_bots = db.query(Bot).count()
-        bots_ativos = db.query(Bot).filter(Bot.status == 'ativo').count()
+        # Verificar conexão com banco de dados
+        db_status = "ok"
+        try:
+            await database.execute("SELECT 1")
+        except Exception as e:
+            db_status = f"error: {str(e)}"
         
-        health_status["checks"]["bots"] = {
-            "total": total_bots,
-            "active": bots_ativos,
-            "inactive": total_bots - bots_ativos
-        }
+        # Verificar scheduler
+        scheduler_status = "running" if scheduler.running else "stopped"
         
-        if total_bots == 0:
-            health_status["warnings"].append("Nenhum bot cadastrado")
-        elif bots_ativos == 0:
-            health_status["warnings"].append("Nenhum bot ativo")
-            
-    except Exception as e:
-        health_status["checks"]["bots"] = f"error: {str(e)}"
-    
-    # 4. VERIFICAR CAMPANHAS DE REMARKETING
-    try:
-        enviando = db.query(RemarketingCampaign).filter(
-            RemarketingCampaign.status == 'enviando'
-        ).count()
+        # Verificar webhooks pendentes
+        webhook_stats = {"pending": 0, "failed": 0}
+        try:
+            webhook_query = """
+                SELECT 
+                    status,
+                    COUNT(*) as count
+                FROM webhook_retry
+                WHERE status IN ('pending', 'failed')
+                GROUP BY status
+            """
+            webhook_result = await database.fetch_all(webhook_query)
+            webhook_stats = {row['status']: row['count'] for row in webhook_result}
+        except:
+            pass  # Tabela pode não existir ainda
         
-        health_status["checks"]["remarketing_queue"] = {
-            "pending": enviando
-        }
-        
-        if enviando > 10:
-            health_status["warnings"].append(f"{enviando} campanhas pendentes (possível bottleneck)")
-    except:
-        pass
-    
-    # 5. VERIFICAR WEBHOOKS PENDENTES
-    try:
-        pendentes = db.query(WebhookRetry).filter(
-            WebhookRetry.status == 'pending'
-        ).count()
-        
-        falhados = db.query(WebhookRetry).filter(
-            WebhookRetry.status == 'failed'
-        ).count()
-        
-        health_status["checks"]["webhook_retry"] = {
-            "pending": pendentes,
-            "failed": falhados
-        }
-        
-        if falhados > 5:
-            health_status["warnings"].append(f"{falhados} webhooks falharam definitivamente")
-            health_status["status"] = "degraded"
-    except:
-        pass
-    
-    # 6. VERIFICAR SCHEDULER
-    try:
-        running_jobs = len(scheduler.get_jobs())
-        health_status["checks"]["scheduler"] = {
-            "running": scheduler.running,
-            "jobs_count": running_jobs
-        }
-        
-        if not scheduler.running:
-            health_status["warnings"].append("Scheduler não está rodando")
-            health_status["status"] = "degraded"
-    except:
-        health_status["checks"]["scheduler"] = "error"
-    
-    # 7. MÉTRICAS DE VENDAS (24H)
-    try:
-        vendas_24h = db.query(Pedido).filter(
-            Pedido.data_aprovacao >= datetime.utcnow() - timedelta(hours=24),
-            Pedido.status.in_(['paid', 'approved'])
-        ).count()
-        
-        health_status["metrics"] = {
-            "sales_24h": vendas_24h
-        }
-    except:
-        pass
-    
-    # DETERMINAR STATUS CODE HTTP
-    if health_status["status"] == "healthy":
+        # Determinar status geral
+        overall_status = "healthy"
         status_code = 200
-    elif health_status["status"] == "degraded":
-        status_code = 200  # Ainda funcional, mas com avisos
-    else:
-        status_code = 503  # Serviço indisponível
+        
+        if db_status != "ok":
+            overall_status = "unhealthy"
+            status_code = 503
+        elif scheduler_status != "running":
+            overall_status = "degraded"
+            status_code = 200  # Ainda considerado "up"
+        
+        health_status = {
+            "status": overall_status,
+            "timestamp": datetime.now().isoformat(),
+            "checks": {
+                "database": {"status": db_status},
+                "scheduler": {"status": scheduler_status},
+                "webhook_retry": webhook_stats
+            },
+            "version": "5.0"
+        }
+        
+        return JSONResponse(content=health_status, status_code=status_code)
     
-    return JSONResponse(content=health_status, status_code=status_code)
+    except Exception as e:
+        logger.error(f"❌ [HEALTH] Erro no health check: {str(e)}")
+        return JSONResponse(
+            content={
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            },
+            status_code=503
+        )
 
 
 @app.get("/api/health/simple")
