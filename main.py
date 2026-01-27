@@ -136,7 +136,7 @@ async def verify_turnstile(token: str) -> bool:
     if not token:
         return False
     
-    secret_key = os.getenv("TURNSTILE_SECRET_KEY", "sua-secret-key-aqui")
+    secret_key = os.getenv("TURNSTILE_SECRET_KEY", "0x4AAAAAACOaNBxF24PV-Eem9fAQqzPODn0")
     
     payload = {
         "secret": secret_key,
