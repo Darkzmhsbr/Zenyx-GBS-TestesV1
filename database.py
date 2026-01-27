@@ -73,6 +73,7 @@ class SystemConfig(Base):
 # =========================================================
 class Bot(Base):
     __tablename__ = "bots"
+
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String)
     token = Column(String, unique=True, index=True)
@@ -103,7 +104,11 @@ class Bot(Base):
     # RELACIONAMENTOS PARA EXCLUSÃO AUTOMÁTICA
     pedidos = relationship("Pedido", backref="bot_ref", cascade="all, delete-orphan")
     leads = relationship("Lead", backref="bot_ref", cascade="all, delete-orphan")
-    campanhas = relationship("RemarketingCampaign", backref="bot_ref", cascade="all, delete-orphan")
+    
+    # ✅ CORREÇÃO APLICADA AQUI:
+    # Mudamos de 'campanhas' para 'remarketing_campaigns' e usamos back_populates="bot"
+    # para casar perfeitamente com a nova classe RemarketingCampaign
+    remarketing_campaigns = relationship("RemarketingCampaign", back_populates="bot", cascade="all, delete-orphan")
     
     # Relacionamento com Order Bump
     order_bump = relationship("OrderBumpConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
@@ -188,23 +193,23 @@ class RemarketingCampaign(Base):
     # Status e Controle
     status = Column(String, default="agendado")  # 'agendado', 'enviando', 'concluido', 'erro'
     
-    # Agendamento (para campanhas recorrentes - futuro)
+    # Agendamento
     dia_atual = Column(Integer, default=0)
     data_inicio = Column(DateTime, default=datetime.utcnow)
     proxima_execucao = Column(DateTime, nullable=True)
     
-    # Oferta Promocional (opcional)
+    # Oferta Promocional
     plano_id = Column(Integer, nullable=True)
     promo_price = Column(Float, nullable=True)
     expiration_at = Column(DateTime, nullable=True)
     
     # Métricas de Execução
-    total_leads = Column(Integer, default=0)      # Total planejado
-    sent_success = Column(Integer, default=0)     # Enviados com sucesso
-    blocked_count = Column(Integer, default=0)    # Bloqueados/Erro
-    data_envio = Column(DateTime, default=datetime.utcnow) 
+    total_leads = Column(Integer, default=0)
+    sent_success = Column(Integer, default=0)
+    blocked_count = Column(Integer, default=0)
+    data_envio = Column(DateTime, default=datetime.utcnow)
     
-    # Relacionamento (Aponta para o Bot e espera que ele tenha 'remarketing_campaigns')
+    # Relacionamento
     bot = relationship("Bot", back_populates="remarketing_campaigns")
 
 # =========================================================
