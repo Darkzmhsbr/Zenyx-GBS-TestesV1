@@ -213,6 +213,31 @@ class RemarketingCampaign(Base):
     bot = relationship("Bot", back_populates="remarketing_campaigns")
 
 # =========================================================
+# 🔄 WEBHOOK RETRY SYSTEM
+# =========================================================
+class WebhookRetry(Base):
+    """
+    Rastreia webhooks que falharam e precisam ser reprocessados.
+    Implementa exponential backoff automático.
+    """
+    __tablename__ = "webhook_retry"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    webhook_type = Column(String(50))
+    payload = Column(Text)
+    attempts = Column(Integer, default=0)
+    max_attempts = Column(Integer, default=5)
+    next_retry = Column(DateTime, nullable=True)
+    status = Column(String(20), default='pending')
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_error = Column(Text, nullable=True)
+    reference_id = Column(String(100), nullable=True)
+    
+    def __repr__(self):
+        return f"<WebhookRetry(id={self.id}, type={self.webhook_type}, attempts={self.attempts}, status={self.status})>"
+
+# =========================================================
 # 💬 FLUXO (ESTRUTURA HÍBRIDA V1 + V2 + MINI APP)
 # =========================================================
 class BotFlow(Base):
