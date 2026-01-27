@@ -34,7 +34,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Importa o banco e o script de reparo
-from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, Notification, User, engine
+from database import SessionLocal, init_db, Bot, PlanoConfig, BotFlow, BotFlowStep, Pedido, SystemConfig, RemarketingCampaign, BotAdmin, Lead, OrderBumpConfig, TrackingFolder, TrackingLink, MiniAppConfig, MiniAppCategory, AuditLog, Notification, User, engine,WebhookRetry
 import update_db 
 
 from migration_v3 import executar_migracao_v3
