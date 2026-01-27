@@ -333,6 +333,544 @@ async def shutdown_event():
     
     logger.info("👋 [SHUTDOWN] Sistema encerrado")
 
+# ============================================================
+
+async def start_alternating_messages_job(
+    bot_token: str,
+    chat_id: int,
+    message_id: int,
+    messages: list,
+    interval_seconds: int,
+    stop_at: datetime,
+    auto_destruct: bool,
+    bot_id: int
+):
+    """
+    Job que alterna mensagens em uma mesma mensagem do Telegram.
+    
+    Args:
+        bot_token: Token do bot Telegram
+        chat_id: ID do chat/usuário
+        message_id: ID da mensagem a ser editada
+        messages: Lista de mensagens para alternar
+        interval_seconds: Intervalo entre alternações
+        stop_at: Timestamp de quando parar
+        auto_destruct: Se True, deleta mensagem ao parar
+        bot_id: ID do bot (para logs)
+    """
+    try:
+        bot = TeleBot(bot_token, threaded=False)
+        index = 0
+        
+        logger.info(
+            f"✅ [ALTERNATING] Job iniciado - Bot: {bot_id}, "
+            f"User: {chat_id}, Msgs: {len(messages)}, "
+            f"Interval: {interval_seconds}s"
+        )
+        
+        while datetime.now() < stop_at:
+            try:
+                # Pega mensagem atual do array (rotação circular)
+                current_message = messages[index % len(messages)]
+                
+                # Edita mensagem no Telegram
+                bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=current_message,
+                    parse_mode='HTML'
+                )
+                
+                logger.info(
+                    f"📝 [ALTERNATING] Msg {(index % len(messages)) + 1}/{len(messages)} "
+                    f"enviada para User {chat_id}"
+                )
+                
+                index += 1
+                
+                # Calcula quanto tempo falta até stop_at
+                remaining = (stop_at - datetime.now()).total_seconds()
+                sleep_time = min(interval_seconds, remaining)
+                
+                if sleep_time <= 0:
+                    break
+                
+                await asyncio.sleep(sleep_time)
+                
+            except Exception as e:
+                error_str = str(e).lower()
+                
+                # Se mensagem foi deletada ou não existe, para o job
+                if "message to edit not found" in error_str or "message can't be edited" in error_str:
+                    logger.warning(f"⚠️ [ALTERNATING] Mensagem não encontrada, parando job para User {chat_id}")
+                    break
+                
+                # Se bot foi bloqueado, para o job
+                if "bot was blocked by the user" in error_str:
+                    logger.warning(f"⚠️ [ALTERNATING] Bot bloqueado por User {chat_id}, parando job")
+                    break
+                
+                # Para outros erros, loga e aguarda
+                logger.error(f"❌ [ALTERNATING] Erro ao editar mensagem: {str(e)}")
+                await asyncio.sleep(interval_seconds)
+        
+        # Fim do loop - auto-destruir se configurado
+        if auto_destruct:
+            try:
+                await asyncio.sleep(1)  # Pequeno delay antes de destruir
+                bot.delete_message(chat_id=chat_id, message_id=message_id)
+                logger.info(f"🗑️ [ALTERNATING] Mensagem auto-destruída para User {chat_id}")
+            except Exception as e:
+                logger.error(f"❌ [ALTERNATING] Erro ao auto-destruir: {str(e)}")
+        
+        logger.info(f"✅ [ALTERNATING] Job finalizado para User {chat_id}")
+        
+    except asyncio.CancelledError:
+        logger.info(f"🛑 [ALTERNATING] Job cancelado (pagamento ou bloqueio) - User {chat_id}")
+        raise  # Re-raise para cleanup correto
+        
+    except Exception as e:
+        logger.error(f"❌ [ALTERNATING] Erro crítico: {str(e)}")
+        
+    finally:
+        # Remove da memória
+        with remarketing_lock:
+            if chat_id in alternating_tasks:
+                del alternating_tasks[chat_id]
+                logger.info(f"🧹 [ALTERNATING] Limpeza de memória para User {chat_id}")
+
+
+async def send_remarketing_job(
+    bot_token: str,
+    chat_id: int,
+    config_dict: dict,
+    user_info: dict,
+    bot_id: int
+):
+    """
+    Job que envia mensagem de remarketing após delay configurado.
+    
+    Args:
+        bot_token: Token do bot Telegram
+        chat_id: ID do usuário
+        config_dict: Dicionário com configuração serializada
+        user_info: Informações do usuário (nome, plano tentado, etc)
+        bot_id: ID do bot
+    """
+    try:
+        # Aguarda delay configurado
+        delay_minutes = config_dict.get('delay_minutes', 5)
+        logger.info(
+            f"⏳ [REMARKETING] Aguardando {delay_minutes} minutos "
+            f"para User {chat_id} (Bot: {bot_id})"
+        )
+        
+        await asyncio.sleep(delay_minutes * 60)
+        
+        logger.info(f"🚀 [REMARKETING] Tempo atingido, processando envio para User {chat_id}")
+        
+        # Cria sessão de banco
+        db = SessionLocal()
+        
+        try:
+            # 1. Verifica se usuário já pagou
+            pedido_pago = db.query(Pedido).filter(
+                Pedido.bot_id == bot_id,
+                Pedido.telegram_id == chat_id,
+                Pedido.status.in_(['paid', 'ativo'])
+            ).first()
+            
+            if pedido_pago:
+                logger.info(
+                    f"💰 [REMARKETING] User {chat_id} já pagou, "
+                    f"abortando envio (Pedido: {pedido_pago.id})"
+                )
+                return
+            
+            # 2. Verifica se já enviou remarketing hoje
+            hoje = datetime.now().date()
+            log_hoje = db.query(RemarketingSentLog).filter(
+                RemarketingSentLog.bot_id == bot_id,
+                RemarketingSentLog.user_telegram_id == chat_id,
+                func.date(RemarketingSentLog.sent_at) == hoje
+            ).first()
+            
+            if log_hoje:
+                logger.info(
+                    f"📅 [REMARKETING] Já enviado hoje para User {chat_id}, "
+                    f"abortando (Log ID: {log_hoje.id})"
+                )
+                return
+            
+            # 3. Prepara mensagem (substitui variáveis)
+            message_text = config_dict.get('message_text', '')
+            
+            if user_info:
+                first_name = user_info.get('first_name', 'Usuário')
+                plano_original = user_info.get('plano', 'VIP')
+                valor_original = user_info.get('valor', '0.00')
+                
+                message_text = message_text.replace('{first_name}', first_name)
+                message_text = message_text.replace('{plano_original}', plano_original)
+                message_text = message_text.replace('{valor_original}', str(valor_original))
+            
+            # 4. Prepara botões com valores promocionais
+            markup = types.InlineKeyboardMarkup()
+            promo_values = config_dict.get('promo_values', {})
+            
+            if promo_values:
+                for plano_id_str, valor_promo in promo_values.items():
+                    try:
+                        plano_id = int(plano_id_str)
+                        plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
+                        
+                        if plano:
+                            button_text = f"{plano.nome_exibicao} - R$ {float(valor_promo):.2f} 🔥"
+                            callback_data = f"remarketing_{plano.id}"
+                            markup.add(
+                                types.InlineKeyboardButton(button_text, callback_data=callback_data)
+                            )
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"❌ [REMARKETING] Erro ao processar plano {plano_id_str}: {e}")
+            
+            # 5. Envia mensagem
+            bot = TeleBot(bot_token, threaded=False)
+            msg = None
+            
+            media_url = config_dict.get('media_url')
+            media_type = config_dict.get('media_type')
+            
+            if media_url and media_type:
+                try:
+                    if media_type == 'photo':
+                        msg = bot.send_photo(
+                            chat_id=chat_id,
+                            photo=media_url,
+                            caption=message_text,
+                            reply_markup=markup if markup.keyboard else None,
+                            parse_mode='HTML'
+                        )
+                    elif media_type == 'video':
+                        msg = bot.send_video(
+                            chat_id=chat_id,
+                            video=media_url,
+                            caption=message_text,
+                            reply_markup=markup if markup.keyboard else None,
+                            parse_mode='HTML'
+                        )
+                except Exception as e:
+                    logger.error(f"❌ [REMARKETING] Erro ao enviar mídia: {e}, enviando só texto")
+                    # Fallback para texto se mídia falhar
+                    msg = bot.send_message(
+                        chat_id=chat_id,
+                        text=message_text,
+                        reply_markup=markup if markup.keyboard else None,
+                        parse_mode='HTML'
+                    )
+            else:
+                msg = bot.send_message(
+                    chat_id=chat_id,
+                    text=message_text,
+                    reply_markup=markup if markup.keyboard else None,
+                    parse_mode='HTML'
+                )
+            
+            # 6. Registra no log
+            log_entry = RemarketingSentLog(
+                bot_id=bot_id,
+                user_telegram_id=chat_id,
+                message_text=message_text,
+                promo_values=promo_values,
+                status='sent',
+                sent_at=datetime.now()
+            )
+            db.add(log_entry)
+            db.commit()
+            
+            logger.info(
+                f"✅ [REMARKETING] Enviado com sucesso - User: {chat_id}, "
+                f"Log ID: {log_entry.id}"
+            )
+            
+            # 7. Auto-destruir se configurado
+            auto_destruct_seconds = config_dict.get('auto_destruct_seconds', 0)
+            if auto_destruct_seconds > 0 and msg:
+                logger.info(
+                    f"⏱️ [REMARKETING] Auto-destruição agendada em {auto_destruct_seconds}s "
+                    f"para User {chat_id}"
+                )
+                await asyncio.sleep(auto_destruct_seconds)
+                
+                try:
+                    bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                    logger.info(f"🗑️ [REMARKETING] Mensagem auto-destruída para User {chat_id}")
+                except Exception as e:
+                    logger.error(f"❌ [REMARKETING] Erro ao auto-destruir: {str(e)}")
+            
+        except Exception as e:
+            logger.error(f"❌ [REMARKETING] Erro ao processar envio: {str(e)}")
+            
+            # Registra erro no log
+            try:
+                log_entry = RemarketingSentLog(
+                    bot_id=bot_id,
+                    user_telegram_id=chat_id,
+                    status='error',
+                    error_message=str(e),
+                    sent_at=datetime.now()
+                )
+                db.add(log_entry)
+                db.commit()
+            except:
+                pass
+            
+        finally:
+            db.close()
+        
+    except asyncio.CancelledError:
+        logger.info(f"🛑 [REMARKETING] Job cancelado (pagamento) - User {chat_id}")
+        raise
+        
+    except Exception as e:
+        logger.error(f"❌ [REMARKETING] Erro crítico: {str(e)}")
+        
+    finally:
+        # Remove da memória
+        with remarketing_lock:
+            if chat_id in remarketing_timers:
+                del remarketing_timers[chat_id]
+                logger.info(f"🧹 [REMARKETING] Limpeza de memória para User {chat_id}")
+
+
+async def cleanup_orphan_jobs():
+    """
+    Job periódico que limpa timers de usuários que já pagaram.
+    Executa a cada 1 hora via scheduler.
+    """
+    try:
+        logger.info("🔄 [CLEANUP-REMARKETING] Iniciando limpeza de jobs órfãos...")
+        
+        with remarketing_lock:
+            # Copia IDs para evitar modificação durante iteração
+            active_remarketing = list(remarketing_timers.keys())
+            active_alternating = list(alternating_tasks.keys())
+        
+        if not active_remarketing and not active_alternating:
+            logger.info("✅ [CLEANUP-REMARKETING] Nenhum job ativo")
+            return
+        
+        logger.info(
+            f"📊 [CLEANUP-REMARKETING] Jobs ativos: "
+            f"{len(active_remarketing)} remarketing, {len(active_alternating)} alternating"
+        )
+        
+        # Busca usuários que pagaram
+        db = SessionLocal()
+        
+        try:
+            all_active_users = set(active_remarketing + active_alternating)
+            
+            if not all_active_users:
+                return
+            
+            # Query otimizada para buscar pedidos pagos
+            paid_users = db.query(Pedido.telegram_id).filter(
+                Pedido.telegram_id.in_(all_active_users),
+                Pedido.status.in_(['paid', 'ativo'])
+            ).distinct().all()
+            
+            paid_user_ids = {u[0] for u in paid_users}
+            
+            if not paid_user_ids:
+                logger.info("✅ [CLEANUP-REMARKETING] Nenhum pagamento detectado")
+                return
+            
+            # Cancela jobs de usuários que pagaram
+            canceled_count = 0
+            
+            with remarketing_lock:
+                # Cancela remarketing
+                for user_id in list(remarketing_timers.keys()):
+                    if user_id in paid_user_ids:
+                        remarketing_timers[user_id].cancel()
+                        del remarketing_timers[user_id]
+                        canceled_count += 1
+                        logger.info(f"🛑 [CLEANUP-REMARKETING] Cancelado remarketing para User {user_id}")
+                
+                # Cancela alternating
+                for user_id in list(alternating_tasks.keys()):
+                    if user_id in paid_user_ids:
+                        alternating_tasks[user_id].cancel()
+                        del alternating_tasks[user_id]
+                        canceled_count += 1
+                        logger.info(f"🛑 [CLEANUP-REMARKETING] Cancelado alternating para User {user_id}")
+            
+            logger.info(f"✅ [CLEANUP-REMARKETING] {canceled_count} jobs cancelados (usuários pagaram)")
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"❌ [CLEANUP-REMARKETING] Erro: {str(e)}")
+
+
+def schedule_remarketing_and_alternating(
+    bot_id: int,
+    chat_id: int,
+    payment_message_id: int,
+    user_info: dict
+):
+    """
+    Agenda remarketing + mensagens alternantes para um usuário.
+    
+    Args:
+        bot_id: ID do bot
+        chat_id: ID do usuário no Telegram
+        payment_message_id: ID da mensagem com QR Code PIX
+        user_info: Dict com info do usuário:
+            - first_name: Nome do usuário
+            - plano: Nome do plano escolhido
+            - valor: Valor original do plano
+    
+    Exemplo de uso:
+        schedule_remarketing_and_alternating(
+            bot_id=1,
+            chat_id=123456789,
+            payment_message_id=987654321,
+            user_info={
+                'first_name': 'João',
+                'plano': 'VIP Mensal',
+                'valor': 49.90
+            }
+        )
+    """
+    try:
+        db = SessionLocal()
+        
+        try:
+            # 1. Busca configuração de remarketing
+            remarketing_config = db.query(RemarketingConfig).filter(
+                RemarketingConfig.bot_id == bot_id,
+                RemarketingConfig.is_active == True
+            ).first()
+            
+            if not remarketing_config:
+                logger.info(f"⚠️ [SCHEDULE] Remarketing desativado para Bot {bot_id}")
+                return
+            
+            # 2. Busca token do bot
+            bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+            if not bot or not bot.token:
+                logger.error(f"❌ [SCHEDULE] Bot {bot_id} não encontrado ou sem token")
+                return
+            
+            # 3. Serializa config para passar ao job
+            config_dict = {
+                'message_text': remarketing_config.message_text,
+                'media_url': remarketing_config.media_url,
+                'media_type': remarketing_config.media_type,
+                'delay_minutes': remarketing_config.delay_minutes,
+                'auto_destruct_seconds': remarketing_config.auto_destruct_seconds,
+                'promo_values': remarketing_config.promo_values or {}
+            }
+            
+            # 4. AGENDA MENSAGENS ALTERNANTES (se ativo)
+            alternating_config = db.query(AlternatingMessages).filter(
+                AlternatingMessages.bot_id == bot_id,
+                AlternatingMessages.is_active == True
+            ).first()
+            
+            if alternating_config and alternating_config.messages:
+                # Calcula quando parar (X segundos antes do remarketing)
+                stop_at = datetime.now() + timedelta(
+                    minutes=remarketing_config.delay_minutes
+                ) - timedelta(
+                    seconds=alternating_config.stop_before_remarketing_seconds
+                )
+                
+                # Cria task assíncrona
+                loop = asyncio.get_event_loop()
+                task = loop.create_task(
+                    start_alternating_messages_job(
+                        bot_token=bot.token,
+                        chat_id=chat_id,
+                        message_id=payment_message_id,
+                        messages=alternating_config.messages,
+                        interval_seconds=alternating_config.rotation_interval_seconds,
+                        stop_at=stop_at,
+                        auto_destruct=alternating_config.auto_destruct_final,
+                        bot_id=bot_id
+                    )
+                )
+                
+                with remarketing_lock:
+                    alternating_tasks[chat_id] = task
+                
+                logger.info(
+                    f"📱 [SCHEDULE] Alternating agendado - User: {chat_id}, "
+                    f"Stop: {stop_at.strftime('%H:%M:%S')}"
+                )
+            
+            # 5. AGENDA REMARKETING
+            loop = asyncio.get_event_loop()
+            task = loop.create_task(
+                send_remarketing_job(
+                    bot_token=bot.token,
+                    chat_id=chat_id,
+                    config_dict=config_dict,
+                    user_info=user_info,
+                    bot_id=bot_id
+                )
+            )
+            
+            with remarketing_lock:
+                remarketing_timers[chat_id] = task
+            
+            logger.info(
+                f"🎯 [SCHEDULE] Remarketing agendado - User: {chat_id}, "
+                f"Delay: {remarketing_config.delay_minutes} min"
+            )
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"❌ [SCHEDULE] Erro ao agendar: {str(e)}")
+
+
+def cancel_remarketing_for_user(chat_id: int):
+    """
+    Cancela todos os jobs de remarketing para um usuário específico.
+    Usado quando o usuário paga ou bloqueia o bot.
+    
+    Args:
+        chat_id: ID do usuário no Telegram
+    """
+    try:
+        canceled = []
+        
+        with remarketing_lock:
+            # Cancela remarketing
+            if chat_id in remarketing_timers:
+                remarketing_timers[chat_id].cancel()
+                del remarketing_timers[chat_id]
+                canceled.append('remarketing')
+            
+            # Cancela alternating
+            if chat_id in alternating_tasks:
+                alternating_tasks[chat_id].cancel()
+                del alternating_tasks[chat_id]
+                canceled.append('alternating')
+        
+        if canceled:
+            logger.info(
+                f"🛑 [CANCEL] Jobs cancelados para User {chat_id}: "
+                f"{', '.join(canceled)}"
+            )
+        
+    except Exception as e:
+        logger.error(f"❌ [CANCEL] Erro ao cancelar jobs: {str(e)}")
+
 
 # =========================================================
 # 🏥 HEALTH CHECK ENDPOINT
@@ -1043,6 +1581,465 @@ def registrar_remarketing(
             logger.info("⏰ [STARTUP] Agendador de tarefas iniciado.")
     except Exception as e:
         logger.error(f"❌ [STARTUP] Erro no Scheduler: {e}")
+
+# ============================================================
+
+# Job de limpeza de remarketing órfãos (executa a cada 1 hora)
+scheduler.add_job(
+    cleanup_orphan_jobs,
+    'interval',
+    hours=1,
+    id='cleanup_remarketing_jobs',
+    replace_existing=True
+)
+logger.info("✅ [SCHEDULER] Job de cleanup de remarketing configurado (1h)")
+
+
+# ============================================================
+# 🌐 ROTAS DA API - REMARKETING
+# ============================================================
+#
+# INSTRUÇÕES DE INSERÇÃO:
+# - Localizar no main.py ANTES do final do arquivo
+# - Geralmente linha ~7500-7800
+# - Cole ANTES das últimas rotas ou antes do if __name__ == "__main__"
+#
+# ============================================================
+
+# ============================================================
+# GET: Buscar configuração de remarketing
+# ============================================================
+@app.get("/api/bots/{bot_id}/remarketing")
+def get_remarketing_config(
+    bot_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Retorna a configuração de remarketing automático de um bot.
+    Se não existir, retorna config padrão.
+    """
+    try:
+        # Valida permissão (owner ou superuser)
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado a este bot")
+        
+        # Busca config
+        config = db.query(RemarketingConfig).filter(
+            RemarketingConfig.bot_id == bot_id
+        ).first()
+        
+        if not config:
+            # Retorna config padrão
+            return {
+                "bot_id": bot_id,
+                "is_active": False,
+                "message_text": "",
+                "media_url": None,
+                "media_type": None,
+                "delay_minutes": 5,
+                "auto_destruct_seconds": 0,
+                "promo_values": {}
+            }
+        
+        return {
+            "id": config.id,
+            "bot_id": config.bot_id,
+            "is_active": config.is_active,
+            "message_text": config.message_text,
+            "media_url": config.media_url,
+            "media_type": config.media_type,
+            "delay_minutes": config.delay_minutes,
+            "auto_destruct_seconds": config.auto_destruct_seconds,
+            "promo_values": config.promo_values or {},
+            "created_at": config.created_at.isoformat() if config.created_at else None,
+            "updated_at": config.updated_at.isoformat() if config.updated_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [API] Erro ao buscar config de remarketing: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar configuração: {str(e)}")
+
+
+# ============================================================
+# POST: Salvar configuração de remarketing
+# ============================================================
+@app.post("/api/bots/{bot_id}/remarketing")
+def save_remarketing_config(
+    bot_id: int,
+    data: dict,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Cria ou atualiza configuração de remarketing automático.
+    """
+    try:
+        # Valida permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado a este bot")
+        
+        # Validações
+        delay_minutes = data.get("delay_minutes", 5)
+        if delay_minutes < 1 or delay_minutes > 1440:
+            raise HTTPException(
+                status_code=400, 
+                detail="delay_minutes deve estar entre 1 e 1440 (24 horas)"
+            )
+        
+        if data.get("media_url") and not data.get("media_type"):
+            raise HTTPException(
+                status_code=400, 
+                detail="media_type é obrigatório quando media_url é fornecido"
+            )
+        
+        auto_destruct = data.get("auto_destruct_seconds", 0)
+        if auto_destruct < 0:
+            raise HTTPException(
+                status_code=400, 
+                detail="auto_destruct_seconds não pode ser negativo"
+            )
+        
+        # Busca config existente
+        config = db.query(RemarketingConfig).filter(
+            RemarketingConfig.bot_id == bot_id
+        ).first()
+        
+        if config:
+            # Atualiza existente
+            config.is_active = data.get("is_active", config.is_active)
+            config.message_text = data.get("message_text", config.message_text)
+            config.media_url = data.get("media_url", config.media_url)
+            config.media_type = data.get("media_type", config.media_type)
+            config.delay_minutes = delay_minutes
+            config.auto_destruct_seconds = auto_destruct
+            config.promo_values = data.get("promo_values", config.promo_values)
+            config.updated_at = datetime.now()
+            
+            action = "remarketing_updated"
+            description = f"Configuração de remarketing atualizada para bot {bot.nome}"
+        else:
+            # Cria novo
+            config = RemarketingConfig(
+                bot_id=bot_id,
+                is_active=data.get("is_active", False),
+                message_text=data.get("message_text", ""),
+                media_url=data.get("media_url"),
+                media_type=data.get("media_type"),
+                delay_minutes=delay_minutes,
+                auto_destruct_seconds=auto_destruct,
+                promo_values=data.get("promo_values", {})
+            )
+            db.add(config)
+            
+            action = "remarketing_created"
+            description = f"Configuração de remarketing criada para bot {bot.nome}"
+        
+        db.commit()
+        db.refresh(config)
+        
+        # Auditoria
+        log_action(
+            db=db,
+            user_id=current_user.id,
+            action=action,
+            resource_type="remarketing_config",
+            resource_id=config.id,
+            description=description,
+            details=json.dumps({
+                "bot_id": bot_id,
+                "is_active": config.is_active,
+                "delay_minutes": config.delay_minutes
+            }),
+            request=request
+        )
+        
+        logger.info(
+            f"✅ [API] Config de remarketing salva - Bot: {bot_id}, "
+            f"User: {current_user.username}, Active: {config.is_active}"
+        )
+        
+        return {
+            "id": config.id,
+            "bot_id": config.bot_id,
+            "is_active": config.is_active,
+            "message_text": config.message_text,
+            "media_url": config.media_url,
+            "media_type": config.media_type,
+            "delay_minutes": config.delay_minutes,
+            "auto_destruct_seconds": config.auto_destruct_seconds,
+            "promo_values": config.promo_values,
+            "updated_at": config.updated_at.isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ [API] Erro ao salvar config de remarketing: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar configuração: {str(e)}")
+
+
+# ============================================================
+# GET: Buscar configuração de mensagens alternantes
+# ============================================================
+@app.get("/api/bots/{bot_id}/alternating-messages")
+def get_alternating_messages(
+    bot_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Retorna a configuração de mensagens alternantes de um bot.
+    """
+    try:
+        # Valida permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado a este bot")
+        
+        # Busca config
+        config = db.query(AlternatingMessages).filter(
+            AlternatingMessages.bot_id == bot_id
+        ).first()
+        
+        if not config:
+            return {
+                "bot_id": bot_id,
+                "is_active": False,
+                "messages": [],
+                "rotation_interval_seconds": 15,
+                "stop_before_remarketing_seconds": 60,
+                "auto_destruct_final": False
+            }
+        
+        return {
+            "id": config.id,
+            "bot_id": config.bot_id,
+            "is_active": config.is_active,
+            "messages": config.messages or [],
+            "rotation_interval_seconds": config.rotation_interval_seconds,
+            "stop_before_remarketing_seconds": config.stop_before_remarketing_seconds,
+            "auto_destruct_final": config.auto_destruct_final,
+            "created_at": config.created_at.isoformat() if config.created_at else None,
+            "updated_at": config.updated_at.isoformat() if config.updated_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [API] Erro ao buscar alternating messages: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar configuração: {str(e)}")
+
+
+# ============================================================
+# POST: Salvar configuração de mensagens alternantes
+# ============================================================
+@app.post("/api/bots/{bot_id}/alternating-messages")
+def save_alternating_messages(
+    bot_id: int,
+    data: dict,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Cria ou atualiza configuração de mensagens alternantes.
+    """
+    try:
+        # Valida permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado a este bot")
+        
+        # Validações
+        messages = data.get("messages", [])
+        if not isinstance(messages, list):
+            raise HTTPException(status_code=400, detail="messages deve ser um array")
+        
+        if data.get("is_active") and len(messages) < 2:
+            raise HTTPException(
+                status_code=400, 
+                detail="Deve ter pelo menos 2 mensagens para ativar"
+            )
+        
+        rotation_interval = data.get("rotation_interval_seconds", 15)
+        if rotation_interval < 5 or rotation_interval > 300:
+            raise HTTPException(
+                status_code=400, 
+                detail="rotation_interval_seconds deve estar entre 5 e 300"
+            )
+        
+        # Busca config existente
+        config = db.query(AlternatingMessages).filter(
+            AlternatingMessages.bot_id == bot_id
+        ).first()
+        
+        if config:
+            # Atualiza
+            config.is_active = data.get("is_active", config.is_active)
+            config.messages = messages
+            config.rotation_interval_seconds = rotation_interval
+            config.stop_before_remarketing_seconds = data.get(
+                "stop_before_remarketing_seconds", 
+                config.stop_before_remarketing_seconds
+            )
+            config.auto_destruct_final = data.get(
+                "auto_destruct_final", 
+                config.auto_destruct_final
+            )
+            config.updated_at = datetime.now()
+            
+            action = "alternating_updated"
+            description = f"Mensagens alternantes atualizadas para bot {bot.nome}"
+        else:
+            # Cria novo
+            config = AlternatingMessages(
+                bot_id=bot_id,
+                is_active=data.get("is_active", False),
+                messages=messages,
+                rotation_interval_seconds=rotation_interval,
+                stop_before_remarketing_seconds=data.get("stop_before_remarketing_seconds", 60),
+                auto_destruct_final=data.get("auto_destruct_final", False)
+            )
+            db.add(config)
+            
+            action = "alternating_created"
+            description = f"Mensagens alternantes criadas para bot {bot.nome}"
+        
+        db.commit()
+        db.refresh(config)
+        
+        # Auditoria
+        log_action(
+            db=db,
+            user_id=current_user.id,
+            action=action,
+            resource_type="alternating_messages",
+            resource_id=config.id,
+            description=description,
+            details=json.dumps({
+                "bot_id": bot_id,
+                "is_active": config.is_active,
+                "num_messages": len(config.messages)
+            }),
+            request=request
+        )
+        
+        logger.info(
+            f"✅ [API] Alternating messages salvas - Bot: {bot_id}, "
+            f"User: {current_user.username}, Active: {config.is_active}"
+        )
+        
+        return {
+            "id": config.id,
+            "bot_id": config.bot_id,
+            "is_active": config.is_active,
+            "messages": config.messages,
+            "rotation_interval_seconds": config.rotation_interval_seconds,
+            "stop_before_remarketing_seconds": config.stop_before_remarketing_seconds,
+            "auto_destruct_final": config.auto_destruct_final,
+            "updated_at": config.updated_at.isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ [API] Erro ao salvar alternating messages: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar configuração: {str(e)}")
+
+
+# ============================================================
+# GET: Estatísticas de remarketing
+# ============================================================
+@app.get("/api/bots/{bot_id}/remarketing/stats")
+def get_remarketing_stats(
+    bot_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Retorna estatísticas de remarketing do bot (envios, conversões, etc).
+    """
+    try:
+        # Valida permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado a este bot")
+        
+        # Total enviado
+        total_sent = db.query(RemarketingSentLog).filter(
+            RemarketingSentLog.bot_id == bot_id
+        ).count()
+        
+        # Total convertido
+        total_converted = db.query(RemarketingSentLog).filter(
+            RemarketingSentLog.bot_id == bot_id,
+            RemarketingSentLog.converted == True
+        ).count()
+        
+        # Taxa de conversão
+        conversion_rate = (total_converted / total_sent * 100) if total_sent > 0 else 0
+        
+        # Enviados hoje
+        hoje = datetime.now().date()
+        today_sent = db.query(RemarketingSentLog).filter(
+            RemarketingSentLog.bot_id == bot_id,
+            func.date(RemarketingSentLog.sent_at) == hoje
+        ).count()
+        
+        # Últimos 10 envios
+        recent_logs = db.query(RemarketingSentLog).filter(
+            RemarketingSentLog.bot_id == bot_id
+        ).order_by(RemarketingSentLog.sent_at.desc()).limit(10).all()
+        
+        recent_data = [
+            {
+                "id": log.id,
+                "user_telegram_id": log.user_telegram_id,
+                "sent_at": log.sent_at.isoformat(),
+                "status": log.status,
+                "converted": log.converted,
+                "error_message": log.error_message
+            }
+            for log in recent_logs
+        ]
+        
+        return {
+            "total_sent": total_sent,
+            "total_converted": total_converted,
+            "conversion_rate": round(conversion_rate, 2),
+            "today_sent": today_sent,
+            "recent_logs": recent_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [API] Erro ao buscar stats de remarketing: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar estatísticas: {str(e)}")
+
 
     # 3. Inicia o Ceifador
     thread = threading.Thread(target=loop_verificar_vencimentos)

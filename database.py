@@ -526,3 +526,93 @@ class Notification(Base):
 
     # Relacionamento com Usuário
     user = relationship("User", back_populates="notifications")
+
+# =========================================================
+# 🎯 REMARKETING AUTOMÁTICO
+# =========================================================
+class RemarketingConfig(Base):
+    """
+    Configuração de remarketing automático por bot.
+    Define quando e como enviar mensagens de reengajamento.
+    """
+    __tablename__ = "remarketing_config"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey('bots.id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    # Controle
+    is_active = Column(Boolean, default=True, index=True)
+    
+    # Conteúdo
+    message_text = Column(Text, nullable=False)
+    media_url = Column(String(500), nullable=True)
+    media_type = Column(String(10), nullable=True)  # 'photo', 'video', None
+    
+    # Timing
+    delay_minutes = Column(Integer, default=5)
+    auto_destruct_seconds = Column(Integer, default=0)  # 0 = não destrói
+    
+    # Valores Promocionais (JSON)
+    promo_values = Column(JSON, default={})  # {plano_id: valor_promo}
+    
+    # Auditoria
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<RemarketingConfig(bot_id={self.bot_id}, active={self.is_active}, delay={self.delay_minutes}min)>"
+
+
+class AlternatingMessages(Base):
+    """
+    Mensagens que alternam durante o período de espera antes do remarketing.
+    """
+    __tablename__ = "alternating_messages"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey('bots.id', ondelete='CASCADE'), nullable=False, index=True)
+    
+    # Controle
+    is_active = Column(Boolean, default=False, index=True)
+    
+    # Mensagens (Array de strings via JSON)
+    messages = Column(JSON, default=[])  # ["msg1", "msg2", "msg3"]
+    
+    # Timing
+    rotation_interval_seconds = Column(Integer, default=15)
+    stop_before_remarketing_seconds = Column(Integer, default=60)
+    auto_destruct_final = Column(Boolean, default=False)
+    
+    # Auditoria
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<AlternatingMessages(bot_id={self.bot_id}, active={self.is_active}, msgs={len(self.messages)})>"
+
+
+class RemarketingSentLog(Base):
+    """
+    Log de remarketing enviados para analytics e controle de duplicação.
+    """
+    __tablename__ = "remarketing_sent_log"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey('bots.id'), nullable=False, index=True)
+    user_telegram_id = Column(Integer, nullable=False, index=True)
+    
+    # Dados do envio
+    sent_at = Column(DateTime, default=datetime.utcnow, index=True)
+    message_text = Column(Text, nullable=True)
+    promo_values = Column(JSON, nullable=True)
+    
+    # Status
+    status = Column(String(20), default='sent', index=True)  # sent, error, paid
+    error_message = Column(Text, nullable=True)
+    
+    # Conversão
+    converted = Column(Boolean, default=False, index=True)
+    converted_at = Column(DateTime, nullable=True)
+    
+    def __repr__(self):
+        return f"<RemarketingSentLog(bot_id={self.bot_id}, user={self.user_telegram_id}, status={self.status})>"
