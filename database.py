@@ -172,28 +172,43 @@ class PlanoConfig(Base):
 # =========================================================
 # 📢 REMARKETING
 # =========================================================
+# =========================================================
+# 📢 REMARKETING
+# =========================================================
 class RemarketingCampaign(Base):
     __tablename__ = "remarketing_campaigns"
+    
+    # Identificação
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey("bots.id"))
     campaign_id = Column(String, unique=True)
-    target = Column(String, default="todos")
-    type = Column(String, default="massivo")
-    config = Column(String)
-    status = Column(String, default="agendado")
     
+    # Configuração
+    target = Column(String, default="todos")  # 'todos', 'compradores', 'nao_compradores', 'lead'
+    type = Column(String, default="massivo")  # 'teste' ou 'massivo'
+    config = Column(Text)  # JSON com mensagem, media_url, etc (mudei String para Text)
+    
+    # Status e Controle
+    status = Column(String, default="agendado")  # 'agendado', 'enviando', 'concluido', 'erro'
+    
+    # Agendamento (para campanhas recorrentes - futuro)
     dia_atual = Column(Integer, default=0)
     data_inicio = Column(DateTime, default=datetime.utcnow)
     proxima_execucao = Column(DateTime, nullable=True)
     
+    # Oferta Promocional (opcional)
     plano_id = Column(Integer, nullable=True)
     promo_price = Column(Float, nullable=True)
     expiration_at = Column(DateTime, nullable=True)
     
-    total_leads = Column(Integer, default=0)
-    sent_success = Column(Integer, default=0)
-    blocked_count = Column(Integer, default=0)
-    data_envio = Column(DateTime, default=datetime.utcnow)
+    # Métricas de Execução (CAMPOS CRÍTICOS PARA BACKGROUNDTASKS)
+    total_leads = Column(Integer, default=0)      # Total planejado
+    sent_success = Column(Integer, default=0)     # Enviados com sucesso
+    blocked_count = Column(Integer, default=0)    # Bloqueados/Erro
+    data_envio = Column(DateTime, default=datetime.utcnow)  # ← ESTE ESTAVA FALTANDO
+    
+    # Relacionamento
+    bot = relationship("Bot", back_populates="remarketing_campaigns")
 
 # =========================================================
 # 💬 FLUXO (ESTRUTURA HÍBRIDA V1 + V2 + MINI APP)

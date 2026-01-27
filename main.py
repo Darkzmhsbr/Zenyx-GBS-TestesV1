@@ -817,6 +817,174 @@ def verificar_expiracao_massa():
         db.close()
 
 # =========================================================
+# 🔄 PROCESSAMENTO BACKGROUND DE REMARKETING
+# =========================================================
+
+def processar_envio_massivo_background(
+    campaign_id: int, 
+    bot_id: int, 
+    mensagem: str, 
+    target: str,
+    media_url: str = None,
+    plano_oferta_id: int = None
+):
+    """
+    Processa envio de remarketing em background.
+    Roda em thread separada via BackgroundTasks do FastAPI.
+    
+    IMPORTANTE: Não pode usar a sessão do DB da requisição HTTP!
+    Precisa criar nova sessão aqui.
+    """
+    # 1. CRIAR NOVA SESSÃO (threads não compartilham conexões)
+    db = SessionLocal()
+    
+    try:
+        logger.info(f"🚀 Iniciando envio background da campanha {campaign_id}")
+        
+        # 2. BUSCAR DADOS DO BOT
+        bot_data = db.query(Bot).filter(Bot.id == bot_id).first()
+        if not bot_data:
+            logger.error(f"❌ Bot {bot_id} não encontrado")
+            return
+        
+        bot = telebot.TeleBot(bot_data.token, threaded=False)
+        
+        # 3. FILTRAR LEADS COM BASE NO TARGET
+        leads_query = db.query(Lead).filter(Lead.bot_id == bot_id)
+        
+        if target == 'todos':
+            leads = leads_query.all()
+        elif target == 'compradores':
+            # Buscar IDs de quem já comprou
+            compradores_ids = db.query(Pedido.telegram_id).filter(
+                Pedido.bot_id == bot_id,
+                Pedido.status.in_(['paid', 'approved'])
+            ).distinct().all()
+            ids_set = {str(c[0]) for c in compradores_ids}
+            leads = [l for l in leads_query.all() if l.user_id in ids_set]
+        elif target == 'nao_compradores':
+            # Leads que nunca compraram
+            compradores_ids = db.query(Pedido.telegram_id).filter(
+                Pedido.bot_id == bot_id,
+                Pedido.status.in_(['paid', 'approved'])
+            ).distinct().all()
+            ids_set = {str(c[0]) for c in compradores_ids}
+            leads = [l for l in leads_query.all() if l.user_id not in ids_set]
+        else:
+            leads = leads_query.filter(Lead.status == target).all()
+        
+        total_leads = len(leads)
+        logger.info(f"📊 Total de leads a enviar: {total_leads}")
+        
+        # 4. ATUALIZAR CAMPANHA COM TOTAL
+        campanha = db.query(RemarketingCampaign).filter(
+            RemarketingCampaign.id == campaign_id
+        ).first()
+        
+        if campanha:
+            campanha.total_leads = total_leads
+            campanha.status = 'enviando'
+            db.commit()
+        
+        # 5. MONTAR MENSAGEM COM BOTÃO (SE TIVER OFERTA)
+        markup = None
+        if plano_oferta_id:
+            plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_oferta_id).first()
+            if plano:
+                markup = types.InlineKeyboardMarkup()
+                btn_text = f"🔥 {plano.nome_exibicao} - R$ {plano.preco_atual:.2f}"
+                markup.add(types.InlineKeyboardButton(
+                    btn_text, 
+                    callback_data=f"promo_{campanha.campaign_id}"
+                ))
+        
+        # 6. ENVIO EM LOOP COM RATE LIMITING
+        enviados = 0
+        erros = 0
+        
+        for i, lead in enumerate(leads):
+            try:
+                # Tentar converter ID para inteiro
+                try:
+                    target_id = int(lead.user_id)
+                except (ValueError, TypeError):
+                    logger.warning(f"⚠️ ID inválido: {lead.user_id}")
+                    erros += 1
+                    continue
+                
+                # ENVIAR MENSAGEM
+                if media_url:
+                    # Detectar tipo de mídia
+                    if media_url.lower().endswith(('.mp4', '.mov', '.avi')):
+                        bot.send_video(
+                            target_id, 
+                            media_url, 
+                            caption=mensagem, 
+                            reply_markup=markup, 
+                            parse_mode="HTML"
+                        )
+                    else:
+                        bot.send_photo(
+                            target_id, 
+                            media_url, 
+                            caption=mensagem, 
+                            reply_markup=markup, 
+                            parse_mode="HTML"
+                        )
+                else:
+                    bot.send_message(
+                        target_id, 
+                        mensagem, 
+                        reply_markup=markup, 
+                        parse_mode="HTML"
+                    )
+                
+                enviados += 1
+                
+                # RATE LIMITING: 28 msgs/segundo (margem de segurança)
+                time.sleep(0.036)
+                
+                # LOG DE PROGRESSO A CADA 50 ENVIOS
+                if (i + 1) % 50 == 0:
+                    logger.info(f"📤 Progresso: {i+1}/{total_leads} ({(i+1)/total_leads*100:.1f}%)")
+                
+            except telebot.apihelper.ApiTelegramException as e:
+                # Usuário bloqueou o bot ou ID inválido
+                erros += 1
+                logger.warning(f"⚠️ Telegram API error para {lead.user_id}: {e}")
+            except Exception as e:
+                erros += 1
+                logger.error(f"❌ Erro ao enviar para {lead.user_id}: {e}")
+        
+        # 7. ATUALIZAR CAMPANHA COM RESULTADO FINAL
+        if campanha:
+            campanha.status = 'concluido'
+            campanha.sent_success = enviados
+            campanha.blocked_count = erros
+            db.commit()
+        
+        logger.info(f"✅ Campanha {campaign_id} concluída: {enviados} enviados, {erros} erros")
+        
+    except Exception as e:
+        logger.error(f"❌ ERRO CRÍTICO no processamento background: {e}")
+        
+        # Marcar campanha como erro
+        try:
+            campanha = db.query(RemarketingCampaign).filter(
+                RemarketingCampaign.id == campaign_id
+            ).first()
+            if campanha:
+                campanha.status = 'erro'
+                db.commit()
+        except:
+            pass
+    
+    finally:
+        # 8. SEMPRE FECHAR A SESSÃO
+        db.close()
+        logger.info(f"🔒 Sessão do DB fechada para campanha {campaign_id}")
+
+# =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (DINÂMICA)
 # =========================================================
 def get_pushin_token():
@@ -4526,44 +4694,140 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         db.close() # Fecha a conexão dedicada
 
 @app.post("/api/admin/remarketing/send")
-def enviar_remarketing(payload: RemarketingRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    # 1. Validação de Teste
-    if payload.is_test and not payload.specific_user_id:
-        ultimo = db.query(Pedido).filter(Pedido.bot_id == payload.bot_id).order_by(Pedido.id.desc()).first()
-        if ultimo: payload.specific_user_id = ultimo.telegram_id
-        else:
-            admin = db.query(BotAdmin).filter(BotAdmin.bot_id == payload.bot_id).first()
-            if admin: payload.specific_user_id = admin.telegram_id
-            else: raise HTTPException(400, "Nenhum usuário encontrado para teste.")
-
-    # 2. Cria o Registro Inicial (Status: Enviando)
-    uuid_campanha = str(uuid.uuid4())
-    nova_campanha = RemarketingCampaign(
-        bot_id=payload.bot_id,
-        campaign_id=uuid_campanha,
-        type="teste" if payload.is_test else "massivo",
-        target=payload.target,
-        # Salva config inicial compatível
-        config=json.dumps({"msg": payload.mensagem, "mensagem": payload.mensagem, "media": payload.media_url}), 
-        status="enviando",
-        data_envio=datetime.utcnow(),
-        total_leads=0,
-        sent_success=0,
-        blocked_count=0
-    )
-    db.add(nova_campanha)
-    db.commit()
-    db.refresh(nova_campanha)
-
-    # 3. Inicia Background Task (Passa APENAS IDs, não a sessão)
-    background_tasks.add_task(
-        processar_envio_remarketing, 
-        nova_campanha.id,  # ID da campanha para atualizar depois
-        payload.bot_id, 
-        payload
-    )
+async def enviar_remarketing(
+    payload: RemarketingRequest, 
+    background_tasks: BackgroundTasks,  # ← CRÍTICO: Injeção do FastAPI
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)  # ← Adicionar autenticação
+):
+    """
+    Envia campanha de remarketing em BACKGROUND.
+    Retorna imediatamente sem bloquear o servidor.
     
-    return {"status": "enviando", "msg": "Campanha iniciada! Acompanhe no histórico.", "campaign_id": nova_campanha.id}
+    IMPORTANTE: Esta rota retorna em < 1 segundo.
+    O processamento continua em background.
+    """
+    try:
+        logger.info(f"📢 Nova campanha de remarketing: Bot {payload.bot_id}, Target: {payload.target}")
+        
+        # =========================================================
+        # 1. VALIDAÇÃO DE TESTE
+        # =========================================================
+        if payload.is_test and not payload.specific_user_id:
+            # Buscar último pedido para teste
+            ultimo = db.query(Pedido).filter(
+                Pedido.bot_id == payload.bot_id
+            ).order_by(Pedido.id.desc()).first()
+            
+            if ultimo:
+                payload.specific_user_id = ultimo.telegram_id
+            else:
+                # Fallback: Admin do bot
+                admin = db.query(BotAdmin).filter(
+                    BotAdmin.bot_id == payload.bot_id
+                ).first()
+                
+                if admin:
+                    payload.specific_user_id = admin.telegram_id
+                else:
+                    raise HTTPException(400, "Nenhum usuário encontrado para teste.")
+        
+        # =========================================================
+        # 2. CRIAR REGISTRO DA CAMPANHA
+        # =========================================================
+        uuid_campanha = str(uuid.uuid4())
+        nova_campanha = RemarketingCampaign(
+            bot_id=payload.bot_id,
+            campaign_id=uuid_campanha,
+            type="teste" if payload.is_test else "massivo",
+            target=payload.target,
+            # Config com múltiplas chaves para retrocompatibilidade
+            config=json.dumps({
+                "mensagem": payload.mensagem,
+                "msg": payload.mensagem,  # Compatibilidade com código antigo
+                "media_url": payload.media_url,
+                "media": payload.media_url,  # Compatibilidade
+                "plano_oferta_id": getattr(payload, 'plano_oferta_id', None)
+            }),
+            status='agendado',  # Status inicial
+            data_envio=datetime.utcnow(),
+            total_leads=0,  # Será atualizado no background
+            sent_success=0,
+            blocked_count=0,
+            plano_id=getattr(payload, 'plano_oferta_id', None),  # Se tiver oferta
+            promo_price=None
+        )
+        db.add(nova_campanha)
+        db.commit()
+        db.refresh(nova_campanha)
+        
+        logger.info(f"✅ Campanha {nova_campanha.id} registrada no banco")
+        
+        # =========================================================
+        # 3. SE FOR TESTE, ENVIA SÍNCRONO (1 MENSAGEM APENAS)
+        # =========================================================
+        if payload.is_test:
+            try:
+                bot_data = db.query(Bot).filter(Bot.id == payload.bot_id).first()
+                if not bot_data:
+                    raise HTTPException(404, "Bot não encontrado")
+                
+                bot = telebot.TeleBot(bot_data.token)
+                target_id = int(payload.specific_user_id)
+                
+                # Enviar teste
+                bot.send_message(target_id, payload.mensagem, parse_mode="HTML")
+                
+                # Atualizar campanha como concluída
+                nova_campanha.status = 'concluido'
+                nova_campanha.sent_success = 1
+                nova_campanha.total_leads = 1
+                db.commit()
+                
+                logger.info(f"✅ Teste enviado para {payload.specific_user_id}")
+                
+                return {
+                    "status": "enviado",
+                    "message": f"Teste enviado com sucesso para {payload.specific_user_id}!",
+                    "campaign_id": nova_campanha.id
+                }
+                
+            except Exception as e:
+                logger.error(f"❌ Erro no teste: {e}")
+                nova_campanha.status = 'erro'
+                db.commit()
+                raise HTTPException(500, f"Erro ao enviar teste: {str(e)}")
+        
+        # =========================================================
+        # 4. SE FOR MASSIVO, AGENDAR BACKGROUND TASK
+        # =========================================================
+        background_tasks.add_task(
+            processar_envio_massivo_background,  # ← Nome correto da função
+            nova_campanha.id,
+            payload.bot_id,
+            payload.mensagem,
+            payload.target,
+            payload.media_url,
+            getattr(payload, 'plano_oferta_id', None)
+        )
+        
+        logger.info(f"🚀 Campanha {nova_campanha.id} agendada para background")
+        
+        # =========================================================
+        # 5. RETORNAR IMEDIATAMENTE (< 1 segundo)
+        # =========================================================
+        return {
+            "status": "enviando",
+            "message": "Campanha iniciada! Acompanhe o progresso no histórico.",
+            "campaign_id": nova_campanha.id
+        }
+        
+    except HTTPException:
+        # Re-lançar HTTPExceptions (são erros esperados)
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao criar campanha: {e}")
+        raise HTTPException(500, detail=str(e))
 
 
 # --- ROTA DE REENVIO INDIVIDUAL (CORRIGIDA PARA HTML) ---
