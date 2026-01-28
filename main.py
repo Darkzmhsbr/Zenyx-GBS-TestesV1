@@ -34,6 +34,9 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 # --- Scheduler ---
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+import asyncio
+from threading import Lock
+
 # Importa o banco e o script de reparo
 # ← MODIFICADO: Renomear Bot para BotModel para evitar conflito com TeleBot
 from database import (
@@ -57,7 +60,10 @@ from database import (
     Notification, 
     User, 
     engine,
-    WebhookRetry
+    WebhookRetry,
+    RemarketingConfig,      # ← ADICIONAR
+    AlternatingMessages,    # ← ADICIONAR
+    RemarketingSentLog      # ← ADICIONAR
 )
 import update_db 
 
@@ -71,6 +77,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Zenyx Gbot SaaS")
+
+
+# ============================================================
+# PASSO 2: ADICIONAR VARIÁVEIS GLOBAIS (linha ~70-100, antes das funções)
+# ============================================================
+# Controle de remarketing
+remarketing_lock = Lock()
+remarketing_timers = {}  # {chat_id: asyncio.Task}
+alternating_tasks = {}   # {chat_id: asyncio.Task}
+
 
 # ============================================================
 # FUNÇÕES DE JOBS AGENDADOS
@@ -248,16 +264,6 @@ async def processar_webhooks_pendentes():
 
 scheduler = AsyncIOScheduler()
 
-# Job de limpeza de remarketing órfãos (executa a cada 1 hora)
-scheduler.add_job(
-    cleanup_orphan_jobs,
-    'interval',
-    hours=1,
-    id='cleanup_remarketing_jobs',
-    replace_existing=True
-)
-logger.info("✅ [SCHEDULER] Job de cleanup de remarketing configurado (1h)")
-
 # Adicionar jobs
 scheduler.add_job(
     verificar_vencimentos,
@@ -272,6 +278,15 @@ scheduler.add_job(
     minutes=1,
     id='webhook_retry_processor'
 )
+
+scheduler.add_job(
+    cleanup_orphan_jobs,
+    'interval',
+    hours=1,
+    id='cleanup_remarketing_jobs',
+    replace_existing=True
+)
+logger.info("✅ [SCHEDULER] Job de cleanup de remarketing configurado (1h)")
 
 # ============ HTTPX CLIENT GLOBAL ============
 http_client = None
@@ -384,6 +399,7 @@ async def start_alternating_messages_job(
                 await asyncio.sleep(sleep_time)
                 
             except Exception as e:
+                # Ignora erros de "mensagem não encontrada" (usuário apagou)
                 if "message to edit not found" in str(e).lower(): break
                 await asyncio.sleep(interval_seconds)
         
@@ -399,7 +415,8 @@ async def start_alternating_messages_job(
         logger.error(f"❌ [ALTERNATING] Erro: {e}")
     finally:
         with remarketing_lock:
-            alternating_tasks.pop(chat_id, None)
+            if chat_id in alternating_tasks:
+                del alternating_tasks[chat_id]
 
 
 async def send_remarketing_job(
@@ -514,15 +531,10 @@ async def cleanup_orphan_jobs():
     except Exception as e: 
         logger.error(f"❌ [CLEANUP] Erro: {e}")
 
-
 def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_message_id: int, user_info: dict):
-    """
-    Função principal chamada pelo fluxo de pagamento para iniciar o processo.
-    """
     try:
         db = SessionLocal()
         try:
-            # 1. Config de Remarketing
             config = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id, RemarketingConfig.is_active == True).first()
             if not config: return
 
@@ -535,12 +547,10 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 'promo_values': config.promo_values or {}
             }
 
-            # 2. Config de Mensagens Alternantes
+            # Agenda Alternating
             alt_config = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id, AlternatingMessages.is_active == True).first()
             if alt_config and alt_config.messages:
                 stop_at = datetime.now() + timedelta(minutes=config.delay_minutes) - timedelta(seconds=alt_config.stop_before_remarketing_seconds)
-                
-                # Inicia Job Alternante
                 loop = asyncio.get_event_loop()
                 task = loop.create_task(start_alternating_messages_job(
                     bot.token, chat_id, payment_message_id, alt_config.messages, 
@@ -548,7 +558,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 ))
                 with remarketing_lock: alternating_tasks[chat_id] = task
 
-            # 3. Inicia Job de Remarketing
+            # Agenda Remarketing
             loop = asyncio.get_event_loop()
             task = loop.create_task(send_remarketing_job(bot.token, chat_id, config_dict, user_info, bot_id))
             with remarketing_lock: remarketing_timers[chat_id] = task
@@ -556,108 +566,6 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
         finally: db.close()
     except Exception as e: logger.error(f"❌ [SCHEDULE] Erro: {e}")
 
-
-# ============================================================
-# 🛤️ ROTAS DA API - DISPARO AUTOMÁTICO
-# ============================================================
-
-# --- 1. CONFIGURAÇÃO GERAL ---
-@app.get("/api/admin/auto-remarketing/{bot_id}")
-def get_remarketing_config(bot_id: int, db: Session = Depends(get_db)):
-    config = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
-    if not config:
-        return {
-            "is_active": False, "message_text": "", "delay_minutes": 5, 
-            "auto_destruct_seconds": 0, "promo_values": {}
-        }
-    return config
-
-@app.post("/api/admin/auto-remarketing/{bot_id}")
-def save_remarketing_config(bot_id: int, data: dict, db: Session = Depends(get_db)):
-    config = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
-    if not config:
-        config = RemarketingConfig(bot_id=bot_id)
-        db.add(config)
-    
-    config.is_active = data.get("is_active", False)
-    config.message_text = data.get("message_text", "")
-    config.media_url = data.get("media_url")
-    config.media_type = data.get("media_type")
-    config.delay_minutes = data.get("delay_minutes", 5)
-    config.auto_destruct_seconds = data.get("auto_destruct_seconds", 0)
-    config.promo_values = data.get("promo_values", {})
-    config.updated_at = datetime.utcnow()
-    
-    db.commit()
-    return {"status": "success"}
-
-# --- 2. MENSAGENS ALTERNANTES ---
-@app.get("/api/admin/auto-remarketing/{bot_id}/messages")
-def get_alternating_messages(bot_id: int, db: Session = Depends(get_db)):
-    config = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).first()
-    if not config:
-        return {
-            "is_active": False, "messages": [], "rotation_interval_seconds": 15,
-            "stop_before_remarketing_seconds": 60, "auto_destruct_final": False
-        }
-    return config
-
-@app.post("/api/admin/auto-remarketing/{bot_id}/messages")
-def save_alternating_messages(bot_id: int, data: dict, db: Session = Depends(get_db)):
-    config = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).first()
-    if not config:
-        config = AlternatingMessages(bot_id=bot_id)
-        db.add(config)
-    
-    config.is_active = data.get("is_active", False)
-    config.messages = data.get("messages", [])
-    config.rotation_interval_seconds = data.get("rotation_interval_seconds", 15)
-    config.stop_before_remarketing_seconds = data.get("stop_before_remarketing_seconds", 60)
-    config.auto_destruct_final = data.get("auto_destruct_final", False)
-    config.updated_at = datetime.utcnow()
-    
-    db.commit()
-    return {"status": "success"}
-
-# --- 3. ESTATÍSTICAS ---
-@app.get("/api/admin/auto-remarketing/{bot_id}/stats")
-def get_remarketing_stats(bot_id: int, db: Session = Depends(get_db)):
-    total_sent = db.query(RemarketingSentLog).filter(
-        RemarketingSentLog.bot_id == bot_id, RemarketingSentLog.status == 'sent'
-    ).count()
-    
-    total_converted = db.query(RemarketingSentLog).filter(
-        RemarketingSentLog.bot_id == bot_id, RemarketingSentLog.converted == True
-    ).count()
-    
-    today_sent = db.query(RemarketingSentLog).filter(
-        RemarketingSentLog.bot_id == bot_id,
-        RemarketingSentLog.status == 'sent',
-        func.date(RemarketingSentLog.sent_at) == datetime.utcnow().date()
-    ).count()
-    
-    recent_logs = db.query(RemarketingSentLog).filter(
-        RemarketingSentLog.bot_id == bot_id
-    ).order_by(desc(RemarketingSentLog.sent_at)).limit(10).all()
-    
-    rate = round((total_converted / total_sent) * 100, 2) if total_sent > 0 else 0
-        
-    return {
-        "total_sent": total_sent, "total_converted": total_converted,
-        "conversion_rate": rate, "today_sent": today_sent, "recent_logs": recent_logs
-    }
-
-# --- 4. TOGGLE ---
-@app.post("/api/admin/auto-remarketing/{bot_id}/toggle")
-def toggle_remarketing(bot_id: int, db: Session = Depends(get_db)):
-    config = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
-    if not config:
-        config = RemarketingConfig(bot_id=bot_id, is_active=True, message_text="")
-        db.add(config)
-    else:
-        config.is_active = not config.is_active
-    db.commit()
-    return {"is_active": config.is_active}
 
 # =========================================================
 # 🏥 HEALTH CHECK ENDPOINT
@@ -847,14 +755,6 @@ class UserDetailsResponse(BaseModel):
     total_revenue: float
     total_sales: int
 
-# ============================================================
-# 🧠 VARIÁVEIS GLOBAIS DE CONTROLE (REMARKETING)
-# ============================================================
-# Dicionários para rastrear tarefas ativas e evitar duplicação
-remarketing_timers = {}   # {user_id: task_object}
-alternating_tasks = {}    # {user_id: task_object}
-remarketing_lock = threading.Lock() # Lock para thread safety
-
 # ========================================================
 # 1. FUNÇÃO DE CONEXÃO COM BANCO (TEM QUE SER A PRIMEIRA)
 # =========================================================
@@ -945,6 +845,315 @@ async def get_current_superuser(current_user = Depends(get_current_user)):
     
     logger.info(f"👑 Super-admin acessando: {current_user.username}")
     return current_user
+
+# ============================================================
+# 🚀 ROTAS DA API - AUTO-REMARKETING
+# ============================================================
+
+@app.get("/api/admin/auto-remarketing/{bot_id}")
+def get_auto_remarketing_config(
+    bot_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Retorna configuração de remarketing automático"""
+    try:
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        config = db.query(RemarketingConfig).filter(
+            RemarketingConfig.bot_id == bot_id
+        ).first()
+        
+        if not config:
+            return {
+                "bot_id": bot_id,
+                "is_active": False,
+                "message_text": "",
+                "media_url": None,
+                "media_type": None,
+                "delay_minutes": 5,
+                "auto_destruct_seconds": 0,
+                "promo_values": {}
+            }
+        
+        return {
+            "id": config.id,
+            "bot_id": config.bot_id,
+            "is_active": config.is_active,
+            "message_text": config.message_text,
+            "media_url": config.media_url,
+            "media_type": config.media_type,
+            "delay_minutes": config.delay_minutes,
+            "auto_destruct_seconds": config.auto_destruct_seconds,
+            "promo_values": config.promo_values or {},
+            "created_at": config.created_at.isoformat() if config.created_at else None,
+            "updated_at": config.updated_at.isoformat() if config.updated_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [API] Erro ao buscar config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/auto-remarketing/{bot_id}")
+def save_auto_remarketing_config(
+    bot_id: int,
+    data: dict,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Salva/atualiza configuração de remarketing automático"""
+    try:
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        delay_minutes = data.get("delay_minutes", 5)
+        if delay_minutes < 1 or delay_minutes > 1440:
+            raise HTTPException(status_code=400, detail="delay_minutes entre 1-1440")
+        
+        config = db.query(RemarketingConfig).filter(
+            RemarketingConfig.bot_id == bot_id
+        ).first()
+        
+        if config:
+            config.is_active = data.get("is_active", config.is_active)
+            config.message_text = data.get("message_text", config.message_text)
+            config.media_url = data.get("media_url", config.media_url)
+            config.media_type = data.get("media_type", config.media_type)
+            config.delay_minutes = delay_minutes
+            config.auto_destruct_seconds = data.get("auto_destruct_seconds", config.auto_destruct_seconds)
+            config.promo_values = data.get("promo_values", config.promo_values)
+            config.updated_at = datetime.now()
+        else:
+            config = RemarketingConfig(
+                bot_id=bot_id,
+                is_active=data.get("is_active", False),
+                message_text=data.get("message_text", ""),
+                media_url=data.get("media_url"),
+                media_type=data.get("media_type"),
+                delay_minutes=delay_minutes,
+                auto_destruct_seconds=data.get("auto_destruct_seconds", 0),
+                promo_values=data.get("promo_values", {})
+            )
+            db.add(config)
+        
+        db.commit()
+        db.refresh(config)
+        
+        logger.info(f"✅ Config salva - Bot: {bot_id}, User: {current_user.username}")
+        
+        return {
+            "id": config.id,
+            "bot_id": config.bot_id,
+            "is_active": config.is_active,
+            "message_text": config.message_text,
+            "media_url": config.media_url,
+            "media_type": config.media_type,
+            "delay_minutes": config.delay_minutes,
+            "auto_destruct_seconds": config.auto_destruct_seconds,
+            "promo_values": config.promo_values,
+            "updated_at": config.updated_at.isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro ao salvar: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/auto-remarketing/{bot_id}/messages")
+def get_auto_remarketing_messages(
+    bot_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Retorna configuração de mensagens alternantes"""
+    try:
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        config = db.query(AlternatingMessages).filter(
+            AlternatingMessages.bot_id == bot_id
+        ).first()
+        
+        if not config:
+            return {
+                "bot_id": bot_id,
+                "is_active": False,
+                "messages": [],
+                "rotation_interval_seconds": 15,
+                "stop_before_remarketing_seconds": 60,
+                "auto_destruct_final": False
+            }
+        
+        return {
+            "id": config.id,
+            "bot_id": config.bot_id,
+            "is_active": config.is_active,
+            "messages": config.messages or [],
+            "rotation_interval_seconds": config.rotation_interval_seconds,
+            "stop_before_remarketing_seconds": config.stop_before_remarketing_seconds,
+            "auto_destruct_final": config.auto_destruct_final,
+            "created_at": config.created_at.isoformat() if config.created_at else None,
+            "updated_at": config.updated_at.isoformat() if config.updated_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/auto-remarketing/{bot_id}/messages")
+def save_auto_remarketing_messages(
+    bot_id: int,
+    data: dict,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Salva configuração de mensagens alternantes"""
+    try:
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        messages = data.get("messages", [])
+        if not isinstance(messages, list):
+            raise HTTPException(status_code=400, detail="messages deve ser array")
+        
+        if data.get("is_active") and len(messages) < 2:
+            raise HTTPException(status_code=400, detail="Mínimo 2 mensagens")
+        
+        config = db.query(AlternatingMessages).filter(
+            AlternatingMessages.bot_id == bot_id
+        ).first()
+        
+        if config:
+            config.is_active = data.get("is_active", config.is_active)
+            config.messages = messages
+            config.rotation_interval_seconds = data.get("rotation_interval_seconds", config.rotation_interval_seconds)
+            config.stop_before_remarketing_seconds = data.get("stop_before_remarketing_seconds", config.stop_before_remarketing_seconds)
+            config.auto_destruct_final = data.get("auto_destruct_final", config.auto_destruct_final)
+            config.updated_at = datetime.now()
+        else:
+            config = AlternatingMessages(
+                bot_id=bot_id,
+                is_active=data.get("is_active", False),
+                messages=messages,
+                rotation_interval_seconds=data.get("rotation_interval_seconds", 15),
+                stop_before_remarketing_seconds=data.get("stop_before_remarketing_seconds", 60),
+                auto_destruct_final=data.get("auto_destruct_final", False)
+            )
+            db.add(config)
+        
+        db.commit()
+        db.refresh(config)
+        
+        logger.info(f"✅ Mensagens salvas - Bot: {bot_id}")
+        
+        return {
+            "id": config.id,
+            "bot_id": config.bot_id,
+            "is_active": config.is_active,
+            "messages": config.messages,
+            "rotation_interval_seconds": config.rotation_interval_seconds,
+            "stop_before_remarketing_seconds": config.stop_before_remarketing_seconds,
+            "auto_destruct_final": config.auto_destruct_final,
+            "updated_at": config.updated_at.isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/auto-remarketing/{bot_id}/stats")
+def get_auto_remarketing_stats(
+    bot_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Retorna estatísticas de remarketing"""
+    try:
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        total_sent = db.query(RemarketingSentLog).filter(
+            RemarketingSentLog.bot_id == bot_id
+        ).count()
+        
+        total_converted = db.query(RemarketingSentLog).filter(
+            RemarketingSentLog.bot_id == bot_id,
+            RemarketingSentLog.converted == True
+        ).count()
+        
+        conversion_rate = (total_converted / total_sent * 100) if total_sent > 0 else 0
+        
+        hoje = datetime.now().date()
+        today_sent = db.query(RemarketingSentLog).filter(
+            RemarketingSentLog.bot_id == bot_id,
+            func.date(RemarketingSentLog.sent_at) == hoje
+        ).count()
+        
+        recent_logs = db.query(RemarketingSentLog).filter(
+            RemarketingSentLog.bot_id == bot_id
+        ).order_by(RemarketingSentLog.sent_at.desc()).limit(10).all()
+        
+        recent_data = [
+            {
+                "id": log.id,
+                "user_telegram_id": log.user_telegram_id,
+                "sent_at": log.sent_at.isoformat(),
+                "status": log.status,
+                "converted": log.converted,
+                "error_message": log.error_message
+            }
+            for log in recent_logs
+        ]
+        
+        return {
+            "total_sent": total_sent,
+            "total_converted": total_converted,
+            "conversion_rate": round(conversion_rate, 2),
+            "today_sent": today_sent,
+            "recent_logs": recent_data
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # =========================================================
 # 🔒 FUNÇÃO HELPER: VERIFICAR PROPRIEDADE DO BOT
@@ -1122,11 +1331,47 @@ def mover_lead_para_pedido(
     return pedido
 
 
-# FUNÇÃO 3: MARCAR COMO PAGO (FUNDO)
-def marcar_como_pago(
-    db: Session,
-    pedido_id: int
-):
+# ============================================================
+# FUNÇÃO AUXILIAR: CANCELAR REMARKETING (ADICIONAR LINHA ~1320)
+# ============================================================
+def cancel_remarketing_for_user(chat_id: int):
+    """
+    Cancela todos os jobs de remarketing para um usuário específico.
+    Usado quando o usuário paga ou bloqueia o bot.
+    
+    Args:
+        chat_id: ID do usuário no Telegram
+    """
+    try:
+        canceled = []
+        
+        with remarketing_lock:
+            # Cancela remarketing
+            if chat_id in remarketing_timers:
+                remarketing_timers[chat_id].cancel()
+                del remarketing_timers[chat_id]
+                canceled.append('remarketing')
+            
+            # Cancela alternating
+            if chat_id in alternating_tasks:
+                alternating_tasks[chat_id].cancel()
+                del alternating_tasks[chat_id]
+                canceled.append('alternating')
+        
+        if canceled:
+            logger.info(
+                f"🛑 [CANCEL] Jobs cancelados para User {chat_id}: "
+                f"{', '.join(canceled)}"
+            )
+        
+    except Exception as e:
+        logger.error(f"❌ [CANCEL] Erro ao cancelar jobs: {str(e)}")
+
+
+# ============================================================
+# FUNÇÃO 3: MARCAR COMO PAGO (CORRIGIDA)
+# ============================================================
+def marcar_como_pago(db: Session, pedido_id: int):
     """
     Marca pedido como PAGO (FUNDO do funil)
     """
@@ -1149,8 +1394,19 @@ def marcar_como_pago(
     
     db.commit()
     db.refresh(pedido)
+    
+    # ============================================================
+    # 🎯 CANCELAR REMARKETING (USUÁRIO PAGOU)
+    # ============================================================
+    try:
+        chat_id_int = int(pedido.telegram_id) if pedido.telegram_id.isdigit() else hash(pedido.telegram_id) % 1000000000
+        cancel_remarketing_for_user(chat_id_int)
+        logger.info(f"🛑 [REMARKETING] Jobs cancelados para {pedido.first_name} (pagou)")
+    except Exception as e:
+        logger.error(f"❌ [REMARKETING] Erro ao cancelar: {e}")
+    # ============================================================
+    
     return pedido
-
 
 # FUNÇÃO 4: MARCAR COMO EXPIRADO
 def marcar_como_expirado(
@@ -1378,18 +1634,6 @@ def registrar_remarketing(
         logger.error(f"❌ [STARTUP] Erro no Scheduler: {e}")
 
 # ============================================================
-
-# Job de limpeza de remarketing órfãos (executa a cada 1 hora)
-scheduler.add_job(
-    cleanup_orphan_jobs,
-    'interval',
-    hours=1,
-    id='cleanup_remarketing_jobs',
-    replace_existing=True
-)
-logger.info("✅ [SCHEDULER] Job de cleanup de remarketing configurado (1h)")
-
-
 # ============================================================
 # 🌐 ROTAS DA API - REMARKETING
 # ============================================================
@@ -1400,116 +1644,6 @@ logger.info("✅ [SCHEDULER] Job de cleanup de remarketing configurado (1h)")
 # - Cole ANTES das últimas rotas ou antes do if __name__ == "__main__"
 #
 # ============================================================
-
-# ============================================================
-# GET: Buscar configuração de remarketing
-# ============================================================
-# ============================================================
-# 🛤️ ROTAS DA API - DISPARO AUTOMÁTICO (CORRIGIDAS)
-# ============================================================
-
-# --- 1. CONFIGURAÇÃO GERAL ---
-@app.get("/api/admin/auto-remarketing/{bot_id}")
-def get_remarketing_config(bot_id: int, db: Session = Depends(get_db)):
-    config = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
-    if not config:
-        return {
-            "is_active": False, "message_text": "", "delay_minutes": 5, 
-            "auto_destruct_seconds": 0, "promo_values": {}
-        }
-    return config
-
-@app.post("/api/admin/auto-remarketing/{bot_id}")
-def save_remarketing_config(bot_id: int, data: dict, db: Session = Depends(get_db)):
-    if hasattr(data, 'dict'): data = data.dict() # Garante dict
-    
-    config = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
-    if not config:
-        config = RemarketingConfig(bot_id=bot_id)
-        db.add(config)
-    
-    config.is_active = data.get("is_active", False)
-    config.message_text = data.get("message_text", "")
-    config.media_url = data.get("media_url")
-    config.media_type = data.get("media_type")
-    config.delay_minutes = data.get("delay_minutes", 5)
-    config.auto_destruct_seconds = data.get("auto_destruct_seconds", 0)
-    config.promo_values = data.get("promo_values", {})
-    config.updated_at = datetime.utcnow()
-    
-    db.commit()
-    return {"status": "success"}
-
-# --- 2. MENSAGENS ALTERNANTES ---
-@app.get("/api/admin/auto-remarketing/{bot_id}/messages")
-def get_alternating_messages(bot_id: int, db: Session = Depends(get_db)):
-    config = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).first()
-    if not config:
-        return {
-            "is_active": False, "messages": [], "rotation_interval_seconds": 15,
-            "stop_before_remarketing_seconds": 60, "auto_destruct_final": False
-        }
-    return config
-
-@app.post("/api/admin/auto-remarketing/{bot_id}/messages")
-def save_alternating_messages(bot_id: int, data: dict, db: Session = Depends(get_db)):
-    if hasattr(data, 'dict'): data = data.dict()
-
-    config = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).first()
-    if not config:
-        config = AlternatingMessages(bot_id=bot_id)
-        db.add(config)
-    
-    config.is_active = data.get("is_active", False)
-    config.messages = data.get("messages", [])
-    config.rotation_interval_seconds = data.get("rotation_interval_seconds", 15)
-    config.stop_before_remarketing_seconds = data.get("stop_before_remarketing_seconds", 60)
-    config.auto_destruct_final = data.get("auto_destruct_final", False)
-    config.updated_at = datetime.utcnow()
-    
-    db.commit()
-    return {"status": "success"}
-
-# --- 3. ESTATÍSTICAS ---
-@app.get("/api/admin/auto-remarketing/{bot_id}/stats")
-def get_remarketing_stats(bot_id: int, db: Session = Depends(get_db)):
-    total_sent = db.query(RemarketingSentLog).filter(
-        RemarketingSentLog.bot_id == bot_id, RemarketingSentLog.status == 'sent'
-    ).count()
-    
-    total_converted = db.query(RemarketingSentLog).filter(
-        RemarketingSentLog.bot_id == bot_id, RemarketingSentLog.converted == True
-    ).count()
-    
-    today_sent = db.query(RemarketingSentLog).filter(
-        RemarketingSentLog.bot_id == bot_id,
-        RemarketingSentLog.status == 'sent',
-        func.date(RemarketingSentLog.sent_at) == datetime.utcnow().date()
-    ).count()
-    
-    recent_logs = db.query(RemarketingSentLog).filter(
-        RemarketingSentLog.bot_id == bot_id
-    ).order_by(desc(RemarketingSentLog.sent_at)).limit(10).all()
-    
-    rate = round((total_converted / total_sent) * 100, 2) if total_sent > 0 else 0
-        
-    return {
-        "total_sent": total_sent, "total_converted": total_converted,
-        "conversion_rate": rate, "today_sent": today_sent, "recent_logs": recent_logs
-    }
-
-# --- 4. TOGGLE ---
-@app.post("/api/admin/auto-remarketing/{bot_id}/toggle")
-def toggle_remarketing(bot_id: int, db: Session = Depends(get_db)):
-    config = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
-    if not config:
-        config = RemarketingConfig(bot_id=bot_id, is_active=True, message_text="")
-        db.add(config)
-    else:
-        config.is_active = not config.is_active
-    db.commit()
-    return {"is_active": config.is_active}
-
 
     # 3. Inicia o Ceifador
     thread = threading.Thread(target=loop_verificar_vencimentos)
@@ -2593,7 +2727,7 @@ class PixCreateRequest(BaseModel):
 # 💰 2. GERAÇÃO DE PIX (COM SPLIT FORÇADO SEMPRE)
 # =========================================================
 @app.post("/api/pagamento/pix")
-async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):  # ✅ ASYNC
+async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
     try:
         logger.info(f"💰 Iniciando pagamento: {data.first_name} (R$ {data.valor})")
         
@@ -2628,32 +2762,31 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):  # �
             )
             db.add(novo_pedido)
             db.commit()
-
-            # 🔥 [NOVO] GATILHO DE REMARKETING AUTOMÁTICO
+            db.refresh(novo_pedido)
+            
+            # ============================================================
+            # 🎯 INTEGRAÇÃO: AGENDAR REMARKETING (MODO TESTE)
+            # ============================================================
             try:
-                # Prepara dados do usuário para personalização
-                user_info = {
-                    'first_name': data.first_name or "Cliente",
-                    'plano': data.plano_nome or "Plano VIP",
-                    'valor': data.valor
-                }
+                # Converte telegram_id para int (necessário para o sistema de remarketing)
+                chat_id_int = int(tid_clean) if tid_clean.isdigit() else hash(tid_clean) % 1000000000
                 
-                # Agenda o job (Remarketing + Mensagens Alternantes)
-                # Tenta pegar o message_id do front se vier no body, senão usa 0
-                # (Mensagens alternantes precisam do message_id real para editar a msg)
-                msg_id = getattr(data, 'message_id', 0) 
-                
+                # Agenda remarketing + mensagens alternantes
                 schedule_remarketing_and_alternating(
                     bot_id=data.bot_id,
-                    chat_id=int(tid_clean),
-                    payment_message_id=msg_id,
-                    user_info=user_info
+                    chat_id=chat_id_int,
+                    payment_message_id=0,  # Modo teste - não tem mensagem real
+                    user_info={
+                        'first_name': data.first_name,
+                        'plano': data.plano_nome,
+                        'valor': data.valor
+                    }
                 )
-                logger.info(f"🚀 [PIX] Remarketing agendado para User {tid_clean}")
-                
-            except Exception as e_remarketing:
-                logger.error(f"⚠️ [PIX] Falha ao agendar remarketing: {e_remarketing}")
-
+                logger.info(f"📧 [REMARKETING] Agendado para {data.first_name} (teste)")
+            except Exception as e:
+                logger.error(f"❌ [REMARKETING] Erro ao agendar (teste): {e}")
+            # ============================================================
+            
             return {"txid": fake_txid, "copia_cola": "pix-fake", "qr_code": "https://fake.com/qr.png"}
 
         # 3. Payload Básico
@@ -2703,7 +2836,6 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):  # �
             "Accept": "application/json" 
         }
         
-        # ✅ MIGRAÇÃO: requests → httpx
         req = await http_client.post(url, json=payload, headers=headers, timeout=15)
         
         if req.status_code in [200, 201]:
@@ -2719,6 +2851,43 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):  # �
             )
             db.add(novo_pedido)
             db.commit()
+            db.refresh(novo_pedido)
+            
+            # ============================================================
+            # 🎯 INTEGRAÇÃO: AGENDAR REMARKETING (PRODUÇÃO)
+            # ============================================================
+            try:
+                # Converte telegram_id para int (necessário para o sistema de remarketing)
+                chat_id_int = int(tid_clean) if tid_clean.isdigit() else hash(tid_clean) % 1000000000
+                
+                # ⚠️ IMPORTANTE: payment_message_id deve ser o ID da mensagem do Telegram
+                # que contém o QR Code PIX. Se você não tem esse ID aqui, pode:
+                # 1. Passar 0 (e o sistema de alternating não funcionará)
+                # 2. Capturar esse ID ao enviar a mensagem no bot do Telegram
+                
+                # Agenda remarketing + mensagens alternantes
+                schedule_remarketing_and_alternating(
+                    bot_id=data.bot_id,
+                    chat_id=chat_id_int,
+                    payment_message_id=0,  # ⚠️ AJUSTAR: ID da mensagem do Telegram com QR Code
+                    user_info={
+                        'first_name': data.first_name,
+                        'plano': data.plano_nome,
+                        'valor': data.valor
+                    }
+                )
+                
+                logger.info(
+                    f"📧 [REMARKETING] Agendado para {data.first_name} "
+                    f"(Bot: {data.bot_id}, Chat: {chat_id_int})"
+                )
+                
+            except Exception as e:
+                # Não falha a transação se o agendamento falhar
+                logger.error(f"❌ [REMARKETING] Erro ao agendar: {e}")
+                # Sistema continua - PIX foi gerado com sucesso
+            # ============================================================
+            
             return {"txid": txid, "copia_cola": copia_cola, "qr_code": qr_image}
         else:
             logger.error(f"❌ Erro PushinPay: {req.text}")
