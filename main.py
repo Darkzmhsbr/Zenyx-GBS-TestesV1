@@ -5180,15 +5180,15 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     except:
                         bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML")
                 else:
-                    # =========================================================
-                    # ✅ CORREÇÃO 1: DECLARAR VARIÁVEIS ANTES DE USAR
-                    # =========================================================
+                    # PIX DIRETO
+                    # 👇 ADICIONE ESTAS 2 LINHAS OBRIGATORIAMENTE 👇
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>PIX</b>...", parse_mode="HTML")
                     mytx = str(uuid.uuid4())
                     
+                    # ✅ CHAMADA CORRETA
                     pix = await gerar_pix_pushinpay(
                         valor_float=plano.preco_atual,
-                        transaction_id=mytx,
+                        transaction_id=mytx,  # Agora 'mytx' existe!
                         bot_id=bot_db.id,
                         db=db,
                         user_telegram_id=str(chat_id),
@@ -5242,15 +5242,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     valor_final += bump.preco
                     nome_final += f" + {bump.nome_produto}"
                 
-                # =========================================================
-                # ✅ CORREÇÃO 2: DECLARAR VARIÁVEIS ANTES DE USAR
-                # =========================================================
+                # 👇 ADICIONE ESTAS 2 LINHAS OBRIGATORIAMENTE 👇
                 msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
                 mytx = str(uuid.uuid4())
 
+                # ✅ CHAMADA CORRETA
                 pix = await gerar_pix_pushinpay(
                     valor_float=valor_final,
-                    transaction_id=mytx,
+                    transaction_id=mytx,  # Agora 'mytx' existe!
                     bot_id=bot_db.id,
                     db=db,
                     user_telegram_id=str(chat_id),
@@ -5298,15 +5297,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
                     if plano:
                         preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
-                       # =========================================================
-                        # ✅ CORREÇÃO 3: DECLARAR VARIÁVEIS ANTES DE USAR
-                        # =========================================================
+                       # 👇 ADICIONE ESTAS 2 LINHAS OBRIGATORIAMENTE 👇
                         msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
                         mytx = str(uuid.uuid4())
 
+                        # ✅ CHAMADA CORRETA
                         pix = await gerar_pix_pushinpay(
                             valor_float=preco_final,
-                            transaction_id=mytx,
+                            transaction_id=mytx,  # Agora 'mytx' existe!
                             bot_id=bot_db.id,
                             db=db,
                             user_telegram_id=str(chat_id),
@@ -5340,7 +5338,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
                     else:
                         bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
-                        
+
             # --- E) VERIFICAR STATUS ---
             elif data.startswith("check_payment_"):
                 tx_id = data.split("_")[2]
