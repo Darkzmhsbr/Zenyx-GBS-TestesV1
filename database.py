@@ -8,7 +8,6 @@ from datetime import datetime
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Ajuste para compatibilidade com Railway (postgres -> postgresql)
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
@@ -48,20 +47,13 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # 🆕 NOVOS CAMPOS FINANCEIROS
     pushin_pay_id = Column(String, nullable=True)
     taxa_venda = Column(Integer, default=60)
 
-    # RELACIONAMENTO: Um usuário possui vários bots
     bots = relationship("Bot", back_populates="owner")
-    
-    # Relacionamentos de Logs e Notificações
     audit_logs = relationship("AuditLog", back_populates="user")
     notifications = relationship("Notification", back_populates="user")
 
-# =========================================================
-# ⚙️ CONFIGURAÇÕES GERAIS
-# =========================================================
 class SystemConfig(Base):
     __tablename__ = "system_config"
     key = Column(String, primary_key=True, index=True) 
@@ -85,32 +77,20 @@ class Bot(Base):
     pushin_token = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # 🆕 RELACIONAMENTO COM USUÁRIO (OWNER)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     owner = relationship("User", back_populates="bots")
     
-    # --- RELACIONAMENTOS (CASCADE) ---
     planos = relationship("PlanoConfig", back_populates="bot", cascade="all, delete-orphan")
     fluxo = relationship("BotFlow", back_populates="bot", uselist=False, cascade="all, delete-orphan")
     steps = relationship("BotFlowStep", back_populates="bot", cascade="all, delete-orphan")
     admins = relationship("BotAdmin", back_populates="bot", cascade="all, delete-orphan")
-    
-    # RELACIONAMENTOS PARA EXCLUSÃO AUTOMÁTICA
     pedidos = relationship("Pedido", backref="bot_ref", cascade="all, delete-orphan")
-    leads = relationship("Lead", backref="bot_ref", cascade="all, delete-orphan")
+    leads = relationship("Lead", back_populates="bot", cascade="all, delete-orphan", overlaps="bot_ref")
     remarketing_campaigns = relationship("RemarketingCampaign", back_populates="bot", cascade="all, delete-orphan")
-    
-    # Relacionamento com Order Bump
     order_bump = relationship("OrderBumpConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
-    
-    # Relacionamento com Tracking
     tracking_links = relationship("TrackingLink", back_populates="bot", cascade="all, delete-orphan")
-
-    # 🔥 Relacionamento com Mini App
     miniapp_config = relationship("MiniAppConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     miniapp_categories = relationship("MiniAppCategory", back_populates="bot", cascade="all, delete-orphan")
-    
-    # ✅ NOVOS: REMARKETING AUTOMÁTICO
     remarketing_config = relationship("RemarketingConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     alternating_messages = relationship("AlternatingMessages", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     remarketing_logs = relationship("RemarketingLog", back_populates="bot", cascade="all, delete-orphan")
@@ -124,36 +104,23 @@ class BotAdmin(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     bot = relationship("Bot", back_populates="admins")
 
-# =========================================================
-# 🛒 ORDER BUMP
-# =========================================================
 class OrderBumpConfig(Base):
     __tablename__ = "order_bump_config"
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
-    
     ativo = Column(Boolean, default=False)
     nome_produto = Column(String)
     preco = Column(Float)
     link_acesso = Column(String, nullable=True)
     autodestruir = Column(Boolean, default=False)
-    
-    # Conteúdo da Oferta
     msg_texto = Column(Text, default="Gostaria de adicionar este item?")
     msg_media = Column(String, nullable=True)
-    
-    # Botões
     btn_aceitar = Column(String, default="✅ SIM, ADICIONAR")
     btn_recusar = Column(String, default="❌ NÃO, OBRIGADO")
-    
     bot = relationship("Bot", back_populates="order_bump")
 
-# =========================================================
-# 💲 PLANOS
-# =========================================================
 class PlanoConfig(Base):
     __tablename__ = "plano_config"
-    
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey("bots.id"))
     nome_exibicao = Column(String(100))
@@ -164,52 +131,31 @@ class PlanoConfig(Base):
     is_lifetime = Column(Boolean, default=False)
     key_id = Column(String(100), unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
     bot = relationship("Bot", back_populates="planos")
 
-# =========================================================
-# 📢 REMARKETING - CAMPANHAS (SISTEMA ANTIGO)
-# =========================================================
 class RemarketingCampaign(Base):
     __tablename__ = "remarketing_campaigns"
-    
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey("bots.id"))
     campaign_id = Column(String, unique=True)
-    
-    # Configuração
     target = Column(String, default="todos")
     type = Column(String, default="massivo")
     config = Column(Text)
-    
-    # Status e Controle
     status = Column(String, default="agendado")
-    
-    # Agendamento
     dia_atual = Column(Integer, default=0)
     data_inicio = Column(DateTime, default=datetime.utcnow)
     proxima_execucao = Column(DateTime, nullable=True)
-    
-    # Oferta Promocional
     plano_id = Column(Integer, nullable=True)
     promo_price = Column(Float, nullable=True)
     expiration_at = Column(DateTime, nullable=True)
-    
-    # Métricas de Execução
     total_leads = Column(Integer, default=0)
     sent_success = Column(Integer, default=0)
     blocked_count = Column(Integer, default=0)
     data_envio = Column(DateTime, default=datetime.utcnow)
-    
-    # Relacionamento
     bot = relationship("Bot", back_populates="remarketing_campaigns")
 
-# =========================================================
-# 🔄 WEBHOOK RETRY SYSTEM
-# =========================================================
 class WebhookRetry(Base):
     __tablename__ = "webhook_retry"
-    
     id = Column(Integer, primary_key=True, index=True)
     webhook_type = Column(String(50))
     payload = Column(Text)
@@ -222,25 +168,19 @@ class WebhookRetry(Base):
     last_error = Column(Text, nullable=True)
     reference_id = Column(String(100), nullable=True)
 
-# =========================================================
-# 💬 FLUXO
-# =========================================================
 class BotFlow(Base):
     __tablename__ = "bot_flows"
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
     bot = relationship("Bot", back_populates="fluxo")
-    
     start_mode = Column(String, default="padrao")
     miniapp_url = Column(String, nullable=True)
     miniapp_btn_text = Column(String, default="🛒 ABRIR LOJA")
-    
     msg_boas_vindas = Column(Text, default="Olá! Bem-vindo(a)!")
     media_url = Column(String, nullable=True)
     btn_text_1 = Column(String, default="📋 Ver Planos")
     autodestruir_1 = Column(Boolean, default=False)
     mostrar_planos_1 = Column(Boolean, default=True)
-    
     msg_2_texto = Column(Text, nullable=True)
     msg_2_media = Column(String, nullable=True)
     mostrar_planos_2 = Column(Boolean, default=False)
@@ -253,24 +193,18 @@ class BotFlowStep(Base):
     msg_texto = Column(Text, nullable=True)
     msg_media = Column(String, nullable=True)
     btn_texto = Column(String, default="Próximo ▶️")
-    
     autodestruir = Column(Boolean, default=False)
     mostrar_botao = Column(Boolean, default=True)
     delay_seconds = Column(Integer, default=0)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
     bot = relationship("Bot", back_populates="steps")
 
-# =========================================================
-# 🔗 TRACKING
-# =========================================================
 class TrackingFolder(Base):
     __tablename__ = "tracking_folders"
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String)
     plataforma = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
     links = relationship("TrackingLink", back_populates="folder", cascade="all, delete-orphan")
 
 class TrackingLink(Base):
@@ -278,121 +212,96 @@ class TrackingLink(Base):
     id = Column(Integer, primary_key=True, index=True)
     folder_id = Column(Integer, ForeignKey("tracking_folders.id"))
     bot_id = Column(Integer, ForeignKey("bots.id"))
-    
     nome = Column(String)
     codigo = Column(String, unique=True, index=True)
     origem = Column(String, default="outros")
-    
-    # Métricas
     clicks = Column(Integer, default=0)
     leads = Column(Integer, default=0)
     vendas = Column(Integer, default=0)
     faturamento = Column(Float, default=0.0)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
-    
     folder = relationship("TrackingFolder", back_populates="links")
     bot = relationship("Bot", back_populates="tracking_links")
 
 # =========================================================
-# 🛒 PEDIDOS - MANTENDO EXATAMENTE COMO ESTAVA
+# 🛒 PEDIDOS - ESTRUTURA EXATA DA VERSÃO ANTERIOR
 # =========================================================
 class Pedido(Base):
     __tablename__ = "pedidos"
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey("bots.id"))
-    
     telegram_id = Column(String)
     first_name = Column(String, nullable=True)
     username = Column(String, nullable=True)
-    
     plano_nome = Column(String, nullable=True)
     plano_id = Column(Integer, nullable=True)
     valor = Column(Float)
     status = Column(String, default="pending") 
-    
     txid = Column(String, unique=True, index=True) 
     qr_code = Column(Text, nullable=True)
     transaction_id = Column(String, nullable=True)
-    
     data_aprovacao = Column(DateTime, nullable=True)
     data_expiracao = Column(DateTime, nullable=True)
     custom_expiration = Column(DateTime, nullable=True)
-    
     link_acesso = Column(String, nullable=True)
     mensagem_enviada = Column(Boolean, default=False)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
-    
-    # Campo para identificar se comprou o Order Bump
     tem_order_bump = Column(Boolean, default=False)
-    
-    # --- CAMPOS FUNIL & TRACKING ---
     status_funil = Column(String(20), default='meio')
     funil_stage = Column(String(20), default='lead_quente')
-    
     primeiro_contato = Column(DateTime(timezone=True))
     escolheu_plano_em = Column(DateTime(timezone=True))
     gerou_pix_em = Column(DateTime(timezone=True))
     pagou_em = Column(DateTime(timezone=True))
-    
     dias_ate_compra = Column(Integer, default=0)
     ultimo_remarketing = Column(DateTime(timezone=True))
     total_remarketings = Column(Integer, default=0)
-    
     origem = Column(String(50), default='bot')
-    
-    # Rastreamento
     tracking_id = Column(Integer, ForeignKey("tracking_links.id"), nullable=True)
 
 # =========================================================
-# 👥 LEADS
+# 👥 LEADS - ESTRUTURA EXATA DA VERSÃO ANTERIOR
 # =========================================================
 class Lead(Base):
     __tablename__ = "leads"
     
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"))
-    
-    user_id = Column(String)
-    first_name = Column(String)
+    user_id = Column(String, nullable=False)
+    nome = Column(String, nullable=True)
     username = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    bot_id = Column(Integer, ForeignKey('bots.id'))
     
-    comprou = Column(Boolean, default=False)
-    valor_gasto = Column(Float, default=0.0)
+    status = Column(String(20), default='topo')
+    funil_stage = Column(String(20), default='lead_frio')
     
-    ultima_interacao = Column(DateTime, default=datetime.utcnow)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    primeiro_contato = Column(DateTime(timezone=True), server_default=func.now())
+    ultimo_contato = Column(DateTime(timezone=True))
     
-    tracking_id = Column(String, nullable=True)
-    status = Column(String, default="active")
+    total_remarketings = Column(Integer, default=0)
+    ultimo_remarketing = Column(DateTime(timezone=True))
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    tracking_id = Column(Integer, ForeignKey("tracking_links.id"), nullable=True)
+    expiration_date = Column(DateTime, nullable=True)
+    
+    bot = relationship("Bot", back_populates="leads", overlaps="bot_ref")
 
-# =========================================================
-# 🎨 MINI APP
-# =========================================================
 class MiniAppConfig(Base):
     __tablename__ = "miniapp_config"
     bot_id = Column(Integer, ForeignKey("bots.id"), primary_key=True)
-    
-    # Visual Base
     logo_url = Column(String, nullable=True)
     background_type = Column(String, default="solid")
     background_value = Column(String, default="#000000")
-    
-    # Hero Section
     hero_video_url = Column(String, nullable=True)
     hero_title = Column(String, default="ACERVO PREMIUM")
     hero_subtitle = Column(String, default="O maior acervo da internet.")
     hero_btn_text = Column(String, default="LIBERAR CONTEÚDO 🔓")
-    
-    # Popup Promocional
     enable_popup = Column(Boolean, default=False)
     popup_video_url = Column(String, nullable=True)
     popup_text = Column(String, default="VOCÊ GANHOU UM PRESENTE!")
-    
-    # Rodapé
     footer_text = Column(String, default="© 2026 Premium Club.")
-
     bot = relationship("Bot", back_populates="miniapp_config")
 
 class MiniAppCategory(Base):
@@ -404,8 +313,6 @@ class MiniAppCategory(Base):
     description = Column(String)
     cover_image = Column(String)
     banner_mob_url = Column(String)
-    
-    # Visual Rico
     bg_color = Column(String, default="#000000")
     banner_desk_url = Column(String, nullable=True)
     video_preview_url = Column(String, nullable=True)
@@ -414,154 +321,88 @@ class MiniAppCategory(Base):
     model_desc = Column(String, nullable=True)
     footer_banner_url = Column(String, nullable=True)
     deco_lines_url = Column(String, nullable=True)
-    
-    # Cores de Texto
     model_name_color = Column(String, default="#ffffff")
     model_desc_color = Column(String, default="#cccccc")
-    
     theme_color = Column(String, default="#c333ff")
     is_direct_checkout = Column(Boolean, default=False)
     is_hacker_mode = Column(Boolean, default=False)
     content_json = Column(Text)
-    
     bot = relationship("Bot", back_populates="miniapp_categories")
 
-# =========================================================
-# 📋 AUDIT LOGS
-# =========================================================
 class AuditLog(Base):
     __tablename__ = "audit_logs"
-    
     id = Column(Integer, primary_key=True, index=True)
-    
-    # Quem fez a ação
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     username = Column(String, nullable=False)
-    
-    # O que foi feito
     action = Column(String(50), nullable=False, index=True)
     resource_type = Column(String(50), nullable=False, index=True)
     resource_id = Column(Integer, nullable=True)
-    
-    # Detalhes
     description = Column(Text, nullable=True)
     details = Column(Text, nullable=True)
-    
-    # Contexto
     ip_address = Column(String(50), nullable=True)
     user_agent = Column(Text, nullable=True)
-    
-    # Status
     success = Column(Boolean, default=True, index=True)
     error_message = Column(Text, nullable=True)
-    
-    # Timestamp
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
-    
     user = relationship("User", back_populates="audit_logs")
 
-# =========================================================
-# 🔔 NOTIFICAÇÕES
-# =========================================================
 class Notification(Base):
     __tablename__ = "notifications"
-
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True)
-    
     title = Column(String, nullable=False)
     message = Column(String, nullable=False)
     type = Column(String, default="info")
     read = Column(Boolean, default=False)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
-
     user = relationship("User", back_populates="notifications")
 
 # =========================================================
 # 🎯 REMARKETING AUTOMÁTICO - 3 NOVAS TABELAS
 # =========================================================
 class RemarketingConfig(Base):
-    """Configuração de remarketing automático por bot."""
     __tablename__ = "remarketing_config"
-    
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey('bots.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
-    
-    # Controle
     is_active = Column(Boolean, default=True, index=True)
-    
-    # Conteúdo
     message_text = Column(Text, nullable=True)
     media_url = Column(String(500), nullable=True)
     media_type = Column(String(10), nullable=True)
-    
-    # Timing
     delay_minutes = Column(Integer, default=5)
     auto_destruct_seconds = Column(Integer, default=0)
-    
-    # Valores Promocionais (JSON)
     promo_values = Column(JSON, default={})
-    
-    # Mensagens Alternantes
     alternating_enabled = Column(Boolean, default=False)
-    
-    # Auditoria
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
     bot = relationship("Bot", back_populates="remarketing_config")
 
 class AlternatingMessages(Base):
-    """Mensagens que alternam durante o período de espera."""
     __tablename__ = "alternating_messages"
-    
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey('bots.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
-    
-    # Controle
     is_active = Column(Boolean, default=False, index=True)
-    
-    # Mensagens (Array de strings via JSON)
     messages = Column(JSON, default=[])
-    
-    # Timing
     rotation_interval_seconds = Column(Integer, default=15)
     stop_before_remarketing_seconds = Column(Integer, default=60)
     auto_destruct_final = Column(Boolean, default=False)
-    
-    # Auditoria
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
     bot = relationship("Bot", back_populates="alternating_messages")
 
 class RemarketingLog(Base):
-    """Log de remarketing enviados para analytics."""
     __tablename__ = "remarketing_logs"
-    
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey('bots.id', ondelete='CASCADE'), nullable=False, index=True)
     user_telegram_id = Column(Integer, nullable=False, index=True)
-    
-    # Dados do envio
     sent_at = Column(DateTime, default=datetime.utcnow, index=True)
     message_text = Column(Text, nullable=True)
     promo_values = Column(JSON, nullable=True)
-    
-    # Status
     status = Column(String(20), default='sent', index=True)
     error_message = Column(Text, nullable=True)
-    
-    # Conversão
     converted = Column(Boolean, default=False, index=True)
     converted_at = Column(DateTime, nullable=True)
-    
     bot = relationship("Bot", back_populates="remarketing_logs")
 
-# =========================================================
-# 🚀 INICIALIZAÇÃO
-# =========================================================
 if __name__ == "__main__":
     init_db()
     print("✅ Banco de dados inicializado!")
