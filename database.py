@@ -24,23 +24,15 @@ class User(Base):
     email = Column(String, unique=True, nullable=False, index=True)
     password_hash = Column(String, nullable=False)
     full_name = Column(String, nullable=True)
-    
+    turnstile_token = Column(String, nullable=True)
+    pushin_pay_id = Column(String, nullable=True)
+    taxa_venda = Column(Float, default=10.0)
+    is_super_admin = Column(Boolean, default=False)
     is_active = Column(Boolean, default=True)
-    is_superuser = Column(Boolean, default=False)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    # 🆕 NOVOS CAMPOS FINANCEIROS
-    pushin_pay_id = Column(String, nullable=True) # ID da conta do membro na Pushin
-    taxa_venda = Column(Integer, default=60)      # Taxa em centavos (Padrão: 60)
-
-    # RELACIONAMENTO: Um usuário possui vários bots
     bots = relationship("Bot", back_populates="owner")
-    
-    # Relacionamentos de Logs e Notificações
     audit_logs = relationship("AuditLog", back_populates="user")
-    notifications = relationship("Notification", back_populates="user") # 🔥 ADICIONADO PARA O SISTEMA DE NOTIFICAÇÃO
 
 # =========================================================
 # 🤖 BOTS
@@ -328,16 +320,12 @@ class BotFlowStep(Base):
 # =========================================================
 # CLASSES ADICIONAIS DO SISTEMA
 # =========================================================
-# =========================================================
-# ⚙️ CONFIGURAÇÕES GERAIS (V5.1.1 - Cache Fix)
-# =========================================================
 class SystemConfig(Base):
     __tablename__ = "system_config"
-    __table_args__ = {'extend_existing': True}  # Força redefinição anti-cache
-    
-    key = Column(String, primary_key=True, index=True) 
-    value = Column(String)                             
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    key = Column(String(100), primary_key=True, index=True)
+    value = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)  # ❌ NÃO EXISTE
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class BotAdmin(Base):
     __tablename__ = "bot_admins"
