@@ -236,7 +236,6 @@ class Pedido(Base):
     validade = Column(DateTime, nullable=True)
     
     tracking_id = Column(String, nullable=True)
-    
 # =========================================================
 # 👥 LEADS
 # =========================================================
