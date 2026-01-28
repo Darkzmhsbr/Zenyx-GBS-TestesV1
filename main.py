@@ -1,8 +1,8 @@
 import os
 import logging
 import telebot
-from telebot import TeleBot  # ← ADICIONADO: Import explícito do TeleBot
-from telebot.apihelper import ApiTelegramException  # ✅ ADICIONAR
+from telebot import TeleBot
+from telebot.apihelper import ApiTelegramException
 import httpx
 import time
 import urllib.parse
@@ -12,38 +12,37 @@ import json
 import uuid
 from sqlalchemy.exc import IntegrityError
 
-from sqlalchemy import func, desc, text, and_, or_  # ✅ ADICIONAR and_, or_
+from sqlalchemy import func, desc, text, and_, or_
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-# Adicionamos 'Optional' aqui para evitar erro de validação bruta
 from pydantic import BaseModel, EmailStr, Field 
 from sqlalchemy.orm import Session
-from typing import List, Optional 
+from typing import List, Optional, Dict  # ✅ ADICIONAR Dict
 from datetime import datetime, timedelta
 
-# --- IMPORTS CORRIGIDOS ---
-from database import Lead
+# --- IMPORTS DE MIGRATION ---
 from force_migration import forcar_atualizacao_tabelas
 
-# 🆕 ADICIONAR ESTES IMPORTS PARA AUTENTICAÇÃO
+# 🆕 AUTENTICAÇÃO
 from passlib.context import CryptContext
 from jose import JWTError, jwt
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
-# --- Scheduler ---
+# --- SCHEDULER ---
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import asyncio
 from threading import Lock
 
-# Importa o banco e o script de reparo
-# ← MODIFICADO: Renomear Bot para BotModel para evitar conflito com TeleBot
+# =========================================================
+# ✅ IMPORTS CORRIGIDOS DO DATABASE
+# =========================================================
 from database import (
     SessionLocal, 
     init_db, 
-    Bot as BotModel,  # ← RENOMEADO
+    Bot as BotModel,  # ← RENOMEADO para evitar conflito com TeleBot
     PlanoConfig, 
     BotFlow, 
     BotFlowStep, 
@@ -62,10 +61,11 @@ from database import (
     User, 
     engine,
     WebhookRetry,
+    # ✅ NOVOS IMPORTS PARA REMARKETING AUTOMÁTICO
     RemarketingConfig,
-    RemarketingLog,           # ✅ USAR ESTE (não RemarketingSentLog)
-    AlternatingMessageState   # ✅ ADICIONAR ESTE
-)     # ← ADICIONAR
+    AlternatingMessages,  # ✅ NOME CORRETO
+    RemarketingLog        # ✅ NOME CORRETO
+)
 
 import update_db 
 
@@ -80,15 +80,13 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Zenyx Gbot SaaS")
 
-
-# ============================================================
-# PASSO 2: ADICIONAR VARIÁVEIS GLOBAIS (linha ~70-100, antes das funções)
-# ============================================================
+# =========================================================
+# ✅ VARIÁVEIS GLOBAIS PARA REMARKETING
+# =========================================================
 # Controle de remarketing
 remarketing_lock = Lock()
 remarketing_timers = {}  # {chat_id: asyncio.Task}
 alternating_tasks = {}   # {chat_id: asyncio.Task}
-
 
 # ============================================================
 # FUNÇÕES DE JOBS AGENDADOS
