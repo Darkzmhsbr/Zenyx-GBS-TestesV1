@@ -665,6 +665,10 @@ async def shutdown_event():
 # 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
 # ============================================================
 
+# ============================================================
+# 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
+# ============================================================
+
 async def start_alternating_messages_job(
     bot_token: str,
     chat_id: int,
@@ -677,7 +681,7 @@ async def start_alternating_messages_job(
 ):
     """
     Envia mensagens alternantes para o usuário.
-    CORRIGIDO: Agora ENVIA novas mensagens em vez de editar.
+    CORRIGIDO: Agora EDITA a mensagem existente para não "autodestruir".
     """
     try:
         bot = TeleBot(bot_token, threaded=False)
@@ -686,28 +690,66 @@ async def start_alternating_messages_job(
         
         logger.info(f"✅ [ALTERNATING] Iniciado - User: {chat_id}, Msgs: {len(messages)}")
         
+        # Envia a primeira mensagem imediatamente para ter o ID
+        try:
+            current_message = messages[0]
+            msg = bot.send_message(
+                chat_id=chat_id,
+                text=current_message,
+                parse_mode='HTML'
+            )
+            last_message_id = msg.message_id
+            index += 1
+            # Aguarda o primeiro intervalo antes de começar a alternar
+            await asyncio.sleep(interval_seconds)
+            
+        except Exception as e_start:
+             logger.error(f"❌ [ALTERNATING] Erro ao enviar primeira msg: {e_start}")
+             return
+
         while datetime.now() < stop_at:
             try:
                 current_message = messages[index % len(messages)]
                 
-                # ✅ CORREÇÃO: Deleta mensagem anterior
+                # ✅ MESTRE CÓDIGO FÁCIL: Tenta EDITAR a mensagem em vez de apagar/enviar
                 if last_message_id:
                     try:
-                        bot.delete_message(chat_id=chat_id, message_id=last_message_id)
-                        logger.debug(f"🗑️ Mensagem alternante anterior deletada: {last_message_id}")
-                    except Exception as e_del:
-                        logger.debug(f"⚠️ Erro ao deletar mensagem: {e_del}")
-                
-                # ✅ CORREÇÃO: ENVIA nova mensagem (não edita)
-                msg = bot.send_message(
-                    chat_id=chat_id,
-                    text=current_message,
-                    parse_mode='HTML'
-                )
-                last_message_id = msg.message_id
-                
-                logger.info(f"📨 [ALTERNATING] Mensagem {index + 1}/{len(messages)} enviada")
-                
+                        bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=last_message_id,
+                            text=current_message,
+                            parse_mode='HTML'
+                        )
+                        logger.debug(f"✏️ Mensagem {last_message_id} editada para índice {index}")
+                    except ApiTelegramException as e_edit:
+                        error_msg = str(e_edit).lower()
+                        
+                        # Se a mensagem não mudar (texto igual), o Telegram dá erro, ignoramos
+                        if "message is not modified" in error_msg:
+                            pass
+                        # Se a mensagem foi apagada ou não encontrada, enviamos uma nova
+                        elif "message to edit not found" in error_msg or "message can't be edited" in error_msg:
+                            logger.warning(f"⚠️ Mensagem perdida, enviando nova...")
+                            msg = bot.send_message(
+                                chat_id=chat_id,
+                                text=current_message,
+                                parse_mode='HTML'
+                            )
+                            last_message_id = msg.message_id
+                        elif "bot was blocked" in error_msg:
+                            logger.warning(f"⚠️ [ALTERNATING] Usuário {chat_id} bloqueou o bot")
+                            break
+                        else:
+                            logger.error(f"⚠️ Erro ao editar: {e_edit}")
+                else:
+                    # Se não tem ID anterior, envia nova
+                    msg = bot.send_message(
+                        chat_id=chat_id,
+                        text=current_message,
+                        parse_mode='HTML'
+                    )
+                    last_message_id = msg.message_id
+
                 index += 1
                 
                 # Calcula tempo restante
@@ -720,28 +762,16 @@ async def start_alternating_messages_job(
                 
                 await asyncio.sleep(sleep_time)
                 
-            except ApiTelegramException as e:
-                error_msg = str(e).lower()
-                if "bot was blocked" in error_msg or "user is deactivated" in error_msg:
-                    logger.warning(f"⚠️ [ALTERNATING] Usuário {chat_id} bloqueou o bot")
-                    break
-                elif "message to edit not found" in error_msg:
-                    logger.warning(f"⚠️ [ALTERNATING] Mensagem não encontrada")
-                    break
-                else:
-                    logger.error(f"❌ [ALTERNATING] Erro API: {e}")
-                    await asyncio.sleep(interval_seconds)
-            
             except Exception as e:
-                logger.error(f"❌ [ALTERNATING] Erro geral: {e}")
+                logger.error(f"❌ [ALTERNATING] Erro geral no loop: {e}")
                 await asyncio.sleep(interval_seconds)
         
-        # Auto-destruição da última mensagem
+        # Auto-destruição da última mensagem (apenas no final do ciclo se configurado)
         if auto_destruct and last_message_id:
             try:
                 await asyncio.sleep(1)
                 bot.delete_message(chat_id=chat_id, message_id=last_message_id)
-                logger.info(f"🗑️ [ALTERNATING] Última mensagem autodestruída")
+                logger.info(f"🗑️ [ALTERNATING] Última mensagem autodestruída (Fim do Ciclo)")
             except Exception as e_auto:
                 logger.error(f"⚠️ [ALTERNATING] Erro na autodestruição: {e_auto}")
         
@@ -772,21 +802,23 @@ async def send_remarketing_job(
         
         db = SessionLocal()
         try:
-            # Verifica pagamento
+            # Verifica pagamento (Se já pagou, não manda)
             if db.query(Pedido).filter(
                 Pedido.bot_id == bot_id, 
                 Pedido.telegram_id == str(chat_id), 
-                Pedido.status.in_(['paid', 'ativo'])
+                Pedido.status.in_(['paid', 'active', 'approved']) # Adicionei approved por segurança
             ).first():
                 return
 
-            # Verifica envio hoje
+            # ✅ MESTRE CÓDIGO FÁCIL: CORREÇÃO DO ERRO SQL
+            # Verifica se já enviou hoje usando user_id (string) para evitar UndefinedColumn
             hoje = datetime.now().date()
             if db.query(RemarketingLog).filter(
                 RemarketingLog.bot_id == bot_id,
-                RemarketingLog.user_telegram_id == chat_id,
+                RemarketingLog.user_id == str(chat_id), # <--- CORRIGIDO AQUI (era user_telegram_id)
                 func.date(RemarketingLog.sent_at) == hoje
             ).first():
+                logger.info(f"⏭️ Remarketing já enviado hoje para {chat_id}")
                 return
 
             # Prepara mensagem
@@ -818,9 +850,13 @@ async def send_remarketing_job(
                 else:
                     sent_msg = bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
                 
+                # ✅ CORRIGIDO: Registra usando user_id (string)
                 db.add(RemarketingLog(
-                    bot_id=bot_id, user_telegram_id=chat_id, 
-                    message_text=msg_text, status='sent', sent_at=datetime.now()
+                    bot_id=bot_id, 
+                    user_id=str(chat_id), # <--- CORRIGIDO AQUI
+                    message_text=msg_text, 
+                    status='sent', 
+                    sent_at=datetime.now()
                 ))
                 db.commit()
                 
@@ -914,14 +950,21 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             if alt_config and alt_config.messages:
                 logger.info(f"✅ [SCHEDULE] Mensagens alternantes ativadas - {len(alt_config.messages)} mensagens")
                 
+                # Ajusta o tempo de parada para antes do remarketing
                 stop_at = datetime.now() + timedelta(minutes=config.delay_minutes) - timedelta(seconds=alt_config.stop_before_remarketing_seconds)
                 
                 logger.info(f"⏰ [SCHEDULE] Alternating vai parar em: {stop_at.strftime('%H:%M:%S')}")
                 
                 loop = asyncio.get_event_loop()
                 task = loop.create_task(start_alternating_messages_job(
-                    bot.token, chat_id, payment_message_id, alt_config.messages, 
-                    alt_config.rotation_interval_seconds, stop_at, alt_config.auto_destruct_final, bot_id
+                    bot.token, 
+                    chat_id, 
+                    payment_message_id, 
+                    alt_config.messages, 
+                    alt_config.rotation_interval_seconds, 
+                    stop_at, 
+                    alt_config.auto_destruct_final, 
+                    bot_id
                 ))
                 with remarketing_lock: 
                     alternating_tasks[chat_id] = task
