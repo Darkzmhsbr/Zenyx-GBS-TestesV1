@@ -209,7 +209,7 @@ class RemarketingCampaign(Base):
     bot = relationship("Bot", back_populates="remarketing_campaigns")
 
 # =========================================================
-# 🛒 PEDIDOS
+# 🛒 PEDIDOS - ⚠️ MANTENDO expires_at TEMPORARIAMENTE
 # =========================================================
 class Pedido(Base):
     __tablename__ = "pedidos"
@@ -219,23 +219,24 @@ class Pedido(Base):
     telegram_id = Column(String)
     first_name = Column(String)
     username = Column(String, nullable=True)
-    
     plano_nome = Column(String)
     plano_id = Column(Integer, nullable=True)
-    
     valor = Column(Float)
     transaction_id = Column(String, unique=True, index=True)
     qr_code = Column(Text, nullable=True)
-    
     status = Column(String, default="pending")
     tem_order_bump = Column(Boolean, default=False)
-    
     created_at = Column(DateTime, default=datetime.utcnow)
     paid_at = Column(DateTime, nullable=True)
+    
+    # ⚠️ MANTENDO expires_at TEMPORARIAMENTE ATÉ EXECUTAR SQL
+    expires_at = Column(DateTime, nullable=True)
+    
+    # ✅ ADICIONANDO validade TAMBÉM (para compatibilidade futura)
     validade = Column(DateTime, nullable=True)
     
     tracking_id = Column(String, nullable=True)
-
+    
 # =========================================================
 # 👥 LEADS
 # =========================================================
