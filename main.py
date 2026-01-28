@@ -2158,7 +2158,18 @@ def get_plataforma_pushin_id(db: Session) -> str:
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA)
 # =========================================================
-async def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: int, db: Session):
+# =========================================================
+# 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA COM REMARKETING)
+# =========================================================
+async def gerar_pix_pushinpay(
+    valor_float: float, 
+    transaction_id: str, 
+    bot_id: int, 
+    db: Session,
+    user_telegram_id: str = None,      # ← NOVO PARÂMETRO
+    user_first_name: str = None,       # ← NOVO PARÂMETRO
+    plano_nome: str = None            # ← NOVO PARÂMETRO
+):
     """
     Gera PIX com Split automático de taxa para a plataforma.
     
@@ -2167,6 +2178,9 @@ async def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: i
         transaction_id: ID único da transação
         bot_id: ID do bot que está gerando o PIX
         db: Sessão do banco de dados
+        user_telegram_id: ID do usuário no Telegram (para remarketing)
+        user_first_name: Nome do usuário (para remarketing)
+        plano_nome: Nome do plano escolhido (para remarketing)
     
     Returns:
         dict: Resposta da API Pushin Pay ou None em caso de erro
@@ -2252,8 +2266,40 @@ async def gerar_pix_pushinpay(valor_float: float, transaction_id: str, bot_id: i
         response = await http_client.post(url, json=payload, headers=headers, timeout=10)
         
         if response.status_code in [200, 201]:
-            logger.info(f"✅ PIX gerado com sucesso! ID: {response.json().get('id')}")
-            return response.json()
+            pix_response = response.json()
+            logger.info(f"✅ PIX gerado com sucesso! ID: {pix_response.get('id')}")
+            
+            # ============================================================
+            # 🎯 INTEGRAÇÃO: AGENDAR REMARKETING
+            # ============================================================
+            if user_telegram_id and user_first_name:
+                try:
+                    # Converte telegram_id para int (necessário para remarketing)
+                    chat_id_int = int(user_telegram_id) if user_telegram_id.isdigit() else hash(user_telegram_id) % 1000000000
+                    
+                    # Agenda remarketing + mensagens alternantes
+                    schedule_remarketing_and_alternating(
+                        bot_id=bot_id,
+                        chat_id=chat_id_int,
+                        payment_message_id=0,  # ID da mensagem PIX (0 = não disponível)
+                        user_info={
+                            'first_name': user_first_name,
+                            'plano': plano_nome or 'VIP',
+                            'valor': valor_float
+                        }
+                    )
+                    
+                    logger.info(
+                        f"📧 [REMARKETING] Agendado para {user_first_name} "
+                        f"(Bot: {bot_id}, Chat: {chat_id_int})"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"❌ [REMARKETING] Erro ao agendar: {e}")
+                    # Não falha o PIX se remarketing der erro
+            # ============================================================
+            
+            return pix_response
         else:
             logger.error(f"❌ Erro PushinPay: {response.text}")
             return None
@@ -5135,9 +5181,16 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML")
                 else:
                     # PIX DIRETO
-                    msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>PIX</b>...", parse_mode="HTML")
-                    mytx = str(uuid.uuid4())
-                    pix = await gerar_pix_pushinpay(plano.preco_atual, mytx, bot_db.id, db)  # ✅ COM AWAIT
+                    # ✅ DEPOIS (CORRETO):
+                    pix = await gerar_pix_pushinpay(
+                        valor_float=plano.preco_atual,
+                        transaction_id=mytx,
+                        bot_id=bot_db.id,
+                        db=db,
+                        user_telegram_id=str(chat_id),           # ← NOVO
+                        user_first_name=first_name,              # ← NOVO
+                        plano_nome=plano.nome_exibicao           # ← NOVO
+                    )
 
                     
                     if pix:
@@ -5186,9 +5239,16 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     valor_final += bump.preco
                     nome_final += f" + {bump.nome_produto}"
                 
-                msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
-                mytx = str(uuid.uuid4())
-                pix = await gerar_pix_pushinpay(valor_final, mytx, bot_db.id, db)  # ✅ COM AWAIT
+                # ✅ DEPOIS (CORRETO):
+                pix = await gerar_pix_pushinpay(
+                    valor_float=valor_final,
+                    transaction_id=mytx,
+                    bot_id=bot_db.id,
+                    db=db,
+                    user_telegram_id=str(chat_id),           # ← NOVO
+                    user_first_name=first_name,              # ← NOVO
+                    plano_nome=nome_final                    # ← NOVO
+                )
                 
                 if pix:
                     qr = pix.get('qr_code_text') or pix.get('qr_code')
@@ -5228,9 +5288,16 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
                     if plano:
                         preco_final = campanha.promo_price if campanha.promo_price else plano.preco_atual
-                        msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
-                        mytx = str(uuid.uuid4())
-                        pix = await gerar_pix_pushinpay(preco_final, mytx, bot_db.id, db)  # ✅ COM AWAIT
+                        # ✅ DEPOIS (CORRETO):
+                        pix = await gerar_pix_pushinpay(
+                            valor_float=preco_final,
+                            transaction_id=mytx,
+                            bot_id=bot_db.id,
+                            db=db,
+                            user_telegram_id=str(chat_id),                          # ← NOVO
+                            user_first_name=first_name,                             # ← NOVO
+                            plano_nome=f"{plano.nome_exibicao} (OFERTA)"           # ← NOVO
+                        )
                         
                         if pix:
                             qr = pix.get('qr_code_text') or pix.get('qr_code')
