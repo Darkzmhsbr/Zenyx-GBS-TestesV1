@@ -174,7 +174,7 @@ class PlanoConfig(Base):
     # Relacionamentos (manter tudo que já existe abaixo)
     bot = relationship("Bot", back_populates="planos")
 
- =========================================================
+#  =========================================================
 # 📢 REMARKETING - CONFIGURAÇÕES GLOBAIS
 # =========================================================
 class RemarketingConfig(Base):
