@@ -806,6 +806,10 @@ async def start_alternating_messages_job(
 # 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
 # ============================================================
 
+# ============================================================
+# 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
+# ============================================================
+
 async def send_remarketing_job(
     bot_token: str,
     chat_id: int,
@@ -815,7 +819,7 @@ async def send_remarketing_job(
 ):
     """
     Envia o remarketing automático.
-    CORRIGIDO: Erro de coluna 'user_telegram_id' -> 'user_id'
+    CORRIGIDO: Agora alinhado com database.py (user_id como String)
     """
     try:
         delay = config_dict.get('delay_minutes', 5)
@@ -824,7 +828,7 @@ async def send_remarketing_job(
         
         db = SessionLocal()
         try:
-            # 1. Verifica se o usuário JÁ PAGOU (Não faz sentido cobrar quem já comprou)
+            # 1. Verifica se o usuário JÁ PAGOU
             pagou = db.query(Pedido).filter(
                 Pedido.bot_id == bot_id, 
                 Pedido.telegram_id == str(chat_id), 
@@ -835,12 +839,12 @@ async def send_remarketing_job(
                 logger.info(f"💰 [REMARKETING] Cancelado: Usuário {chat_id} já pagou.")
                 return
 
-            # 2. Verifica se JÁ ENVIOU hoje (Evita spam)
-            # 🔧 CORREÇÃO MESTRE: Trocado 'user_telegram_id' por 'user_id'
+            # 2. Verifica se JÁ ENVIOU hoje
+            # Agora RemarketingLog.user_id existe no database.py! ✅
             hoje = datetime.now().date()
             ja_enviou = db.query(RemarketingLog).filter(
                 RemarketingLog.bot_id == bot_id,
-                RemarketingLog.user_id == str(chat_id), # <--- CORRIGIDO AQUI
+                RemarketingLog.user_id == str(chat_id), 
                 func.date(RemarketingLog.sent_at) == hoje
             ).first()
 
@@ -848,14 +852,14 @@ async def send_remarketing_job(
                 logger.info(f"⏭️ [REMARKETING] Já enviado hoje para {chat_id}")
                 return
 
-            # 3. Prepara a mensagem (Substitui variáveis)
+            # 3. Prepara a mensagem
             msg_text = config_dict.get('message_text', '')
             if user_info:
                 msg_text = msg_text.replace('{first_name}', user_info.get('first_name', ''))
                 msg_text = msg_text.replace('{plano_original}', user_info.get('plano', 'VIP'))
                 msg_text = msg_text.replace('{valor_original}', str(user_info.get('valor', '')))
 
-            # 4. Prepara os Botões (Ofertas)
+            # 4. Prepara os Botões
             markup = types.InlineKeyboardMarkup()
             promos = config_dict.get('promo_values', {})
             for pid, pdata in promos.items():
@@ -878,10 +882,10 @@ async def send_remarketing_job(
                 else:
                     sent_msg = bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
                 
-                # 🔧 CORREÇÃO MESTRE: Salva usando 'user_id'
+                # REGISTRO NO BANCO (Onde estava dando erro)
                 novo_log = RemarketingLog(
                     bot_id=bot_id, 
-                    user_id=str(chat_id), # <--- CORRIGIDO AQUI
+                    user_id=str(chat_id), # ✅ Agora bate com o database.py
                     message_text=msg_text, 
                     status='sent', 
                     sent_at=datetime.now()
@@ -891,15 +895,12 @@ async def send_remarketing_job(
                 
                 logger.info(f"📨 [REMARKETING] Enviado com sucesso para {chat_id}")
                 
-                # 6. Auto destruição (se configurado)
+                # 6. Auto destruição
                 destruct = config_dict.get('auto_destruct_seconds', 0)
                 if destruct > 0 and sent_msg:
                     await asyncio.sleep(destruct)
-                    try: 
-                        bot.delete_message(chat_id, sent_msg.message_id)
-                        logger.debug(f"🗑️ [REMARKETING] Mensagem autodestruída")
-                    except: 
-                        pass
+                    try: bot.delete_message(chat_id, sent_msg.message_id)
+                    except: pass
 
             except Exception as e_send:
                 logger.error(f"❌ [REMARKETING] Erro no envio Telegram: {e_send}")
@@ -910,7 +911,6 @@ async def send_remarketing_job(
             db.close()
 
     except asyncio.CancelledError:
-        logger.info(f"⏹️ [REMARKETING] Cancelado para {chat_id}")
         pass
     except Exception as e:
         logger.error(f"❌ [REMARKETING] Erro crítico: {e}")

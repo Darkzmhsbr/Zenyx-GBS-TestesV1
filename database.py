@@ -608,7 +608,7 @@ class RemarketingLog(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey('bots.id'), nullable=False, index=True)
-    user_telegram_id = Column(Integer, nullable=False, index=True)
+    user_id = Column(String, nullable=False, index=True)
     
     # Dados do envio
     sent_at = Column(DateTime, default=datetime.utcnow, index=True)
