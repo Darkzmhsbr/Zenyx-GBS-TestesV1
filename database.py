@@ -612,11 +612,12 @@ class RemarketingLog(Base):
     
     # Dados do envio
     sent_at = Column(DateTime, default=datetime.utcnow, index=True)
-    message_text = Column(Text, nullable=True)
     promo_values = Column(JSON, nullable=True)
 
+    # ✅ CORREÇÃO CRÍTICA: Use APENAS message_sent (não message_text)
+    message_sent = Column(Text, nullable=True) 
+
     # 🔥 CORREÇÃO 2: Campos que estavam faltando no banco
-    message_text = Column(Text, nullable=True)
     promo_values = Column(JSON, nullable=True)
     
     # Status
