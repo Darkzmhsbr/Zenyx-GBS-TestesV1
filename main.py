@@ -329,7 +329,7 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
                 bot_id=bot_id,
                 user_id=str(chat_id), # ✅ CORRIGIDO: Era user_telegram_id, agora é user_id
                 sent_at=datetime.utcnow(),
-                message_text=mensagem,
+                message_sent=mensagem,  # ✅ CORRIGIDO: era message_text
                 promo_values=promo_values,
                 status='sent'
             )
@@ -337,6 +337,7 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
             db.commit()
         except Exception as e_log:
             logger.error(f"❌ Erro ao salvar log de remarketing: {e_log}")
+            db.rollback()  # ✅ Adicione rollback em caso de erro
         finally:
             db.close()
         
