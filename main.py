@@ -6499,27 +6499,28 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
             # --- D) PROMO (Campanhas Manuais / Antigas) ---
-           # --- D) PROMO (Lógica Restaurada da V14 + Adaptação Async) ---
+           # --- D) PROMO (Campanhas Manuais) - LÓGICA BLINDADA ---
             elif data.startswith("promo_"):
                 try:
-                    # 1. Extração do UUID (Igual ao main (14).py)
+                    # 1. Extração do UUID
                     try: 
                         campanha_uuid = data.split("_")[1]
                     except: 
                         campanha_uuid = ""
                     
-                    # 2. Busca a Campanha pelo UUID (Coluna 'campaign_id')
+                    # 2. Busca a Campanha
                     campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.campaign_id == campanha_uuid).first()
                     
-                    # 3. Validações (Lógica original recuperada)
+                    # 3. Validações de Existência e Data
                     if not campanha:
                         bot_temp.send_message(chat_id, "❌ Oferta não encontrada ou link inválido.")
                         return {"status": "error"}
                     
-                    # Verifica validade (expiration_at) - Igual à versão 14
-                    if campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
-                        bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
-                        return {"status": "expired"}
+                    # Verifica expiração (se o campo existir no banco)
+                    if hasattr(campanha, 'expiration_at') and campanha.expiration_at:
+                        if datetime.utcnow() > campanha.expiration_at:
+                            bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
+                            return {"status": "expired"}
                     
                     # 4. Busca o Plano
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
@@ -6528,11 +6529,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         bot_temp.send_message(chat_id, "❌ O plano desta oferta não existe mais.")
                         return {"status": "error"}
 
-                    # 5. Define Preço (Promo ou Original)
-                    # Lógica da v14: Se tiver promo_price, usa ele. Se não, usa o do plano.
-                    preco_final = float(campanha.promo_price) if (campanha.promo_price and campanha.promo_price > 0) else float(plano.preco_atual)
+                    # 5. Define Preço
+                    # Tenta pegar promo_price se existir na tabela, senão usa o do plano
+                    preco_final = float(plano.preco_atual)
+                    if hasattr(campanha, 'promo_price') and campanha.promo_price:
+                        if campanha.promo_price > 0:
+                            preco_final = float(campanha.promo_price)
                     
-                    # 6. Calcula desconto visual (Apenas estético)
+                    # 6. Calcula desconto visual
                     desconto_percentual = 0
                     if plano.preco_atual > preco_final:
                         try:
@@ -6540,37 +6544,32 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         except:
                             desconto_percentual = 0
 
-                    # Avisa o usuário (Onde estava travando antes)
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
                     
                     mytx = str(uuid.uuid4())
                     
-                    # ==============================================================================
-                    # 🔥 O PULO DO GATO: Adaptação para o Novo Sistema Async
-                    # Aqui usamos o 'await' e passamos TODOS os parâmetros que o main.py atual exige
-                    # ==============================================================================
+                    # 7. Geração do PIX (Async)
                     try:
                         pix = await gerar_pix_pushinpay(
                             valor_float=preco_final,
                             transaction_id=mytx,
-                            bot_id=bot_db.id,              # ID do bot atual
-                            db=db,                         # Sessão do banco
-                            user_telegram_id=str(chat_id), # ID do usuário
-                            user_first_name=first_name,    # Nome para o gateway
+                            bot_id=bot_db.id,
+                            db=db,
+                            user_telegram_id=str(chat_id),
+                            user_first_name=first_name,
                             plano_nome=f"{plano.nome_exibicao} (OFERTA)",
-                            agendar_remarketing=False      # IMPORTANTE: False para não criar loop infinito
+                            agendar_remarketing=False 
                         )
                     except Exception as e_pix:
-                        logger.error(f"❌ Erro CRÍTICO ao gerar PIX Async: {e_pix}", exc_info=True)
-                        bot_temp.send_message(chat_id, "❌ Erro interno ao comunicar com o banco.")
+                        logger.error(f"❌ Erro CRÍTICO ao gerar PIX: {e_pix}", exc_info=True)
+                        bot_temp.send_message(chat_id, "❌ Erro ao conectar com o banco de pagamentos.")
                         return {"status": "error"}
 
-                    # 7. Processa o Retorno (Igual ao main (14).py mas com estrutura atual)
                     if pix:
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
                         txid = str(pix.get('id') or mytx).lower()
                         
-                        # Cria o pedido no banco
+                        # Salva o pedido
                         novo_pedido = Pedido(
                             bot_id=bot_db.id, 
                             telegram_id=str(chat_id), 
@@ -6588,18 +6587,28 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         )
                         db.add(novo_pedido)
                         
-                        # Incrementa contador de cliques na campanha (Analytics)
-                        if campanha:
-                            if not campanha.clicks: campanha.clicks = 0
-                            campanha.clicks += 1
+                        # ======================================================================
+                        # 🚨 CORREÇÃO DO ERRO 'CLICKS' 🚨
+                        # Verificamos se a coluna EXISTE antes de tentar somar.
+                        # Se não existir, apenas logamos um aviso e CONTINUAMOS o fluxo.
+                        # ======================================================================
+                        try:
+                            if hasattr(campanha, 'clicks'):
+                                if campanha.clicks is None:
+                                    campanha.clicks = 0
+                                campanha.clicks += 1
+                                logger.info(f"📊 Clique contabilizado para campanha {campanha_uuid}")
+                            else:
+                                logger.warning(f"⚠️ Tabela RemarketingCampaign sem coluna 'clicks'. Analytics ignorado para {campanha_uuid}")
+                        except Exception as e_click:
+                            logger.warning(f"⚠️ Erro não fatal ao contar clique: {e_click}")
                         
                         db.commit()
+                        # ======================================================================
                         
-                        # Tenta apagar a mensagem de "Gerando..."
                         try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                         except: pass
                         
-                        # Monta o botão e a mensagem final
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
@@ -6619,11 +6628,12 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     else:
                         try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                         except: pass
-                        bot_temp.send_message(chat_id, "❌ Erro ao gerar o QRCode do PIX. Tente novamente.")
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar QRCode. Tente novamente.")
 
                 except Exception as e:
                     logger.error(f"❌ Erro GERAL no handler promo_: {e}", exc_info=True)
-                    bot_temp.send_message(chat_id, "❌ Ocorreu um erro ao processar sua solicitação.")
+                    try: bot_temp.send_message(chat_id, "❌ Ocorreu um erro ao processar sua solicitação.")
+                    except: pass
 
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
