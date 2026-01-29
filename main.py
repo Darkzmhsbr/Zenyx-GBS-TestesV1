@@ -860,13 +860,29 @@ async def send_remarketing_job(
                 msg_text = msg_text.replace('{plano_original}', user_info.get('plano', 'VIP'))
                 msg_text = msg_text.replace('{valor_original}', str(user_info.get('valor', '')))
 
+            # ✅ NOVO: Aplicar preço promocional temporariamente
+            db_session = SessionLocal()
+            try:
+                promos = config_dict.get('promo_values', {})
+                for plano_id_str, promo_data in promos.items():
+                    if isinstance(promo_data, dict) and promo_data.get('price'):
+                        plano = db_session.query(PlanoConfig).filter(
+                            PlanoConfig.id == int(plano_id_str)
+                        ).first()
+                        if plano:
+                            # Salva preço original temporariamente
+                            plano._preco_promocional = promo_data['price']
+            finally:
+                db_session.close()
+
             # 4. Prepara os Botões
             markup = types.InlineKeyboardMarkup()
             promos = config_dict.get('promo_values', {})
             for pid, pdata in promos.items():
                 if isinstance(pdata, dict) and pdata.get('price'):
                     btn_txt = pdata.get('button_text', 'Ver Oferta 🔥')
-                    markup.add(types.InlineKeyboardButton(btn_txt, callback_data=f"promo_{pid}"))
+                    # ✅ CORRETO: Usar checkout_ em vez de promo_
+                    markup.add(types.InlineKeyboardButton(btn_txt, callback_data=f"checkout_{pid}"))
 
             # 5. Envia a Mensagem
             bot = TeleBot(bot_token, threaded=False)
@@ -6267,6 +6283,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         logger.error(f"Erro no webhook: {e}")
 
     return {"status": "ok"}
+
 # ============================================================
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
