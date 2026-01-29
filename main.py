@@ -5671,6 +5671,9 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
 # =========================================================
 # 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
 # =========================================================
+# =========================================================
+# 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
+# =========================================================
 @app.post("/webhook/{token}")
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
     if token == "pix": return {"status": "ignored"}
@@ -5974,8 +5977,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         bot_id=bot_db.id,
                         db=db,
                         user_telegram_id=str(chat_id),  # ✅ PASSA TELEGRAM ID
-                        user_first_name=first_name,      # ✅ PASSA NOME
-                        plano_nome=plano.nome_exibicao   # ✅ PASSA PLANO
+                        user_first_name=first_name,     # ✅ PASSA NOME
+                        plano_nome=plano.nome_exibicao  # ✅ PASSA PLANO
                     )
 
                     if pix:
@@ -6020,8 +6023,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         )
                         
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
-                        
-                        # ✅ REMARKETING JÁ FOI AGENDADO dentro de gerar_pix_pushinpay()
                         
                     else:
                         bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
@@ -6157,8 +6158,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     bot_id=bot_db.id,
                     db=db,
                     user_telegram_id=str(chat_id),  # ✅ PASSA TELEGRAM ID
-                    user_first_name=first_name,      # ✅ PASSA NOME
-                    plano_nome=nome_final            # ✅ PASSA PLANO
+                    user_first_name=first_name,     # ✅ PASSA NOME
+                    plano_nome=nome_final           # ✅ PASSA PLANO
                 )
                 
                 if pix:
@@ -6203,8 +6204,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     )
 
                     bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
-                    
-                    # ✅ REMARKETING JÁ FOI AGENDADO dentro de gerar_pix_pushinpay()
                     
                 else:
                     bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
@@ -6379,7 +6378,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         )
                     except:
                         pass
-
 
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
