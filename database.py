@@ -612,27 +612,26 @@ class RemarketingLog(Base):
     
     # Dados do envio
     sent_at = Column(DateTime, default=datetime.utcnow, index=True)
-    promo_values = Column(JSON, nullable=True)
-
-    # ✅ CORREÇÃO CRÍTICA: Use APENAS message_sent (não message_text)
-    message_sent = Column(Text, nullable=True) 
-
-    # 🔥 CORREÇÃO 2: Campos que estavam faltando no banco
+    
+    # ✅ CORREÇÃO: Apenas UM campo message_sent (tipo TEXT)
+    message_sent = Column(Text, nullable=True)
+    
+    # Valores promocionais
     promo_values = Column(JSON, nullable=True)
     
-    # Status
+    # Status do envio
     status = Column(String(20), default='sent', index=True)  # sent, error, paid
     error_message = Column(Text, nullable=True)
     
     # Conversão
     converted = Column(Boolean, default=False, index=True)
     converted_at = Column(DateTime, nullable=True)
-
-    # Compatibilidade com versões antigas (opcional, mas bom manter se o banco tiver)
-    message_sent = Column(Boolean, default=True) 
+    
+    # Campaign tracking
     campaign_id = Column(String, nullable=True)
     
+    # Relacionamento
     bot = relationship("Bot", back_populates="remarketing_logs")
     
     def __repr__(self):
-        return f"<RemarketingLog(bot_id={self.bot_id}, user={self.user_telegram_id}, status={self.status})>"
+        return f"<RemarketingLog(bot_id={self.bot_id}, user_id={self.user_id}, status={self.status})>"

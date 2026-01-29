@@ -887,9 +887,11 @@ async def send_remarketing_job(
                 novo_log = RemarketingLog(
                     bot_id=bot_id, 
                     user_id=str(chat_id), # ✅ Agora bate com o database.py
-                    message_text=msg_text, 
+                    message_sent=msg_text,       # ✅ CORRIGIDO 
                     status='sent', 
                     sent_at=datetime.now()
+                    promo_values=promos,         # ✅ ADICIONAR
+                    converted=False              # ✅ ADICIONAR
                 )
                 db.add(novo_log)
                 db.commit()
@@ -904,6 +906,21 @@ async def send_remarketing_job(
                     except: pass
 
             except Exception as e_send:
+                # Registrar falha no banco
+                try:
+                    log_erro = RemarketingLog(
+                        bot_id=bot_id,
+                        user_id=str(chat_id),
+                        message_sent=msg_text,
+                        status='error',
+                        error_message=str(e_send),
+                        sent_at=datetime.now(),
+                        converted=False
+                    )
+                    db.add(log_erro)
+                    db.commit()
+                except:
+                    pass
                 logger.error(f"❌ [REMARKETING] Erro no envio Telegram: {e_send}")
 
         except Exception as e_db:
@@ -6212,7 +6229,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 bot_id=bot_db.id,
                                 campaign_id=campanha.campaign_id,
                                 user_id=str(chat_id),
-                                message_sent=True,
+                                message_sent="Oferta promocional aceita",  # ✅ TEXTO em vez de Boolean
+                                status='converted',                         # ✅ ADICIONAR
                                 converted=False,
                                 sent_at=datetime.utcnow()
                             )
