@@ -3334,18 +3334,6 @@ class OrderBumpCreate(BaseModel):
 class IntegrationUpdate(BaseModel):
     token: str
 
-# --- MODELOS TRACKING (Certifique-se de que estão no topo, junto com os outros Pydantic models) ---
-class TrackingFolderCreate(BaseModel):
-    nome: str
-    plataforma: str # 'facebook', 'instagram', etc
-
-class TrackingLinkCreate(BaseModel):
-    folder_id: int
-    bot_id: int
-    nome: str
-    origem: Optional[str] = "outros" 
-    codigo: Optional[str] = None
-
 # --- MODELOS MINI APP (TEMPLATE) ---
 class MiniAppConfigUpdate(BaseModel):
     # Visual
@@ -4972,22 +4960,38 @@ def salvar_fluxo(
 
 # --- 1. PASTAS (FOLDERS) ---
 
+# ============================================================
+# 🛡️ SCHEMAS DE RASTREAMENTO (Adicione antes das rotas)
+# ============================================================
+
+# --- MODELOS TRACKING (Certifique-se de que estão no topo, junto com os outros Pydantic models) ---
+class TrackingFolderCreate(BaseModel):
+    nome: str
+    plataforma: str # 'facebook', 'instagram', etc
+
+class TrackingLinkCreate(BaseModel):
+    folder_id: int
+    bot_id: int
+    nome: str
+    origem: Optional[str] = "outros" 
+    codigo: Optional[str] = None
+
+# ============================================================
+# 📂 ROTAS DE RASTREAMENTO (TRACKING) - SEGURANÇA APLICADA
+# ============================================================
+
+# --- 1. PASTAS (FOLDERS) ---
+
 @app.get("/api/admin/tracking/folders")
-async def list_tracking_folders(
+def list_tracking_folders(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user) # Usando get_current_active_user padrão do sistema
 ):
     """
-    Lista pastas.
-    CORREÇÃO V5: Removemos o 'Modo Deus' da visualização.
-    O Admin agora só vê:
-    1. Pastas Vazias (que ele acabou de criar).
-    2. Pastas com links de bots que ELE realmente possui (user.bots).
-    Isso esconde as pastas de outros usuários da tela do Admin.
+    Lista pastas com filtro de visibilidade baseado nos bots do usuário.
     """
     try:
-        # 🔥 MUDANÇA: Admin usa a mesma lista de bots que um mortal.
-        # Isso garante que ele não veja as pastas do "Mago" ou de outros clientes.
+        # 🔥 SEGURANÇA: Filtra IDs dos bots que o usuário realmente é DONO
         user_bot_ids = [bot.id for bot in current_user.bots]
         
         # Busca todas as pastas (da mais nova para mais antiga)
@@ -5021,21 +5025,23 @@ async def list_tracking_folders(
             # Mostra SE:
             # 1. Tenho links meus lá dentro (meus_links_count > 0)
             # 2. OU a pasta está totalmente vazia (total_links_absoluto == 0)
-            #    (Isso permite que o Admin crie a pasta 'FBC' e a veja, pois está vazia)
             should_show = (meus_links_count > 0) or (total_links_absoluto == 0)
             
+            # Se for Superuser, vê tudo (Opcional, mas útil para debug)
+            if current_user.is_superuser:
+                should_show = True
+
             if should_show:
                 result.append({
                     "id": f.id, 
                     "nome": f.nome, 
                     "plataforma": f.plataforma, 
-                    "link_count": meus_links_count,
+                    "link_count": meus_links_count, # Mostra apenas a contagem dos MEUS links
                     "total_clicks": (stats.total_clicks if stats else 0) or 0,
                     "total_vendas": (stats.total_vendas if stats else 0) or 0,
                     "created_at": f.created_at
                 })
         
-        logger.info(f"📂 Usuário {current_user.username} vê {len(result)} pastas (Visão Limpa)")
         return result
         
     except Exception as e:
@@ -5043,23 +5049,25 @@ async def list_tracking_folders(
         return []
 
 @app.post("/api/admin/tracking/folders")
-async def create_tracking_folder(
+def create_tracking_folder(
     dados: TrackingFolderCreate, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
     try:
-        # Verifica duplicidade
+        # Verifica duplicidade (Case insensitive)
         existe = db.query(TrackingFolder).filter(
             func.lower(TrackingFolder.nome) == dados.nome.lower()
         ).first()
         
         if existe:
+            # Retorna ok com ID existente para não travar o front, mas avisa
             return {"status": "ok", "id": existe.id, "msg": "Pasta já existia"}
 
         nova_pasta = TrackingFolder(
             nome=dados.nome, 
-            plataforma=dados.plataforma
+            plataforma=dados.plataforma,
+            created_at=datetime.utcnow()
         )
         db.add(nova_pasta)
         db.commit()
@@ -5073,14 +5081,12 @@ async def create_tracking_folder(
         raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
 
 @app.delete("/api/admin/tracking/folders/{fid}")
-async def delete_tracking_folder(
+def delete_tracking_folder(
     fid: int, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
     try:
-        # Para deletar, mantemos o poder do Admin de apagar qualquer coisa se necessário
-        # Mas para ser consistente, vamos usar a mesma lógica de bots
         user_bot_ids = [bot.id for bot in current_user.bots]
         is_admin = current_user.is_superuser
         
@@ -5088,17 +5094,18 @@ async def delete_tracking_folder(
         if not folder:
             raise HTTPException(404, "Pasta não encontrada")
         
-        # Se NÃO for admin, verifica se tem links de outros
+        # 🔥 BLINDAGEM: Se NÃO for admin, verifica se tem links de outros usuários
         if not is_admin:
             links_outros = db.query(TrackingLink).filter(
                 TrackingLink.folder_id == fid,
-                TrackingLink.bot_id.notin_(user_bot_ids)
+                TrackingLink.bot_id.notin_(user_bot_ids) # Links que NÃO são meus
             ).count()
             
             if links_outros > 0:
-                raise HTTPException(403, "Pasta contém links de outros usuários.")
+                raise HTTPException(403, "Você não pode apagar esta pasta pois ela contém links de outros usuários.")
         
-        # Admin ou Dono -> Deleta
+        # Se passou na verificação, apaga os links da pasta e a pasta
+        # (Se for admin apaga tudo, se for user apaga só os seus ou a pasta inteira se vazia/sua)
         db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
         db.delete(folder)
         db.commit()
@@ -5113,49 +5120,52 @@ async def delete_tracking_folder(
 # --- 2. LINKS DE RASTREAMENTO ---
 
 @app.get("/api/admin/tracking/links/{folder_id}")
-async def list_tracking_links(
+def list_tracking_links(
     folder_id: int, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
     """
-    Lista links.
+    Lista links de uma pasta, filtrando APENAS os que pertencem aos bots do usuário.
     """
     user_bot_ids = [bot.id for bot in current_user.bots]
     is_admin = current_user.is_superuser
 
     query = db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id)
     
-    # Se NÃO for admin, filtra só os meus bots
+    # 🔥 BLINDAGEM: Se NÃO for admin, filtra só os links dos meus bots
     if not is_admin:
-        if not user_bot_ids: return []
+        if not user_bot_ids: 
+            return [] # Se usuário não tem bots, não vê links
         query = query.filter(TrackingLink.bot_id.in_(user_bot_ids))
     
     return query.order_by(desc(TrackingLink.created_at)).all()
 
 @app.post("/api/admin/tracking/links")
-async def create_tracking_link(
+def create_tracking_link(
     dados: TrackingLinkCreate, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
     try:
         user_bot_ids = [bot.id for bot in current_user.bots]
         is_admin = current_user.is_superuser
         
-        # Admin pode criar link para qualquer bot. Usuário só para os seus.
+        # 🔥 BLINDAGEM: Verifica se o usuário é dono do bot onde quer criar o link
         if not is_admin:
             if dados.bot_id not in user_bot_ids:
                 raise HTTPException(403, "Você não tem permissão para criar links neste bot.")
 
+        # Gera código aleatório se não vier preenchido
         if not dados.codigo:
             import random, string
             chars = string.ascii_lowercase + string.digits
             dados.codigo = ''.join(random.choice(chars) for _ in range(8))
         
+        # Verifica colisão de código (Slug único)
         exists = db.query(TrackingLink).filter(TrackingLink.codigo == dados.codigo).first()
         if exists:
-            raise HTTPException(400, "Este código já existe.")
+            raise HTTPException(400, "Este código já existe. Escolha outro.")
 
         novo_link = TrackingLink(
             folder_id=dados.folder_id,
@@ -5165,7 +5175,8 @@ async def create_tracking_link(
             origem=dados.origem,
             clicks=0,
             vendas=0,
-            faturamento=0.0
+            faturamento=0.0,
+            created_at=datetime.utcnow()
         )
         db.add(novo_link)
         db.commit()
@@ -5180,25 +5191,34 @@ async def create_tracking_link(
         raise HTTPException(status_code=500, detail="Erro interno")
 
 @app.delete("/api/admin/tracking/links/{lid}")
-async def delete_link(
+def delete_link(
     lid: int, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
-    user_bot_ids = [bot.id for bot in current_user.bots]
-    is_admin = current_user.is_superuser
-    
-    link = db.query(TrackingLink).filter(TrackingLink.id == lid).first()
-    if not link:
-        raise HTTPException(404, "Link não encontrado")
-    
-    if not is_admin:
-        if link.bot_id not in user_bot_ids:
-            raise HTTPException(403, "Acesso negado")
-    
-    db.delete(link)
-    db.commit()
-    return {"status": "deleted"}
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        is_admin = current_user.is_superuser
+        
+        link = db.query(TrackingLink).filter(TrackingLink.id == lid).first()
+        if not link:
+            raise HTTPException(404, "Link não encontrado")
+        
+        # 🔥 BLINDAGEM: Verifica se o usuário é dono do link (via Bot)
+        if not is_admin:
+            if link.bot_id not in user_bot_ids:
+                raise HTTPException(403, "Acesso negado. Você não é dono deste link.")
+        
+        db.delete(link)
+        db.commit()
+        return {"status": "deleted"}
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Erro ao deletar link: {e}")
+        raise HTTPException(500, "Erro interno")
+
 
 # =========================================================
 # 🧩 ROTAS DE PASSOS DINÂMICOS (FLOW V2)
