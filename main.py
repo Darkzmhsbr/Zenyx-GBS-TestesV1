@@ -955,12 +955,47 @@ async def send_remarketing_job(
                 
                 logger.info(f"📨 [REMARKETING] Enviado com sucesso para {chat_id}")
                 
-                # 6. Auto destruição
-                destruct = config_dict.get('auto_destruct_seconds', 0)
-                if destruct > 0 and sent_msg:
-                    await asyncio.sleep(destruct)
-                    try: bot.delete_message(chat_id, sent_msg.message_id)
-                    except: pass
+                # ==============================================================================
+                # 6. Auto destruição (LÓGICA CORRIGIDA E UNIFICADA - VERSÃO MESTRE)
+                # ==============================================================================
+                is_enabled = config_dict.get('auto_destruct_enabled', False)
+                destruct_seconds = config_dict.get('auto_destruct_seconds', 0)
+                after_click = config_dict.get('auto_destruct_after_click', True)
+
+                # Só entra aqui se estiver HABILITADO e tiver tempo configurado
+                if is_enabled and destruct_seconds > 0 and sent_msg:
+                    
+                    if after_click:
+                        # --- MODO: DESTRUIR APÓS CLIQUE ---
+                        # Usamos o MESMO dicionário da função síncrona para que o callback funcione igual
+                        if not hasattr(enviar_remarketing_automatico, 'pending_destructions'):
+                            enviar_remarketing_automatico.pending_destructions = {}
+                        
+                        # Armazena usando STR e INT por segurança (conforme corrigimos no callback)
+                        dados_destruicao = {
+                            'message_id': sent_msg.message_id,
+                            'buttons_message_id': None, # Async envia botões junto, não separado
+                            'bot_instance': bot, # Instância do TeleBot
+                            'destruct_seconds': destruct_seconds
+                        }
+                        
+                        # Salva na memória global para o Callback pegar
+                        enviar_remarketing_automatico.pending_destructions[chat_id] = dados_destruicao
+                        enviar_remarketing_automatico.pending_destructions[str(chat_id)] = dados_destruicao
+                        
+                        logger.info(f"💣 [ASYNC] Auto-destruição agendada APÓS CLIQUE para {chat_id}")
+                        
+                    else:
+                        # --- MODO: DESTRUIR IMEDIATAMENTE (TIMER) ---
+                        logger.info(f"⏳ [ASYNC] Auto-destruição iniciada: {destruct_seconds}s")
+                        await asyncio.sleep(destruct_seconds)
+                        try: 
+                            bot.delete_message(chat_id, sent_msg.message_id)
+                            logger.info(f"🗑️ [ASYNC] Mensagem deletada automaticamente para {chat_id}")
+                        except Exception as e_del: 
+                            logger.warning(f"⚠️ Erro ao auto-deletar (Async): {e_del}")
+                
+                # ==============================================================================
 
             except Exception as e_send:
                 # Registrar falha no banco
@@ -993,7 +1028,6 @@ async def send_remarketing_job(
         with remarketing_lock:
             if chat_id in remarketing_timers:
                 del remarketing_timers[chat_id]
-
 
 async def cleanup_orphan_jobs():
     try:
@@ -1053,7 +1087,10 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 'media_url': config.media_url, 
                 'media_type': config.media_type,
                 'delay_minutes': config.delay_minutes, 
+                # ✅ CORREÇÃO MESTRE: Passando as flags de controle que faltavam
+                'auto_destruct_enabled': config.auto_destruct_enabled,
                 'auto_destruct_seconds': config.auto_destruct_seconds,
+                'auto_destruct_after_click': config.auto_destruct_after_click,
                 'promo_values': config.promo_values or {}
             }
 
