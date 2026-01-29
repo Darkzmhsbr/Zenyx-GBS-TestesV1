@@ -6102,43 +6102,60 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
                         return {"status": "error"}
                     
-                    # Busca config de remarketing para pegar o valor promocional e timing de auto-destruição
+                    # Busca config de remarketing
                     remarketing_cfg = db.query(RemarketingConfig).filter(
                         RemarketingConfig.bot_id == bot_db.id
                     ).first()
                     
                     promo_values = remarketing_cfg.promo_values or {} if remarketing_cfg else {}
+                    # Converte chave para string para garantir compatibilidade com JSON
                     valor_final = promo_values.get(str(plano_id), plano.preco_atual)
                     
-                    # ✅ EXECUTA AUTO-DESTRUIÇÃO SE CONFIGURADO
+                    # ==============================================================================
+                    # 💣 CORREÇÃO MESTRE: AUTO-DESTRUIÇÃO APÓS CLIQUE (Bulletproof)
+                    # ==============================================================================
+                    # Verifica se a função e o dicionário existem na memória
                     if (remarketing_cfg and 
                         remarketing_cfg.auto_destruct_enabled and 
                         remarketing_cfg.auto_destruct_after_click and
-                        hasattr(enviar_remarketing_automatico, 'pending_destructions') and
-                        chat_id in enviar_remarketing_automatico.pending_destructions):
+                        hasattr(enviar_remarketing_automatico, 'pending_destructions')):
                         
-                        destruction_data = enviar_remarketing_automatico.pending_destructions[chat_id]
-                        message_id = destruction_data['message_id']
-                        buttons_message_id = destruction_data['buttons_message_id']
-                        bot_instance = destruction_data['bot_instance']
-                        destruct_seconds = destruction_data['destruct_seconds']
+                        dict_pendente = enviar_remarketing_automatico.pending_destructions
                         
-                        # Agenda a destruição
-                        def auto_delete_after_click():
-                            time.sleep(destruct_seconds)
-                            try:
-                                bot_instance.delete_message(chat_id, message_id)
-                                if buttons_message_id:
-                                    bot_instance.delete_message(chat_id, buttons_message_id)
-                                logger.debug(f"🗑️ Mensagem de remarketing auto-destruída APÓS clique")
-                            except:
-                                pass
+                        # Tenta encontrar a chave tanto como INT quanto como STR (O Grande Pulo do Gato 🐱)
+                        dados_destruicao = dict_pendente.get(chat_id) or dict_pendente.get(str(chat_id))
                         
-                        threading.Thread(target=auto_delete_after_click, daemon=True).start()
-                        
-                        # Remove do dict
-                        del enviar_remarketing_automatico.pending_destructions[chat_id]
-                        logger.info(f"💣 Auto-destruição ativada APÓS clique para {chat_id}")
+                        if dados_destruicao:
+                            logger.info(f"💣 [CALLBACK] Encontrado agendamento de destruição para {chat_id}")
+                            
+                            msg_id_to_del = dados_destruicao.get('message_id')
+                            btns_id_to_del = dados_destruicao.get('buttons_message_id')
+                            # Usamos bot_temp (atual) ao invés do salvo, pois é mais seguro
+                            tempo_para_explodir = dados_destruicao.get('destruct_seconds', 5)
+                            
+                            def auto_delete_after_click():
+                                time.sleep(tempo_para_explodir)
+                                try:
+                                    bot_temp.delete_message(chat_id, msg_id_to_del)
+                                    if btns_id_to_del:
+                                        bot_temp.delete_message(chat_id, btns_id_to_del)
+                                    logger.info(f"🗑️ Mensagem de remarketing auto-destruída APÓS clique ({chat_id})")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Falha ao deletar msg após clique (já deletada?): {e}")
+
+                            # Dispara a thread de destruição
+                            threading.Thread(target=auto_delete_after_click, daemon=True).start()
+                            
+                            # Remove do dicionário para liberar memória (Remove ambas as versões da chave por garantia)
+                            if chat_id in dict_pendente: del dict_pendente[chat_id]
+                            if str(chat_id) in dict_pendente: del dict_pendente[str(chat_id)]
+                        else:
+                            # Debug caso não encontre (útil para logs)
+                            logger.warning(f"⚠️ Clique detectado, mas não achei agendamento para {chat_id} (Restartou o servidor?)")
+
+                    # ==============================================================================
+                    # FIM DA CORREÇÃO
+                    # ==============================================================================
                     
                     # Gera PIX com valor promocional
                     lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
@@ -6217,6 +6234,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         alternar_mensagens_pagamento(bot_temp, chat_id, bot_db.id)
                         
                         # Agenda remarketing novamente (se configurado)
+                        # MESTRE OBS: Se quiser evitar loop infinito, remova ou condicione essa linha abaixo
                         agendar_remarketing_automatico(bot_temp, chat_id, bot_db.id)
                         
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
