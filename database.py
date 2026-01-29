@@ -614,6 +614,10 @@ class RemarketingLog(Base):
     sent_at = Column(DateTime, default=datetime.utcnow, index=True)
     message_text = Column(Text, nullable=True)
     promo_values = Column(JSON, nullable=True)
+
+    # 🔥 CORREÇÃO 2: Campos que estavam faltando no banco
+    message_text = Column(Text, nullable=True)
+    promo_values = Column(JSON, nullable=True)
     
     # Status
     status = Column(String(20), default='sent', index=True)  # sent, error, paid
@@ -622,6 +626,10 @@ class RemarketingLog(Base):
     # Conversão
     converted = Column(Boolean, default=False, index=True)
     converted_at = Column(DateTime, nullable=True)
+
+    # Compatibilidade com versões antigas (opcional, mas bom manter se o banco tiver)
+    message_sent = Column(Boolean, default=True) 
+    campaign_id = Column(String, nullable=True)
     
     bot = relationship("Bot", back_populates="remarketing_logs")
     
