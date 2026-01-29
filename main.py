@@ -6498,76 +6498,57 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 else:
                     bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
-            # --- D) PROMO (OFERTAS PROMOCIONAIS) ---
+            # --- HANDLER PARA BOTÕES DE CAMPANHAS MANUAIS (DISPAROS EM MASSA) ---
             elif data.startswith("promo_"):
                 try:
-                    # Extrai campaign_id e converte para string normalizada
-                    campanha_uuid = data.split("_")[1].strip()
+                    # Formato esperado: promo_{campaign_id}_{plano_id}
+                    parts = data.split("_")
+                    if len(parts) < 3:
+                        bot_temp.send_message(chat_id, "❌ Link de campanha inválido.")
+                        return {"status": "error"}
+
+                    campaign_id = int(parts[1])
+                    plano_id = int(parts[2])
+
+                    # Busca a campanha no banco antigo
+                    campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_id).first()
                     
-                    # Busca a campanha - tenta com e sem conversão de UUID
-                    campanha = db.query(RemarketingCampaign).filter(
-                        RemarketingCampaign.campaign_id == campanha_uuid
-                    ).first()
-                    
-                    # Se não encontrou, tenta converter para UUID
+                    # 🚨 CORREÇÃO DO BUG AQUI 🚨
+                    # Antes chamava .is_active() (que não existe). Agora verifica o status manualmente.
                     if not campanha:
-                        try:
-                            import uuid as uuid_lib
-                            campanha_uuid_obj = uuid_lib.UUID(campanha_uuid)
-                            campanha = db.query(RemarketingCampaign).filter(
-                                RemarketingCampaign.campaign_id == str(campanha_uuid_obj)
-                            ).first()
-                        except:
-                            pass
-                    
-                    if not campanha:
-                        bot_temp.send_message(
-                            chat_id, 
-                            "❌ <b>Oferta não encontrada.</b>\n\nEsta promoção pode ter sido removida ou o link está incorreto.",
-                            parse_mode="HTML"
-                        )
-                        return
-                    
-                    # Verifica se está ativa usando o método is_active()
-                    if not campanha.is_active():
-                        # Mensagem específica baseada no motivo
-                        if not campanha.is_enabled:
-                            msg_erro = "🚫 <b>OFERTA DESATIVADA</b>\n\nEsta promoção não está mais disponível."
-                        elif campanha.expiration_at and datetime.utcnow() > campanha.expiration_at:
-                            msg_erro = "⏰ <b>OFERTA EXPIRADA!</b>\n\nO tempo desta promoção acabou."
-                        else:
-                            msg_erro = "❌ <b>Oferta indisponível.</b>"
+                        bot_temp.send_message(chat_id, "❌ Campanha não encontrada.")
+                        return {"status": "error"}
                         
-                        bot_temp.send_message(chat_id, msg_erro, parse_mode="HTML")
-                        return
-                    
+                    if campanha.status == 'cancelled':
+                        bot_temp.send_message(chat_id, "⚠️ Esta oferta foi encerrada.")
+                        return {"status": "expired"}
+
                     # Busca o plano
-                    plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
-                    
+                    plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
                     if not plano:
-                        bot_temp.send_message(
-                            chat_id,
-                            "❌ <b>Plano não encontrado.</b>\n\nEsta oferta não está mais disponível.",
-                            parse_mode="HTML"
-                        )
-                        return
-                    
-                    # Calcula preço final e desconto
-                    preco_final = campanha.get_promo_price(plano)
-                    desconto_percentual = 0
-                    preco_referencia = plano.preco_original or plano.preco_atual
-                    
-                    if preco_referencia > preco_final:
-                        desconto_percentual = int(((preco_referencia - preco_final) / preco_referencia) * 100)
-                    
-                    # Gera PIX
+                        bot_temp.send_message(chat_id, "❌ Plano da oferta não existe mais.")
+                        return {"status": "error"}
+
+                    # Lógica de preço da campanha manual
+                    # Tenta pegar o preço promocional definido na campanha, senão usa o do plano
+                    preco_final = plano.preco_atual
+                    if campanha.promo_price and campanha.promo_price > 0:
+                        preco_final = campanha.promo_price
+
+                    # Calcula desconto visual
+                    desconto = 0
+                    if plano.preco_atual > preco_final:
+                        desconto = int(((plano.preco_atual - preco_final) / plano.preco_atual) * 100)
+
                     msg_wait = bot_temp.send_message(
-                        chat_id,
-                        f"⏳ Gerando <b>OFERTA ESPECIAL</b>{f' com {desconto_percentual}% OFF' if desconto_percentual > 0 else ''}...",
+                        chat_id, 
+                        f"⏳ Processando oferta exclusiva da campanha...", 
                         parse_mode="HTML"
                     )
-                    mytx = str(uuid.uuid4())
 
+                    # Gera o PIX (sem agendar remarketing automático novo, para não conflitar)
+                    mytx = str(uuid.uuid4())
+                    
                     pix = await gerar_pix_pushinpay(
                         valor_float=preco_final,
                         transaction_id=mytx,
@@ -6575,99 +6556,62 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         db=db,
                         user_telegram_id=str(chat_id),
                         user_first_name=first_name,
-                        plano_nome=f"{plano.nome_exibicao} (PROMO)"
+                        plano_nome=f"{plano.nome_exibicao} (OFERTA RELÂMPAGO)",
+                        agendar_remarketing=False # Não inicia ciclo automático em cima de campanha manual
                     )
-                    
+
                     if pix:
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
                         txid = str(pix.get('id') or mytx).lower()
-                        
-                        # Registra pedido com tracking da campanha
+
+                        # Salva o pedido
                         novo_pedido = Pedido(
                             bot_id=bot_db.id,
                             telegram_id=str(chat_id),
                             first_name=first_name,
                             username=username,
-                            plano_nome=f"{plano.nome_exibicao} (OFERTA ESPECIAL)",
+                            plano_nome=f"{plano.nome_exibicao} (CAMPANHA {desconto}% OFF)",
                             plano_id=plano.id,
                             valor=preco_final,
                             transaction_id=txid,
                             qr_code=qr,
                             status="pending",
-                            tem_order_bump=False,
-                            created_at=datetime.utcnow(),
-                            tracking_id=campanha.campaign_id
+                            created_at=datetime.utcnow()
                         )
                         db.add(novo_pedido)
+                        
+                        # Registra conversão na campanha (Analytics)
+                        if not campanha.clicks: campanha.clicks = 0
+                        campanha.clicks += 1
                         db.commit()
-                        
-                        try:
-                            bot_temp.delete_message(chat_id, msg_wait.message_id)
-                        except:
-                            pass
-                        
-                        markup_pix = types.InlineKeyboardMarkup()
-                        markup_pix.add(
-                            types.InlineKeyboardButton(
-                                "🔄 VERIFICAR PAGAMENTO",
-                                callback_data=f"check_payment_{txid}"
-                            )
-                        )
 
-                        emoji_fogo = "🔥" if desconto_percentual >= 50 else "💰"
-                        msg_pix = f"{emoji_fogo} <b>OFERTA ESPECIAL GERADA!</b>\n\n"
-                        msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
-                        
-                        if desconto_percentual > 0:
-                            msg_pix += f"💵 De: <s>R$ {preco_referencia:.2f}</s>\n"
-                            msg_pix += f"✨ Por apenas: <b>R$ {preco_final:.2f}</b>\n"
-                            msg_pix += f"📊 Economia: <b>{desconto_percentual}% OFF</b>\n\n"
+                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except: pass
+
+                        markup_pix = types.InlineKeyboardMarkup()
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
+
+                        msg_pix = f"🔥 <b>OFERTA ATIVADA!</b>\n\n"
+                        msg_pix += f"🎁 <b>{plano.nome_exibicao}</b>\n"
+                        if desconto > 0:
+                            msg_pix += f"🏷️ <s>R$ {plano.preco_atual:.2f}</s> por <b>R$ {preco_final:.2f}</b>\n"
+                            msg_pix += f"📉 <b>{desconto}% de Desconto</b> aplicado!\n\n"
                         else:
                             msg_pix += f"💰 Valor: <b>R$ {preco_final:.2f}</b>\n\n"
                         
-                        msg_pix += f"🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
-                        msg_pix += "👆 Toque na chave PIX acima para copiar\n"
-                        msg_pix += "⚡ Acesso liberado automaticamente após confirmação!"
+                        msg_pix += f"💠 PIX Copia e Cola:\n<pre>{qr}</pre>\n\n"
+                        msg_pix += "⌛ Pague agora para garantir o desconto."
 
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
-                        
-                        # Registra conversão no log da campanha
-                        try:
-                            log_entry = RemarketingLog(
-                                bot_id=bot_db.id,
-                                campaign_id=campanha.campaign_id,
-                                user_id=str(chat_id),
-                                message_sent="Oferta promocional aceita",  # ✅ TEXTO em vez de Boolean
-                                status='converted',                         # ✅ ADICIONAR
-                                converted=False,
-                                sent_at=datetime.utcnow()
-                            )
-                            db.add(log_entry)
-                            db.commit()
-                        except Exception as log_error:
-                            logger.error(f"Erro ao registrar log de remarketing: {log_error}")
-                            
                     else:
-                        try:
-                            bot_temp.delete_message(chat_id, msg_wait.message_id)
-                        except:
-                            pass
-                        bot_temp.send_message(
-                            chat_id,
-                            "❌ <b>Erro ao gerar pagamento.</b>\n\nTente novamente em instantes.",
-                            parse_mode="HTML"
-                        )
-                        
+                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except: pass
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar link de pagamento.")
+
                 except Exception as e:
-                    logger.error(f"❌ Erro no handler promo_: {str(e)}", exc_info=True)
-                    try:
-                        bot_temp.send_message(
-                            chat_id,
-                            "❌ <b>Erro ao processar oferta.</b>\n\nContate o suporte.",
-                            parse_mode="HTML"
-                        )
-                    except:
-                        pass
+                    logger.error(f"❌ Erro no handler promo_: {e}", exc_info=True)
+                    try: bot_temp.send_message(chat_id, "❌ Erro interno ao processar campanha.")
+                    except: pass
 
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")
