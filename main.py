@@ -789,6 +789,10 @@ async def start_alternating_messages_job(
                 logger.debug(f"🧹 [ALTERNATING] Task removida para {chat_id}")
 
 
+# ============================================================
+# 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
+# ============================================================
+
 async def send_remarketing_job(
     bot_token: str,
     chat_id: int,
@@ -796,39 +800,49 @@ async def send_remarketing_job(
     user_info: dict,
     bot_id: int
 ):
+    """
+    Envia o remarketing automático.
+    CORRIGIDO: Erro de coluna 'user_telegram_id' -> 'user_id'
+    """
     try:
         delay = config_dict.get('delay_minutes', 5)
+        # Aguarda o tempo configurado
         await asyncio.sleep(delay * 60)
         
         db = SessionLocal()
         try:
-            # Verifica pagamento (Se já pagou, não manda)
-            if db.query(Pedido).filter(
+            # 1. Verifica se o usuário JÁ PAGOU (Não faz sentido cobrar quem já comprou)
+            pagou = db.query(Pedido).filter(
                 Pedido.bot_id == bot_id, 
                 Pedido.telegram_id == str(chat_id), 
-                Pedido.status.in_(['paid', 'active', 'approved']) # Adicionei approved por segurança
-            ).first():
+                Pedido.status.in_(['paid', 'active', 'approved'])
+            ).first()
+            
+            if pagou:
+                logger.info(f"💰 [REMARKETING] Cancelado: Usuário {chat_id} já pagou.")
                 return
 
-            # ✅ MESTRE CÓDIGO FÁCIL: CORREÇÃO DO ERRO SQL
-            # Verifica se já enviou hoje usando user_id (string) para evitar UndefinedColumn
+            # 2. Verifica se JÁ ENVIOU hoje (Evita spam)
+            # 🔧 CORREÇÃO MESTRE: Trocado 'user_telegram_id' por 'user_id'
             hoje = datetime.now().date()
-            if db.query(RemarketingLog).filter(
+            ja_enviou = db.query(RemarketingLog).filter(
                 RemarketingLog.bot_id == bot_id,
-                RemarketingLog.user_id == str(chat_id), # <--- CORRIGIDO AQUI (era user_telegram_id)
+                RemarketingLog.user_id == str(chat_id), # <--- CORRIGIDO AQUI
                 func.date(RemarketingLog.sent_at) == hoje
-            ).first():
-                logger.info(f"⏭️ Remarketing já enviado hoje para {chat_id}")
+            ).first()
+
+            if ja_enviou:
+                logger.info(f"⏭️ [REMARKETING] Já enviado hoje para {chat_id}")
                 return
 
-            # Prepara mensagem
+            # 3. Prepara a mensagem (Substitui variáveis)
             msg_text = config_dict.get('message_text', '')
             if user_info:
                 msg_text = msg_text.replace('{first_name}', user_info.get('first_name', ''))
                 msg_text = msg_text.replace('{plano_original}', user_info.get('plano', 'VIP'))
                 msg_text = msg_text.replace('{valor_original}', str(user_info.get('valor', '')))
 
-            # Botões
+            # 4. Prepara os Botões (Ofertas)
             markup = types.InlineKeyboardMarkup()
             promos = config_dict.get('promo_values', {})
             for pid, pdata in promos.items():
@@ -836,6 +850,7 @@ async def send_remarketing_job(
                     btn_txt = pdata.get('button_text', 'Ver Oferta 🔥')
                     markup.add(types.InlineKeyboardButton(btn_txt, callback_data=f"promo_{pid}"))
 
+            # 5. Envia a Mensagem
             bot = TeleBot(bot_token, threaded=False)
             sent_msg = None
             
@@ -850,31 +865,42 @@ async def send_remarketing_job(
                 else:
                     sent_msg = bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
                 
-                # ✅ CORRIGIDO: Registra usando user_id (string)
-                db.add(RemarketingLog(
+                # 🔧 CORREÇÃO MESTRE: Salva usando 'user_id'
+                novo_log = RemarketingLog(
                     bot_id=bot_id, 
                     user_id=str(chat_id), # <--- CORRIGIDO AQUI
                     message_text=msg_text, 
                     status='sent', 
                     sent_at=datetime.now()
-                ))
+                )
+                db.add(novo_log)
                 db.commit()
                 
-                # Auto destruição
+                logger.info(f"📨 [REMARKETING] Enviado com sucesso para {chat_id}")
+                
+                # 6. Auto destruição (se configurado)
                 destruct = config_dict.get('auto_destruct_seconds', 0)
                 if destruct > 0 and sent_msg:
                     await asyncio.sleep(destruct)
-                    try: bot.delete_message(chat_id, sent_msg.message_id)
-                    except: pass
+                    try: 
+                        bot.delete_message(chat_id, sent_msg.message_id)
+                        logger.debug(f"🗑️ [REMARKETING] Mensagem autodestruída")
+                    except: 
+                        pass
 
-            except Exception as e:
-                logger.error(f"Erro envio remarketing: {e}")
+            except Exception as e_send:
+                logger.error(f"❌ [REMARKETING] Erro no envio Telegram: {e_send}")
 
+        except Exception as e_db:
+            logger.error(f"❌ [REMARKETING] Erro de Banco/Lógica: {e_db}")
         finally:
             db.close()
 
     except asyncio.CancelledError:
+        logger.info(f"⏹️ [REMARKETING] Cancelado para {chat_id}")
         pass
+    except Exception as e:
+        logger.error(f"❌ [REMARKETING] Erro crítico: {e}")
     finally:
         with remarketing_lock:
             if chat_id in remarketing_timers:
@@ -909,22 +935,24 @@ async def cleanup_orphan_jobs():
 
 def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_message_id: int, user_info: dict):
     try:
-        # ✅ ADICIONAR ESTES LOGS NO INÍCIO:
+        # ✅ LOGS DE DEBUG NO INÍCIO:
         logger.info(f"🔔 [SCHEDULE] Iniciando agendamento - Bot: {bot_id}, Chat: {chat_id}")
         
         db = SessionLocal()
         try:
+            # Busca Configuração
             config = db.query(RemarketingConfig).filter(
                 RemarketingConfig.bot_id == bot_id, 
                 RemarketingConfig.is_active == True
             ).first()
             
             if not config:
-                logger.warning(f"⚠️ [SCHEDULE] Config não encontrada para bot {bot_id}")
+                logger.warning(f"⚠️ [SCHEDULE] Config não encontrada ou inativa para bot {bot_id}")
                 return
             
             logger.info(f"✅ [SCHEDULE] Config encontrada - Delay: {config.delay_minutes} min")
 
+            # Valida Bot
             bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
             if not bot or not bot.token:
                 logger.error(f"❌ [SCHEDULE] Bot {bot_id} não encontrado ou sem token")
@@ -941,7 +969,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 'promo_values': config.promo_values or {}
             }
 
-            # Agenda Alternating
+            # 1. Agenda Mensagens Alternantes (Se houver)
             alt_config = db.query(AlternatingMessages).filter(
                 AlternatingMessages.bot_id == bot_id, 
                 AlternatingMessages.is_active == True
@@ -950,7 +978,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             if alt_config and alt_config.messages:
                 logger.info(f"✅ [SCHEDULE] Mensagens alternantes ativadas - {len(alt_config.messages)} mensagens")
                 
-                # Ajusta o tempo de parada para antes do remarketing
+                # Calcula quando parar (antes do remarketing)
                 stop_at = datetime.now() + timedelta(minutes=config.delay_minutes) - timedelta(seconds=alt_config.stop_before_remarketing_seconds)
                 
                 logger.info(f"⏰ [SCHEDULE] Alternating vai parar em: {stop_at.strftime('%H:%M:%S')}")
@@ -973,11 +1001,17 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             else:
                 logger.info(f"ℹ️ [SCHEDULE] Mensagens alternantes desativadas")
 
-            # Agenda Remarketing
+            # 2. Agenda Remarketing Automático (O JOB CORRIGIDO)
             logger.info(f"⏰ [SCHEDULE] Agendando remarketing para daqui a {config.delay_minutes} minutos")
             
             loop = asyncio.get_event_loop()
-            task = loop.create_task(send_remarketing_job(bot.token, chat_id, config_dict, user_info, bot_id))
+            task = loop.create_task(send_remarketing_job(
+                bot.token, 
+                chat_id, 
+                config_dict, 
+                user_info, 
+                bot_id
+            ))
             with remarketing_lock: 
                 remarketing_timers[chat_id] = task
             
@@ -1726,6 +1760,7 @@ def get_auto_remarketing_stats(
         if bot.owner_id != current_user.id and not current_user.is_superuser:
             raise HTTPException(status_code=403, detail="Acesso negado")
         
+        # Totais
         total_sent = db.query(RemarketingLog).filter(
             RemarketingLog.bot_id == bot_id
         ).count()
@@ -1737,24 +1772,27 @@ def get_auto_remarketing_stats(
         
         conversion_rate = (total_converted / total_sent * 100) if total_sent > 0 else 0
         
+        # Enviados Hoje (Correção user_id não necessária aqui, mas bom manter padrão)
         hoje = datetime.now().date()
         today_sent = db.query(RemarketingLog).filter(
             RemarketingLog.bot_id == bot_id,
             func.date(RemarketingLog.sent_at) == hoje
         ).count()
         
+        # Logs Recentes
         recent_logs = db.query(RemarketingLog).filter(
             RemarketingLog.bot_id == bot_id
         ).order_by(RemarketingLog.sent_at.desc()).limit(10).all()
         
+        # 🔧 CORREÇÃO MESTRE: Mapeando 'user_id' corretamente
         recent_data = [
             {
                 "id": log.id,
-                "user_telegram_id": log.user_telegram_id,
+                "user_telegram_id": log.user_id, # <--- CORRIGIDO (O banco chama user_id)
                 "sent_at": log.sent_at.isoformat(),
                 "status": log.status,
                 "converted": log.converted,
-                "error_message": log.error_message
+                "error_message": getattr(log, 'error_message', None) # Proteção caso a coluna não exista
             }
             for log in recent_logs
         ]
@@ -1770,7 +1808,7 @@ def get_auto_remarketing_stats(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Erro: {str(e)}")
+        logger.error(f"❌ Erro stats: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # =========================================================
