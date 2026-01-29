@@ -3015,35 +3015,36 @@ async def gerar_pix_pushinpay(
             logger.info(f"✅ PIX gerado com sucesso! ID: {pix_response.get('id')}")
             
             # ============================================================
-            # 🎯 INTEGRAÇÃO: AGENDAR REMARKETING
+            # 🎯 AGENDAMENTO CONDICIONAL (AQUI ESTÁ A MÁGICA)
             # ============================================================
-            if user_telegram_id and user_first_name:
+            # Só agenda se agendar_remarketing for True E tivermos os dados do usuário
+            if agendar_remarketing and user_telegram_id:
                 try:
-                    # Converte telegram_id para int (necessário para remarketing)
                     chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
                     
                     if chat_id_int:
-                        # Agenda remarketing + mensagens alternantes
+                        # Cancela agendamentos anteriores para garantir limpeza
+                        cancelar_remarketing(chat_id_int)
+                        
+                        # Agenda novo ciclo
                         schedule_remarketing_and_alternating(
                             bot_id=bot_id,
                             chat_id=chat_id_int,
-                            payment_message_id=0,  # ID da mensagem PIX (0 = não disponível aqui)
+                            payment_message_id=0,
                             user_info={
                                 'first_name': user_first_name,
                                 'plano': plano_nome or 'VIP',
                                 'valor': valor_float
                             }
                         )
-                        
-                        logger.info(
-                            f"📧 [REMARKETING] Agendado para {user_first_name} "
-                            f"(Bot: {bot_id}, Chat: {chat_id_int})"
-                        )
+                        logger.info(f"📧 [REMARKETING] Ciclo iniciado para {user_first_name}")
                     else:
-                        logger.warning(f"⚠️ telegram_id inválido: {user_telegram_id}")
-                    
+                        logger.warning(f"⚠️ ID inválido para agendamento: {user_telegram_id}")
+                        
                 except Exception as e:
-                    logger.error(f"❌ [REMARKETING] Erro ao agendar: {e}")
+                    logger.error(f"❌ Erro ao agendar ciclo: {e}")
+            elif not agendar_remarketing:
+                logger.info(f"🛑 [REMARKETING] Ciclo ignorado propositalmente (Oferta/Promo)")
                     # Não falha o PIX se remarketing der erro
             # ============================================================
             
@@ -5946,7 +5947,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             elif data.startswith("checkout_promo_"):
                 try:
                     parts = data.split("_")
-                    # Formato esperado: checkout_promo_{plano_id}_{preco_centavos}
+                    # Formato: checkout_promo_{plano_id}_{preco_centavos}
                     if len(parts) < 4:
                         bot_temp.send_message(chat_id, "❌ Link de oferta inválido.")
                         return {"status": "error"}
@@ -5975,7 +5976,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     )
                     mytx = str(uuid.uuid4())
                     
-                    # Gera PIX com PREÇO PROMOCIONAL
+                    # 🔥 AQUI ESTÁ A CORREÇÃO 🔥
+                    # Passamos agendar_remarketing=False para NÃO reiniciar o ciclo de mensagens
                     pix = await gerar_pix_pushinpay(
                         valor_float=preco_promo,
                         transaction_id=mytx,
@@ -5983,7 +5985,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         db=db,
                         user_telegram_id=str(chat_id),
                         user_first_name=first_name,
-                        plano_nome=f"{plano.nome_exibicao} (OFERTA)"
+                        plano_nome=f"{plano.nome_exibicao} (OFERTA)",
+                        agendar_remarketing=False  # <--- BLOQUEIA O RESTART DO CICLO
                     )
                     
                     if pix:
@@ -6017,7 +6020,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
                         
-                        # Mensagem com desconto destacado
                         msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
                         msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
                         
