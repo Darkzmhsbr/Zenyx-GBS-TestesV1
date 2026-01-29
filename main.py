@@ -2261,6 +2261,7 @@ def registrar_remarketing(
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS video_preview_url VARCHAR;",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_img_url VARCHAR;",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_name VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_name VARCHAR;",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_desc TEXT;",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS footer_banner_url VARCHAR;",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS deco_lines_url VARCHAR;",
@@ -2274,7 +2275,49 @@ def registrar_remarketing(
                 # 👇👇👇 [CORREÇÃO 11] SUPORTE A WEB APP NO FLUXO (CRÍTICO) 👇👇👇
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS start_mode VARCHAR DEFAULT 'padrao';",
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS miniapp_url VARCHAR;",
-                "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS miniapp_btn_text VARCHAR DEFAULT 'ABRIR LOJA 🛍️';"
+                "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS miniapp_btn_text VARCHAR DEFAULT 'ABRIR LOJA 🛍️';",
+
+                # ============================================================
+                # 🔥 [CORREÇÃO 12] SOLUÇÃO DEFINITIVA REMARKETING LOGS 🔥
+                # ============================================================
+                # 1. Cria a tabela COMPLETA se não existir
+                """
+                CREATE TABLE IF NOT EXISTS remarketing_logs (
+                    id SERIAL PRIMARY KEY,
+                    bot_id INTEGER REFERENCES bots(id),
+                    user_id VARCHAR NOT NULL,
+                    sent_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc'),
+                    message_text TEXT,
+                    promo_values JSON,
+                    status VARCHAR(20) DEFAULT 'sent',
+                    error_message TEXT,
+                    converted BOOLEAN DEFAULT FALSE,
+                    converted_at TIMESTAMP WITHOUT TIME ZONE,
+                    message_sent BOOLEAN DEFAULT TRUE,
+                    campaign_id VARCHAR
+                );
+                """,
+                
+                # 2. Se a tabela já existir velha, ADICIONA AS COLUNAS FALTANTES NA MARRA
+                "ALTER TABLE remarketing_logs ADD COLUMN IF NOT EXISTS user_id VARCHAR;",
+                "ALTER TABLE remarketing_logs ADD COLUMN IF NOT EXISTS message_text TEXT;",
+                "ALTER TABLE remarketing_logs ADD COLUMN IF NOT EXISTS promo_values JSON;",
+                "ALTER TABLE remarketing_logs ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'sent';",
+                "ALTER TABLE remarketing_logs ADD COLUMN IF NOT EXISTS error_message TEXT;",
+                "ALTER TABLE remarketing_logs ADD COLUMN IF NOT EXISTS converted BOOLEAN DEFAULT FALSE;",
+                "ALTER TABLE remarketing_logs ADD COLUMN IF NOT EXISTS converted_at TIMESTAMP WITHOUT TIME ZONE;",
+                "ALTER TABLE remarketing_logs ADD COLUMN IF NOT EXISTS message_sent BOOLEAN DEFAULT TRUE;",
+                "ALTER TABLE remarketing_logs ADD COLUMN IF NOT EXISTS campaign_id VARCHAR;",
+
+                # 3. MIGRAÇÃO DE DADOS: Se existir user_telegram_id, copia para user_id
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='remarketing_logs' AND column_name='user_telegram_id') THEN
+                        UPDATE remarketing_logs SET user_id = CAST(user_telegram_id AS VARCHAR) WHERE user_id IS NULL;
+                    END IF;
+                END $$;
+                """
             ]
             
             for cmd in comandos_sql:
@@ -8858,7 +8901,12 @@ def on_startup():
     try:
         print("📊 Inicializando banco de dados...")
         init_db()
-        print("✅ Banco de dados inicializado")
+        
+        # 🔥 MESTRE CÓDIGO FÁCIL: CHAMADA DE CORREÇÃO FORÇADA AQUI
+        print("🔧 Verificando integridade e colunas faltantes...")
+        forcar_atualizacao_tabelas() # <--- ESSA É A FUNÇÃO QUE CONTÉM A LISTA DE SQL ACIMA
+        
+        print("✅ Banco de dados inicializado e corrigido")
     except Exception as e:
         logger.error(f"❌ ERRO CRÍTICO no init_db: {e}")
         import traceback
