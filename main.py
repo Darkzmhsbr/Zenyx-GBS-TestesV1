@@ -632,9 +632,8 @@ async def processar_webhooks_pendentes():
 
 # ============ HTTPX CLIENT GLOBAL ============
 http_client = None
-
 # =========================================================
-# 🚀 STARTUP: INICIALIZAÇÃO DO SERVIDOR
+# 🚀 STARTUP: INICIALIZAÇÃO DO SERVIDOR (CORRIGIDO)
 # =========================================================
 @app.on_event("startup")
 async def startup_event():
@@ -644,17 +643,20 @@ async def startup_event():
     """
     global http_client
     
+    # 1. INICIALIZAR HTTP CLIENT (httpx)
     try:
-        # 1. INICIALIZAR HTTP CLIENT (httpx)
         http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
             follow_redirects=True
         )
         logger.info("✅ [STARTUP] HTTP Client (httpx) inicializado")
+    except Exception as e:
+        logger.error(f"❌ [STARTUP] Erro ao iniciar HTTP Client: {e}")
 
-        # 2. Executa as Migrações "Vacina"
+    # 2. Executa as Migrações "Vacina"
     try:
+        # Imports locais para evitar ciclo
         from force_migration import forcar_atualizacao_tabelas
         from migration_v3 import executar_migracao_v3
         from migration_v4 import executar_migracao_v4
@@ -673,26 +675,29 @@ async def startup_event():
         print("✅ Todas as migrações concluídas!")
     except Exception as e:
         print(f"⚠️ Aviso: Erro ao rodar migrações automáticas: {e}")
-        
-        # 2. VERIFICAR BANCO DE DADOS
+
+    # 3. VERIFICAR BANCO E INICIAR SCHEDULER
+    try:
+        # Teste de conexão
         db = SessionLocal()
         db.execute(text("SELECT 1"))
         db.close()
         logger.info("✅ [STARTUP] Conexão com banco de dados validada")
         
-        # 3. INICIAR SCHEDULER
-        scheduler.start()
-        logger.info("✅ [STARTUP] Job de vencimentos agendado (12h)")
-        logger.info("✅ [STARTUP] Job de retry de webhooks agendado (1 min)")
-        logger.info("⏰ [STARTUP] Scheduler iniciado com sucesso")
+        # Iniciar Scheduler
+        if not scheduler.running:
+            scheduler.start()
+            logger.info("✅ [STARTUP] Job de vencimentos agendado (12h)")
+            logger.info("✅ [STARTUP] Job de retry de webhooks agendado (1 min)")
+            logger.info("⏰ [STARTUP] Scheduler iniciado com sucesso")
         
         logger.info("=" * 60)
         logger.info("🚀 ZENYX GBOT v5.0 - Sistema iniciado com sucesso!")
         logger.info("=" * 60)
         
     except Exception as e:
-        logger.error(f"❌ [STARTUP] Erro crítico na inicialização: {e}")
-        # Não falhar completamente - permitir que a API suba
+        logger.error(f"❌ [STARTUP] Erro crítico na inicialização do sistema: {e}")
+        # Não falhar completamente - permitir que a API suba mesmo com erro no scheduler
 
 
 @app.on_event("shutdown")
