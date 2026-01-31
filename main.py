@@ -73,6 +73,7 @@ from migration_v3 import executar_migracao_v3
 from migration_v4 import executar_migracao_v4
 from migration_v5 import executar_migracao_v5
 from migration_v6 import executar_migracao_v6
+from migration_v7 import executar_migracao_v7 # ✅ A NOVA MIGRAÇÃO
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
@@ -3269,14 +3270,15 @@ class PlanoCreate(BaseModel):
     nome_exibicao: str
     preco: float
     dias_duracao: int
+    is_lifetime: Optional[bool] = False
+    id_canal_destino: Optional[str] = None  # ✅ NOVO CAMPO
 
-# --- Adicione logo após a classe PlanoCreate ---
-# 👇 COLE ISSO LOGO ABAIXO DA CLASS 'PlanoCreate'
-# COLE AQUI (LOGO APÓS AS CLASSES INICIAIS)
 class PlanoUpdate(BaseModel):
     nome_exibicao: Optional[str] = None
     preco: Optional[float] = None
     dias_duracao: Optional[int] = None
+    is_lifetime: Optional[bool] = None
+    id_canal_destino: Optional[str] = None  # ✅ NOVO CAMPO
     
     # Adiciona essa config para permitir que o Pydantic ignore tipos estranhos se possível
     class Config:

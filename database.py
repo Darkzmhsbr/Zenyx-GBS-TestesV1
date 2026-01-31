@@ -175,6 +175,10 @@ class PlanoConfig(Base):
     is_lifetime = Column(Boolean, default=False)  # ← ADICIONAR ESTA LINHA
     key_id = Column(String(100), unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 👇 ADICIONE ESTA LINHA AQUI 👇
+    id_canal_destino = Column(String, nullable=True) 
+    # 👆 FIM DA ADIÇÃO 👆
     
     # Relacionamentos (manter tudo que já existe abaixo)
     bot = relationship("Bot", back_populates="planos")
