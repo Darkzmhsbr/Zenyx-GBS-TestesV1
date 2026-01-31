@@ -635,70 +635,6 @@ http_client = None
 # =========================================================
 # 🚀 STARTUP: INICIALIZAÇÃO DO SERVIDOR (CORRIGIDO)
 # =========================================================
-@app.on_event("startup")
-async def startup_event():
-    """
-    Executado quando o servidor FastAPI inicia.
-    Inicializa componentes críticos do sistema.
-    """
-    global http_client
-    
-    # 1. INICIALIZAR HTTP CLIENT (httpx)
-    try:
-        http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=10.0),
-            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
-            follow_redirects=True
-        )
-        logger.info("✅ [STARTUP] HTTP Client (httpx) inicializado")
-    except Exception as e:
-        logger.error(f"❌ [STARTUP] Erro ao iniciar HTTP Client: {e}")
-
-    # 2. Executa as Migrações "Vacina"
-    try:
-        # Imports locais para evitar ciclo
-        from force_migration import forcar_atualizacao_tabelas
-        from migration_v3 import executar_migracao_v3
-        from migration_v4 import executar_migracao_v4
-        from migration_v5 import executar_migracao_v5
-        from migration_v6 import executar_migracao_v6
-        from migration_v7 import executar_migracao_v7 # ✅ A NOVA MIGRAÇÃO
-        
-        print("💉 Aplicando vacinas de banco de dados...")
-        forcar_atualizacao_tabelas()
-        executar_migracao_v3()
-        executar_migracao_v4()
-        executar_migracao_v5()
-        executar_migracao_v6()
-        executar_migracao_v7() # ✅ Roda a correção na tabela plano_config
-        
-        print("✅ Todas as migrações concluídas!")
-    except Exception as e:
-        print(f"⚠️ Aviso: Erro ao rodar migrações automáticas: {e}")
-
-    # 3. VERIFICAR BANCO E INICIAR SCHEDULER
-    try:
-        # Teste de conexão
-        db = SessionLocal()
-        db.execute(text("SELECT 1"))
-        db.close()
-        logger.info("✅ [STARTUP] Conexão com banco de dados validada")
-        
-        # Iniciar Scheduler
-        if not scheduler.running:
-            scheduler.start()
-            logger.info("✅ [STARTUP] Job de vencimentos agendado (12h)")
-            logger.info("✅ [STARTUP] Job de retry de webhooks agendado (1 min)")
-            logger.info("⏰ [STARTUP] Scheduler iniciado com sucesso")
-        
-        logger.info("=" * 60)
-        logger.info("🚀 ZENYX GBOT v5.0 - Sistema iniciado com sucesso!")
-        logger.info("=" * 60)
-        
-    except Exception as e:
-        logger.error(f"❌ [STARTUP] Erro crítico na inicialização do sistema: {e}")
-        # Não falhar completamente - permitir que a API suba mesmo com erro no scheduler
-
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -9350,76 +9286,96 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
             "active_users": 0
         }
 # =========================================================
-# ⚙️ STARTUP OTIMIZADA (SEM MIGRAÇÕES REPETIDAS)
+# 🚀 STARTUP UNIFICADO (FUSION V7 + ORIGINAL)
 # =========================================================
 @app.on_event("startup")
-def on_startup():
+async def startup_event():
+    """
+    Inicialização Mestra: Banco, Migrações, Pagamentos, HTTP e Scheduler.
+    """
+    global http_client
     print("="*60)
-    print("🚀 INICIANDO ZENYX GBOT SAAS")
+    print("🚀 INICIANDO ZENYX GBOT (STARTUP UNIFICADO)")
     print("="*60)
-    
-    # 1. Cria tabelas básicas se não existirem
+
+    # 1. INICIALIZAR HTTP CLIENT (Necessário para Webhooks)
+    try:
+        http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+            follow_redirects=True
+        )
+        logger.info("✅ [1/5] HTTP Client inicializado")
+    except Exception as e:
+        logger.error(f"❌ Erro HTTP Client: {e}")
+
+    # 2. GARANTIR BANCO E COLUNAS BÁSICAS (Sua lógica original)
     try:
         print("📊 Inicializando banco de dados...")
-        init_db()
+        # Importação local para garantir que existe
+        from database import Base, engine, SystemConfig, SessionLocal, init_db
         
-        # 🔥 MESTRE CÓDIGO FÁCIL: CHAMADA DE CORREÇÃO FORÇADA AQUI
+        # Cria tabelas se não existirem
+        Base.metadata.create_all(bind=engine)
+        
+        # Força colunas críticas (Sua lógica original)
+        from force_migration import forcar_atualizacao_tabelas
         print("🔧 Verificando integridade e colunas faltantes...")
-        forcar_atualizacao_tabelas() # <--- ESSA É A FUNÇÃO QUE CONTÉM A LISTA DE SQL ACIMA
+        forcar_atualizacao_tabelas()
         
-        print("✅ Banco de dados inicializado e corrigido")
+        print("✅ [2/5] Banco de dados inicializado e corrigido")
     except Exception as e:
-        logger.error(f"❌ ERRO CRÍTICO no init_db: {e}")
-        import traceback
-        traceback.print_exc()
-        # NÃO pare a aplicação aqui, continue tentando
-    
-    # 2. Executa migrações existentes (COM FALLBACK)
+        logger.error(f"❌ ERRO CRÍTICO no Banco de Dados: {e}")
+
+    # 3. EXECUTAR MIGRAÇÕES DE VERSÃO (V3 a V7)
     try:
-        print("🔄 Executando migrações...")
+        print("🔄 Executando migrações de versão...")
         
-        # Tenta cada migração individualmente
-        try:
-            executar_migracao_v3()
-            print("✅ Migração v3 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v3 falhou: {e}")
-        
-        try:
-            executar_migracao_v4()
-            print("✅ Migração v4 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v4 falhou: {e}")
-        
-        try:
-            executar_migracao_v5()
-            print("✅ Migração v5 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v5 falhou: {e}")
-        
-        try:
-            executar_migracao_v6()
-            print("✅ Migração v6 OK")
-        except Exception as e:
-            logger.warning(f"⚠️ Migração v6 falhou: {e}")
+        # Imports Locais (Resolve o erro "NameError is not defined")
+        from migration_v3 import executar_migracao_v3
+        from migration_v4 import executar_migracao_v4
+        from migration_v5 import executar_migracao_v5
+        from migration_v6 import executar_migracao_v6
+        from migration_v7 import executar_migracao_v7
+        from migration_audit_logs import executar_migracao_audit_logs
+
+        # Executa uma por uma com tratamento de erro individual
+        try: 
+            executar_migracao_v3() 
+        except Exception as e: logger.warning(f"⚠️ V3: {e}")
             
+        try: 
+            executar_migracao_v4() 
+        except Exception as e: logger.warning(f"⚠️ V4: {e}")
+            
+        try: 
+            executar_migracao_v5() 
+        except Exception as e: logger.warning(f"⚠️ V5: {e}")
+            
+        try: 
+            executar_migracao_v6() 
+        except Exception as e: logger.warning(f"⚠️ V6: {e}")
+            
+        try: 
+            executar_migracao_v7() # ✅ A NOVA (Multi-Canais)
+            print("✅ Migração V7 (Canais) verificada")
+        except Exception as e: logger.warning(f"⚠️ V7: {e}")
+
+        try:
+            executar_migracao_audit_logs()
+        except Exception as e: logger.warning(f"⚠️ AuditLogs: {e}")
+
+        print("✅ [3/5] Migrações de versão concluídas")
+        
+    except ImportError as e:
+        logger.warning(f"⚠️ Algum arquivo de migração está faltando: {e}")
     except Exception as e:
         logger.error(f"❌ Erro geral nas migrações: {e}")
-    
-    # 3. Executa migração de Audit Logs (COM FALLBACK)
-    try:
-        print("📋 Configurando Audit Logs...")
-        from migration_audit_logs import executar_migracao_audit_logs
-        executar_migracao_audit_logs()
-        print("✅ Audit Logs configurado")
-    except ImportError:
-        logger.warning("⚠️ Arquivo migration_audit_logs.py não encontrado")
-    except Exception as e:
-        logger.error(f"⚠️ Erro na migração Audit Logs: {e}")
-    
-    # 4. Configura pushin_pay_id (COM FALLBACK ROBUSTO)
+
+    # 4. CONFIGURAÇÃO DE PAGAMENTO (Sua lógica original preservada)
     try:
         print("💳 Configurando sistema de pagamento...")
+        from database import SessionLocal, SystemConfig
         db = SessionLocal()
         try:
             config = db.query(SystemConfig).filter(
@@ -9433,16 +9389,24 @@ def on_startup():
                 )
                 db.add(config)
                 db.commit()
-                print("✅ Configuração de pagamento criada")
+                print("✅ Configuração de pagamento criada (Vazia)")
             else:
-                print("✅ Configuração de pagamento encontrada")
+                print("✅ [4/5] Configuração de pagamento encontrada")
         finally:
             db.close()
     except Exception as e:
         logger.warning(f"⚠️ Erro ao configurar pushin_pay_id: {e}")
-    
+
+    # 5. INICIAR SCHEDULER (Necessário para Vencimentos)
+    try:
+        if not scheduler.running:
+            scheduler.start()
+            logger.info("✅ [5/5] Scheduler iniciado")
+    except Exception as e:
+        logger.error(f"❌ Erro Scheduler: {e}")
+
     print("="*60)
-    print("✅ SISTEMA INICIADO E PRONTO!")
+    print("✅ SISTEMA TOTALMENTE OPERACIONAL (V7)")
     print("="*60)
 
 @app.get("/")
