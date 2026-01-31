@@ -69,12 +69,6 @@ from database import (
 
 import update_db 
 
-from migration_v3 import executar_migracao_v3
-from migration_v4 import executar_migracao_v4
-from migration_v5 import executar_migracao_v5
-from migration_v6 import executar_migracao_v6
-from migration_v7 import executar_migracao_v7 # ✅ A NOVA MIGRAÇÃO
-
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -658,6 +652,27 @@ async def startup_event():
             follow_redirects=True
         )
         logger.info("✅ [STARTUP] HTTP Client (httpx) inicializado")
+
+        # 2. Executa as Migrações "Vacina"
+    try:
+        from force_migration import forcar_atualizacao_tabelas
+        from migration_v3 import executar_migracao_v3
+        from migration_v4 import executar_migracao_v4
+        from migration_v5 import executar_migracao_v5
+        from migration_v6 import executar_migracao_v6
+        from migration_v7 import executar_migracao_v7 # ✅ A NOVA MIGRAÇÃO
+        
+        print("💉 Aplicando vacinas de banco de dados...")
+        forcar_atualizacao_tabelas()
+        executar_migracao_v3()
+        executar_migracao_v4()
+        executar_migracao_v5()
+        executar_migracao_v6()
+        executar_migracao_v7() # ✅ Roda a correção na tabela plano_config
+        
+        print("✅ Todas as migrações concluídas!")
+    except Exception as e:
+        print(f"⚠️ Aviso: Erro ao rodar migrações automáticas: {e}")
         
         # 2. VERIFICAR BANCO DE DADOS
         db = SessionLocal()
