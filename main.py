@@ -3360,6 +3360,10 @@ class ProfileUpdate(BaseModel):
     name: str
     avatar_url: Optional[str] = None
 
+class ChannelTestRequest(BaseModel):
+    token: str
+    channel_id: str
+
 # ✅ MODELO COMPLETO PARA O WIZARD DE REMARKETING
 # =========================================================
 # ✅ MODELO DE DADOS (ESPELHO DO REMARKETING.JSX)
@@ -4670,7 +4674,7 @@ async def update_plan(
     except Exception as e:
         logger.error(f"Erro ao atualizar plano: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-        
+
 # 4. DELETAR PLANO (COM SEGURANÇA)
 @app.delete("/api/admin/bots/{bot_id}/plans/{plano_id}")
 def delete_plan(bot_id: int, plano_id: int, db: Session = Depends(get_db)):
@@ -5415,6 +5419,73 @@ def delete_miniapp_category(cat_id: int, db: Session = Depends(get_db)):
         db.delete(cat)
         db.commit()
     return {"status": "deleted"}
+
+# =========================================================
+# 📡 UTILITÁRIO: TESTAR CANAL (NOVO)
+# =========================================================
+@app.post("/api/admin/utils/test-channel")
+def test_channel_connection(data: ChannelTestRequest, current_user: User = Depends(get_current_user)):
+    """
+    Testa se o bot tem acesso e permissão de admin no canal informado.
+    """
+    if not data.token or not data.channel_id:
+        raise HTTPException(status_code=400, detail="Token e ID do Canal são obrigatórios")
+
+    try:
+        # Inicializa o bot temporariamente
+        bot = TeleBot(data.token)
+        
+        # 1. Tenta obter informações do chat
+        chat = bot.get_chat(data.channel_id)
+        
+        # 2. Verifica se é canal ou grupo
+        if chat.type not in ['channel', 'group', 'supergroup']:
+            return JSONResponse(status_code=400, content={
+                "status": "error", 
+                "message": "O ID informado não é de um Canal ou Grupo válido."
+            })
+
+        # 3. Verifica administradores para saber se o bot tem poder
+        try:
+            admins = bot.get_chat_administrators(data.channel_id)
+            bot_info = bot.get_me()
+            is_admin = False
+            
+            for admin in admins:
+                if admin.user.id == bot_info.id:
+                    is_admin = True
+                    break
+            
+            if not is_admin:
+                return JSONResponse(status_code=400, content={
+                    "status": "warning",
+                    "message": f"O Bot conecta no '{chat.title}', mas NÃO É ADMIN. Promova-o para gerar links."
+                })
+                
+        except Exception as e:
+            # Se falhar ao pegar admins, provavelmente não é admin
+            return JSONResponse(status_code=400, content={
+                "status": "warning", 
+                "message": f"Conectado ao '{chat.title}', mas sem permissão de ver admins (Promova o bot)."
+            })
+
+        return {
+            "status": "success",
+            "message": f"✅ Sucesso! Conectado a: {chat.title}",
+            "chat_title": chat.title,
+            "chat_type": chat.type
+        }
+
+    except Exception as e:
+        error_msg = str(e)
+        if "Chat not found" in error_msg:
+            msg = "Canal não encontrado. Verifique o ID ou se o bot foi adicionado."
+        elif "Unauthorized" in error_msg:
+            msg = "Token do Bot inválido."
+        else:
+            msg = f"Erro de conexão: {error_msg}"
+            
+        raise HTTPException(status_code=400, detail=msg)
 
 # =========================================================
 # 💳 WEBHOOK PIX (PUSHIN PAY) - V4.0 (CORREÇÃO VITALÍCIO + NOTIFICAÇÃO)
