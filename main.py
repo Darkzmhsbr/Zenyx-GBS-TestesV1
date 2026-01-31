@@ -4573,6 +4573,7 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
             preco_cheio=preco_orig,
             dias_duracao=dias_duracao,
             is_lifetime=is_lifetime,  # ← NOVO CAMPO
+            id_canal_destino=plano.id_canal_destino, # ✅ AGORA SALVA O CANAL
             key_id=f"plan_{bot_id}_{int(time.time())}"
         )
         
@@ -4618,7 +4619,7 @@ async def update_plan(
     current_user = Depends(get_current_user)
 ):
     """
-    Atualiza um plano existente (incluindo is_lifetime)
+    Atualiza um plano existente (incluindo is_lifetime e id_canal_destino)
     """
     try:
         data = await req.json()
@@ -4632,28 +4633,44 @@ async def update_plan(
         if not plano:
             raise HTTPException(status_code=404, detail="Plano não encontrado")
         
-        # Atualizar campos
+        # --- ATUALIZAÇÃO DOS CAMPOS ---
+        
         if "nome_exibicao" in data:
             plano.nome_exibicao = data["nome_exibicao"]
+            
         if "descricao" in data:
             plano.descricao = data["descricao"]
+            
+        # Nota: Verifica se seu banco usa 'preco' ou 'preco_atual'. 
+        # Mantive conforme seu snippet, mas se der erro, mude para plano.preco
         if "preco_atual" in data:
-            plano.preco_atual = float(data["preco_atual"])
+            plano.preco = float(data["preco_atual"]) 
+            
         if "dias_duracao" in data:
             plano.dias_duracao = int(data["dias_duracao"])
-        if "is_lifetime" in data:  # ← NOVO CAMPO
+            
+        if "is_lifetime" in data:
             plano.is_lifetime = bool(data["is_lifetime"])
+
+        # ✅ NOVO CAMPO (V7): CANAL DE DESTINO
+        if "id_canal_destino" in data:
+            valor_canal = data["id_canal_destino"]
+            # Se vier vazio ou nulo, salvamos None (para usar o padrão do bot)
+            if not valor_canal or str(valor_canal).strip() == "":
+                plano.id_canal_destino = None
+            else:
+                plano.id_canal_destino = str(valor_canal).strip()
         
         db.commit()
         db.refresh(plano)
         
-        logger.info(f"✏️ Plano {plano.id} atualizado: {plano.nome_exibicao} | Vitalício: {plano.is_lifetime}")
+        logger.info(f"✏️ Plano {plano.id} atualizado: {plano.nome_exibicao} | Canal: {plano.id_canal_destino}")
         return plano
         
     except Exception as e:
         logger.error(f"Erro ao atualizar plano: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 # 4. DELETAR PLANO (COM SEGURANÇA)
 @app.delete("/api/admin/bots/{bot_id}/plans/{plano_id}")
 def delete_plan(bot_id: int, plano_id: int, db: Session = Depends(get_db)):
