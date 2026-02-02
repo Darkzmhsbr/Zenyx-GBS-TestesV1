@@ -272,6 +272,9 @@ class BotFlow(Base):
     msg_2_media = Column(String, nullable=True)
     mostrar_planos_2 = Column(Boolean, default=False)
 
+    # --- MENSAGEM PIX (PERSONALIZADA) ---
+    msg_pix = Column(Text, nullable=True)  # 🔥 NOVO CAMPO ADICIONADO
+
 # =========================================================
 # 🧩 TABELA DE PASSOS INTERMEDIÁRIOS
 # =========================================================
