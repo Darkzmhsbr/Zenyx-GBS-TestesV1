@@ -8047,35 +8047,65 @@ def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
             
     except Exception as e:
         logger.error(f"❌ [BOT {bot_db.id}] Erro crítico ao enviar passo automático: {e}")
-
 # =========================================================
-# 📤 FUNÇÃO AUXILIAR: ENVIAR OFERTA FINAL
+# 📤 FUNÇÃO AUXILIAR: ENVIAR OFERTA FINAL (CORRIGIDA)
 # =========================================================
 def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
-    """Envia a oferta final (Planos)"""
+    """Envia a oferta final (Planos) com formatação HTML correta"""
     mk = types.InlineKeyboardMarkup()
-    planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
     
+    # Busca os planos apenas se a configuração mandar mostrar
     if fluxo and fluxo.mostrar_planos_2:
+        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
         for p in planos:
             mk.add(types.InlineKeyboardButton(
                 f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", 
                 callback_data=f"checkout_{p.id}"
             ))
     
+    # Texto e Mídia (Fallback se não houver configuração)
     txt = fluxo.msg_2_texto if (fluxo and fluxo.msg_2_texto) else "Escolha seu plano:"
     med = fluxo.msg_2_media if fluxo else None
     
     try:
         if med:
-            if med.endswith(('.mp4','.mov')): 
-                tb.send_video(cid, med, caption=txt, reply_markup=mk)
+            # Verifica se é vídeo
+            if med.lower().endswith(('.mp4', '.mov', '.avi')): 
+                tb.send_video(
+                    cid, 
+                    med, 
+                    caption=txt, 
+                    reply_markup=mk, 
+                    parse_mode="HTML"  # 🔥 CORREÇÃO: Ativa formatação no vídeo
+                )
+            # Senão, assume que é foto
             else: 
-                tb.send_photo(cid, med, caption=txt, reply_markup=mk)
+                tb.send_photo(
+                    cid, 
+                    med, 
+                    caption=txt, 
+                    reply_markup=mk, 
+                    parse_mode="HTML"  # 🔥 CORREÇÃO: Ativa formatação na foto
+                )
         else:
+            # Apenas Texto
+            tb.send_message(
+                cid, 
+                txt, 
+                reply_markup=mk, 
+                parse_mode="HTML",      # 🔥 CORREÇÃO: Ativa formatação no texto
+                disable_web_page_preview=True
+            )
+            
+    except Exception as e:
+        # Log de erro para ajudar no debug
+        logger.error(f"Erro ao enviar oferta final (HTML falhou?): {e}")
+        
+        # Fallback de segurança: Tenta enviar SEM HTML se der erro na formatação
+        try:
             tb.send_message(cid, txt, reply_markup=mk)
-    except:
-        tb.send_message(cid, txt, reply_markup=mk)
+        except:
+            pass
 
 # =========================================================
 # 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
