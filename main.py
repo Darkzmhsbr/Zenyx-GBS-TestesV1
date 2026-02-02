@@ -3408,6 +3408,9 @@ class RemarketingSend(BaseModel):
 # =========================================================
 # 3. ROTA ENDPOINT (CONECTADA À FUNÇÃO NOVA)
 # =========================================================
+# =========================================================
+# 3. ROTA ENDPOINT (CONECTADA À FUNÇÃO NOVA)
+# =========================================================
 @app.post("/api/admin/bots/{bot_id}/remarketing/send")
 def send_remarketing(
     bot_id: int, 
@@ -3447,12 +3450,12 @@ def send_remarketing(
         db.commit()
         db.refresh(nova_campanha)
 
-        # Lógica de Teste (Usuário específico)
+        # Lógica de Teste
         if data.is_test and not data.specific_user_id:
             bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
             data.specific_user_id = bot.admin_principal_id
         
-        # 🚀 CHAMA A FUNÇÃO CORRIGIDA (Set Logic)
+        # 🚀 CHAMA A FUNÇÃO CORRIGIDA
         background_tasks.add_task(
             processar_envio_remarketing, 
             nova_campanha.id, 
@@ -7282,16 +7285,15 @@ def del_step(bot_id: int, sid: int, db: Session = Depends(get_db)):
         db.commit()
     return {"status": "deleted"}
 # =========================================================
-# 🔄 FUNÇÃO DE BACKGROUND (LÓGICA BLINDADA: LEADS vs PEDIDOS)
-# =========================================================
-# =========================================================
 # 2. FUNÇÃO DE BACKGROUND (LÓGICA BLINDADA: LEADS vs PEDIDOS)
+# =========================================================
+# =========================================================
+# 🔄 FUNÇÃO DE BACKGROUND (LÓGICA BLINDADA: LEADS vs PEDIDOS)
 # =========================================================
 def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: RemarketingRequest):
     """
     Executa o envio em background.
     LÓGICA CORRIGIDA: Usa cruzamento de IDs entre tabelas 'Lead' e 'Pedido'.
-    ZERO dependência de colunas que não existem.
     """
     # 🔥 CRIA NOVA SESSÃO DEDICADA
     db = SessionLocal() 
@@ -7352,7 +7354,6 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 if adm: lista_final_ids = [str(adm.telegram_id).strip()]
         else:
             # 1. Busca TODOS os IDs que geraram PEDIDO (Intenção de compra)
-            # Trazemos o ID e o Status
             q_pedidos = db.query(Pedido.telegram_id, Pedido.status).filter(Pedido.bot_id == bot_id).all()
             
             ids_pagantes = set()    # Já Pagou (Fundo)
@@ -7370,8 +7371,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 if st in status_pagos:
                     ids_pagantes.add(tid)
                 elif st == 'expired':
-                    # Expirado conta como pendente para remarketing (ou grupo próprio)
-                    pass 
+                    pass # Expirado não conta como pendente aqui
                 else:
                     ids_pendentes.add(tid) 
             
@@ -7386,7 +7386,6 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 
             elif target == 'meio':
                 # MEIO (LEAD QUENTE) = Quem tem pedido PENDENTE e NÃO tem pedido PAGO
-                # (Ex: Gerou pix e não pagou)
                 lista_final_ids = list(ids_pendentes - ids_pagantes)
                 
             elif target == 'fundo' or target == 'clientes':
@@ -7397,7 +7396,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 # TODOS = União de Leads + Pedidos
                 lista_final_ids = list(ids_todos_leads.union(ids_com_pedido))
                 
-            else: # Fallback (Expirados, etc)
+            else: # Fallback (Expirados)
                  q_exp = db.query(Pedido.telegram_id).filter(Pedido.bot_id == bot_id, Pedido.status == 'expired').all()
                  ids_exp = {str(x.telegram_id).strip() for x in q_exp if x.telegram_id}
                  lista_final_ids = list(ids_exp - ids_pagantes)
@@ -7424,9 +7423,8 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
             if not uid or len(uid) < 5: continue
             try:
                 midia_ok = False
-                texto_envio = payload.mensagem.replace("{nome}", "Cliente") # Simples e seguro
+                texto_envio = payload.mensagem.replace("{nome}", "Cliente")
 
-                # Envio com Mídia
                 if payload.media_url and len(payload.media_url) > 5:
                     try:
                         ext = payload.media_url.lower()
@@ -7437,12 +7435,11 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                         midia_ok = True
                     except: pass 
                 
-                # Envio Texto Puro (se não teve mídia ou falhou)
                 if not midia_ok:
                     bot_sender.send_message(uid, texto_envio, reply_markup=markup, parse_mode="HTML")
                 
                 sent_count += 1
-                time.sleep(0.04) # 25 msgs/segundo
+                time.sleep(0.04)
                 
             except Exception as e:
                 err = str(e).lower()
@@ -7474,7 +7471,6 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
 
     except Exception as e:
         logger.error(f"Erro thread remarketing: {e}")
-        # Tenta salvar erro
         try:
              db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update({"status": "erro"})
              db.commit()
@@ -9397,8 +9393,39 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
             "total_revenue": 0.0,
             "active_users": 0
         }
+
+# =========================================================
+# 🚑 MIGRAÇÃO DE EMERGÊNCIA (CORREÇÃO DE COLUNA)
+# =========================================================
+def check_and_fix_interaction_count():
+    """
+    Cria a coluna interaction_count na tabela LEADS se não existir.
+    Isso resolve o erro crítico de atributo inexistente 'interaction_count'.
+    """
+    try:
+        # Usa o engine importado do database
+        with engine.connect() as conn:
+            # Verifica se a coluna existe consultando o schema
+            result = conn.execute(text(
+                "SELECT column_name FROM information_schema.columns WHERE table_name='leads' AND column_name='interaction_count'"
+            ))
+            # Se não retornar nada, a coluna não existe
+            if not result.fetchone():
+                logger.info("🚑 [FIX] Criando coluna 'interaction_count' na tabela LEADS...")
+                conn.execute(text("ALTER TABLE leads ADD COLUMN interaction_count INTEGER DEFAULT 0"))
+                conn.commit()
+                logger.info("✅ [FIX] Coluna 'interaction_count' criada com sucesso!")
+            else:
+                logger.info("✅ [FIX] Coluna 'interaction_count' já existe.")
+    except Exception as e:
+        # Loga o erro mas não para o sistema (pode ser erro de permissão ou sqlite vs postgres)
+        logger.error(f"❌ Erro ao verificar interaction_count: {e}")
+
 # =========================================================
 # 🚀 STARTUP UNIFICADO (FUSION V7 + ORIGINAL)
+# =========================================================
+# =========================================================
+# 🚀 STARTUP UNIFICADO (COM CORREÇÃO DE REMARKETING)
 # =========================================================
 @app.on_event("startup")
 async def startup_event():
@@ -9410,7 +9437,11 @@ async def startup_event():
     print("🚀 INICIANDO ZENYX GBOT (STARTUP UNIFICADO)")
     print("="*60)
 
-    # 1. INICIALIZAR HTTP CLIENT (Necessário para Webhooks)
+    # 0. 🚑 CORREÇÃO DE EMERGÊNCIA (REMARKETING)
+    # Executa antes de tudo para garantir que a coluna exista
+    check_and_fix_interaction_count()
+
+    # 1. INICIALIZAR HTTP CLIENT
     try:
         http_client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -9421,16 +9452,12 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Erro HTTP Client: {e}")
 
-    # 2. GARANTIR BANCO E COLUNAS BÁSICAS (Sua lógica original)
+    # 2. GARANTIR BANCO E COLUNAS BÁSICAS
     try:
         print("📊 Inicializando banco de dados...")
-        # Importação local para garantir que existe
         from database import Base, engine, SystemConfig, SessionLocal, init_db
-        
-        # Cria tabelas se não existirem
         Base.metadata.create_all(bind=engine)
         
-        # Força colunas críticas (Sua lógica original)
         from force_migration import forcar_atualizacao_tabelas
         print("🔧 Verificando integridade e colunas faltantes...")
         forcar_atualizacao_tabelas()
@@ -9439,11 +9466,10 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ ERRO CRÍTICO no Banco de Dados: {e}")
 
-    # 3. EXECUTAR MIGRAÇÕES DE VERSÃO (V3 a V7)
+    # 3. EXECUTAR MIGRAÇÕES DE VERSÃO
     try:
         print("🔄 Executando migrações de versão...")
-        
-        # Imports Locais (Resolve o erro "NameError is not defined")
+        # Imports Locais
         from migration_v3 import executar_migracao_v3
         from migration_v4 import executar_migracao_v4
         from migration_v5 import executar_migracao_v5
@@ -9451,30 +9477,24 @@ async def startup_event():
         from migration_v7 import executar_migracao_v7
         from migration_audit_logs import executar_migracao_audit_logs
 
-        # Executa uma por uma com tratamento de erro individual
-        try: 
-            executar_migracao_v3() 
+        try: executar_migracao_v3() 
         except Exception as e: logger.warning(f"⚠️ V3: {e}")
-            
-        try: 
-            executar_migracao_v4() 
+        
+        try: executar_migracao_v4() 
         except Exception as e: logger.warning(f"⚠️ V4: {e}")
-            
-        try: 
-            executar_migracao_v5() 
+        
+        try: executar_migracao_v5() 
         except Exception as e: logger.warning(f"⚠️ V5: {e}")
-            
-        try: 
-            executar_migracao_v6() 
+        
+        try: executar_migracao_v6() 
         except Exception as e: logger.warning(f"⚠️ V6: {e}")
-            
+        
         try: 
-            executar_migracao_v7() # ✅ A NOVA (Multi-Canais)
+            executar_migracao_v7()
             print("✅ Migração V7 (Canais) verificada")
         except Exception as e: logger.warning(f"⚠️ V7: {e}")
 
-        try:
-            executar_migracao_audit_logs()
+        try: executar_migracao_audit_logs()
         except Exception as e: logger.warning(f"⚠️ AuditLogs: {e}")
 
         print("✅ [3/5] Migrações de versão concluídas")
@@ -9484,21 +9504,14 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Erro geral nas migrações: {e}")
 
-    # 4. CONFIGURAÇÃO DE PAGAMENTO (Sua lógica original preservada)
+    # 4. CONFIGURAÇÃO DE PAGAMENTO
     try:
         print("💳 Configurando sistema de pagamento...")
-        from database import SessionLocal, SystemConfig
         db = SessionLocal()
         try:
-            config = db.query(SystemConfig).filter(
-                SystemConfig.key == "pushin_plataforma_id"
-            ).first()
-            
+            config = db.query(SystemConfig).filter(SystemConfig.key == "pushin_plataforma_id").first()
             if not config:
-                config = SystemConfig(
-                    key="pushin_plataforma_id",
-                    value=""
-                )
+                config = SystemConfig(key="pushin_plataforma_id", value="")
                 db.add(config)
                 db.commit()
                 print("✅ Configuração de pagamento criada (Vazia)")
@@ -9509,7 +9522,7 @@ async def startup_event():
     except Exception as e:
         logger.warning(f"⚠️ Erro ao configurar pushin_pay_id: {e}")
 
-    # 5. INICIAR SCHEDULER (Necessário para Vencimentos)
+    # 5. INICIAR SCHEDULER
     try:
         if not scheduler.running:
             scheduler.start()
