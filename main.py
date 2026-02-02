@@ -2722,155 +2722,6 @@ def registrar_webhook_para_retry(
 # =========================================================
 # 🔄 PROCESSAMENTO BACKGROUND DE REMARKETING
 # =========================================================
-
-# =========================================================
-# 🔄 PROCESSAMENTO BACKGROUND DE REMARKETING (CORRIGIDO)
-# =========================================================
-
-def processar_envio_massivo_background(
-    campaign_db_id: int, # Recebe o ID numérico do banco (PK)
-    bot_id: int, 
-    mensagem: str, 
-    target: str,
-    media_url: str = None,
-    plano_oferta_id: str = None, # Pode vir string do front
-    custom_price: float = None,  # ✅ NOVO PARAMETRO
-    price_mode: str = 'original' # ✅ NOVO PARAMETRO
-):
-    """
-    Processa envio de remarketing em background com lógica de preço e filtros corrigidos.
-    """
-    # 1. CRIAR NOVA SESSÃO
-    db = SessionLocal()
-    
-    try:
-        logger.info(f"🚀 Iniciando envio background da campanha DB_ID: {campaign_db_id}")
-        
-        # 2. BUSCAR DADOS DO BOT
-        bot_data = db.query(BotModel).filter(BotModel.id == bot_id).first()
-        if not bot_data:
-            return
-        
-        bot = telebot.TeleBot(bot_data.token, threaded=False)
-        
-        # 3. FILTRAGEM AVANÇADA DE LEADS (CORREÇÃO "MEIO")
-        leads_query = db.query(Lead).filter(Lead.bot_id == bot_id)
-        leads = []
-
-        if target == 'todos':
-            leads = leads_query.all()
-            
-        elif target == 'compradores' or target == 'fundo':
-            # Clientes Ativos (Status 'active')
-            leads = leads_query.filter(Lead.status == 'active').all()
-            
-        elif target == 'nao_compradores' or target == 'pendentes':
-            # Todos que NÃO são active
-            leads = leads_query.filter(Lead.status != 'active').all()
-
-        elif target == 'topo':
-            # Leads Frios: Status lead E pouca interação (ex: 0)
-            leads = leads_query.filter(
-                Lead.status == 'lead', 
-                Lead.interaction_count == 0
-            ).all()
-
-        elif target == 'meio':
-            # ✅ CORREÇÃO DO FILTRO "LEADS QUENTES"
-            # Pega leads que já interagiram (count > 0) mas ainda não compraram (status='lead')
-            leads = leads_query.filter(
-                Lead.status == 'lead',
-                Lead.interaction_count > 0
-            ).all()
-            
-        elif target == 'expirados':
-            leads = leads_query.filter(Lead.status == 'expired').all()
-            
-        else:
-            # Fallback genérico
-            leads = leads_query.filter(Lead.status == target).all()
-        
-        total_leads = len(leads)
-        
-        # 4. ATUALIZAR CAMPANHA
-        campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).first()
-        if campanha:
-            campanha.total_leads = total_leads
-            campanha.status = 'enviando'
-            db.commit()
-        
-        # 5. PREPARAR BOTÃO COM PREÇO DINÂMICO (CORREÇÃO DO PREÇO)
-        markup = None
-        if plano_oferta_id:
-            # Busca flexível por ID (int) ou Key (str)
-            plano = None
-            if str(plano_oferta_id).isdigit():
-                plano = db.query(PlanoConfig).filter(PlanoConfig.id == int(plano_oferta_id)).first()
-            
-            # Se não achou por ID, tenta buscar se tiver lógica de key (opcional)
-            
-            if plano:
-                markup = types.InlineKeyboardMarkup()
-                
-                # ✅ LÓGICA DE PREÇO: Custom vs Original
-                preco_exibicao = plano.preco_atual
-                
-                if price_mode == 'custom' and custom_price is not None:
-                    try:
-                        # Garante conversão segura
-                        val_float = float(str(custom_price).replace(',', '.'))
-                        if val_float > 0:
-                            preco_exibicao = val_float
-                    except:
-                        pass # Falha na conversão, mantem original
-
-                btn_text = f"🔥 {plano.nome_exibicao} - R$ {preco_exibicao:.2f}".replace('.', ',')
-                
-                # Callback Data (ajuste conforme seu sistema de checkout)
-                # Se for campanha, geralmente usa o ID da campanha ou do plano
-                callback_code = f"checkout_{plano.id}"
-                markup.add(types.InlineKeyboardButton(btn_text, callback_data=callback_code))
-        
-        # 6. LOOP DE ENVIO
-        enviados = 0
-        erros = 0
-        
-        for i, lead in enumerate(leads):
-            try:
-                chat_id = lead.user_id
-                
-                # Parse HTML seguro (opcional: substituir {nome})
-                msg_final = mensagem.replace("{nome}", lead.first_name or "Cliente")
-
-                if media_url:
-                    if media_url.endswith(('.mp4', '.mov')):
-                        bot.send_video(chat_id, media_url, caption=msg_final, reply_markup=markup, parse_mode="HTML")
-                    else:
-                        bot.send_photo(chat_id, media_url, caption=msg_final, reply_markup=markup, parse_mode="HTML")
-                else:
-                    bot.send_message(chat_id, msg_final, reply_markup=markup, parse_mode="HTML")
-                
-                enviados += 1
-                time.sleep(0.05) # Rate limit suave
-                
-            except Exception as e:
-                erros += 1
-                # logger.error(f"Erro envio {lead.user_id}: {e}")
-
-        # 7. FINALIZAR
-        if campanha:
-            # Recarrega para evitar erro de sessão
-            db.refresh(campanha)
-            campanha.status = 'concluido'
-            campanha.sent_success = enviados
-            campanha.blocked_count = erros
-            db.commit()
-            
-    except Exception as e:
-        logger.error(f"❌ ERRO CRÍTICO REMARKETING: {e}")
-    finally:
-        db.close()
-
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (DINÂMICA)
 # =========================================================
@@ -7285,15 +7136,16 @@ def del_step(bot_id: int, sid: int, db: Session = Depends(get_db)):
         db.commit()
     return {"status": "deleted"}
 # =========================================================
-# 2. FUNÇÃO DE BACKGROUND (LÓGICA BLINDADA: LEADS vs PEDIDOS)
-# =========================================================
-# =========================================================
 # 🔄 FUNÇÃO DE BACKGROUND (LÓGICA BLINDADA: LEADS vs PEDIDOS)
+# =========================================================
+# =========================================================
+# 🔄 FUNÇÃO DE BACKGROUND (LÓGICA BLINDADA V3: SETS PUROS)
 # =========================================================
 def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: RemarketingRequest):
     """
     Executa o envio em background.
-    LÓGICA CORRIGIDA: Usa cruzamento de IDs entre tabelas 'Lead' e 'Pedido'.
+    LÓGICA CORRIGIDA: Usa matemática de conjuntos (Sets) para evitar erro de coluna.
+    Mantém todos os recursos de Expiração e Config Completa.
     """
     # 🔥 CRIA NOVA SESSÃO DEDICADA
     db = SessionLocal() 
@@ -7303,8 +7155,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).first()
         bot_db = db.query(BotModel).filter(BotModel.id == bot_id).first()
         
-        if not campanha or not bot_db:
-            return
+        if not campanha or not bot_db: return
 
         logger.info(f"🚀 INICIANDO DISPARO | Bot: {bot_db.nome} | Target: {payload.target}")
 
@@ -7340,7 +7191,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                     elif payload.expiration_mode == "hours": data_expiracao = agora + timedelta(hours=val)
                     elif payload.expiration_mode == "days": data_expiracao = agora + timedelta(days=val)
 
-        # --- C. SELEÇÃO DE PÚBLICO (CRUZAMENTO DE TABELAS) ---
+        # --- C. SELEÇÃO DE PÚBLICO (A CORREÇÃO ESTÁ AQUI!) ---
         bot_sender = telebot.TeleBot(bot_db.token)
         target = str(payload.target).lower().strip()
         lista_final_ids = []
@@ -7353,7 +7204,9 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 adm = db.query(BotAdmin).filter(BotAdmin.bot_id == bot_id).first()
                 if adm: lista_final_ids = [str(adm.telegram_id).strip()]
         else:
-            # 1. Busca TODOS os IDs que geraram PEDIDO (Intenção de compra)
+            # --- LÓGICA DE CONJUNTOS (SEM INTERACTION_COUNT) ---
+            
+            # 1. Pega TODOS os Pedidos (Status e ID)
             q_pedidos = db.query(Pedido.telegram_id, Pedido.status).filter(Pedido.bot_id == bot_id).all()
             
             ids_pagantes = set()    # Já Pagou (Fundo)
@@ -7371,29 +7224,29 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 if st in status_pagos:
                     ids_pagantes.add(tid)
                 elif st == 'expired':
-                    pass # Expirado não conta como pendente aqui
+                    pass 
                 else:
                     ids_pendentes.add(tid) 
             
-            # 2. Busca TODOS os IDs da tabela LEAD (Topo + Resto)
+            # 2. Pega TODOS os Leads
             q_leads = db.query(Lead.user_id).filter(Lead.bot_id == bot_id).all()
             ids_todos_leads = {str(l.user_id).strip() for l in q_leads if l.user_id}
 
-            # 3. APLICA A LÓGICA DE CONJUNTOS (MATEMÁTICA EXATA)
+            # 3. Cruzamento
             if target == 'topo': 
-                # TOPO = Leads que existem na tabela LEAD mas NUNCA criaram pedido
+                # TOPO = Leads Totais - Leads com Pedido (Nunca tentaram comprar)
                 lista_final_ids = list(ids_todos_leads - ids_com_pedido)
                 
             elif target == 'meio':
-                # MEIO (LEAD QUENTE) = Quem tem pedido PENDENTE e NÃO tem pedido PAGO
+                # MEIO = Pedidos Pendentes - Pedidos Pagos (Tentou mas não pagou)
                 lista_final_ids = list(ids_pendentes - ids_pagantes)
                 
             elif target == 'fundo' or target == 'clientes':
-                # FUNDO = Quem tem pedido PAGO
+                # FUNDO = Pagantes
                 lista_final_ids = list(ids_pagantes)
                 
             elif target == 'todos': 
-                # TODOS = União de Leads + Pedidos
+                # TODOS
                 lista_final_ids = list(ids_todos_leads.union(ids_com_pedido))
                 
             else: # Fallback (Expirados)
@@ -7401,7 +7254,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                  ids_exp = {str(x.telegram_id).strip() for x in q_exp if x.telegram_id}
                  lista_final_ids = list(ids_exp - ids_pagantes)
 
-        # Atualiza contagem no banco
+        # Atualiza contagem
         logger.info(f"📊 Filtro '{target}' resultou em {len(lista_final_ids)} leads.")
         db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update({"total_leads": len(lista_final_ids)})
         db.commit()
@@ -7415,7 +7268,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
             cb_data = f"checkout_{plano_db.id}" 
             markup.add(types.InlineKeyboardButton(btn_text, callback_data=cb_data))
 
-        # --- E. ENVIO (LOOP) ---
+        # --- E. ENVIO ---
         sent_count = 0
         blocked_count = 0
 
@@ -7478,7 +7331,6 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
     finally:
         db.close()
 
-
 @app.post("/api/admin/remarketing/send")
 async def enviar_remarketing(
     payload: RemarketingRequest, 
@@ -7489,9 +7341,6 @@ async def enviar_remarketing(
     """
     Envia campanha de remarketing em BACKGROUND.
     Retorna imediatamente sem bloquear o servidor.
-    
-    IMPORTANTE: Esta rota retorna em < 1 segundo.
-    O processamento continua em background.
     """
     try:
         logger.info(f"📢 Nova campanha de remarketing: Bot {payload.bot_id}, Target: {payload.target}")
@@ -7519,28 +7368,36 @@ async def enviar_remarketing(
                     raise HTTPException(400, "Nenhum usuário encontrado para teste.")
         
         # =========================================================
-        # 2. CRIAR REGISTRO DA CAMPANHA
+        # 2. CRIAR REGISTRO DA CAMPANHA (ATUALIZADO PARA INCLUIR PREÇO CUSTOM)
         # =========================================================
         uuid_campanha = str(uuid.uuid4())
+        
+        # Cria JSON de config com todos os campos novos
+        config_data = {
+            "mensagem": payload.mensagem,
+            "msg": payload.mensagem,
+            "media_url": payload.media_url,
+            "media": payload.media_url,
+            "plano_oferta_id": getattr(payload, 'plano_oferta_id', None),
+            # NOVOS CAMPOS:
+            "price_mode": getattr(payload, 'price_mode', 'original'),
+            "custom_price": getattr(payload, 'custom_price', None),
+            "expiration_mode": getattr(payload, 'expiration_mode', 'none'),
+            "expiration_value": getattr(payload, 'expiration_value', 0)
+        }
+
         nova_campanha = RemarketingCampaign(
             bot_id=payload.bot_id,
             campaign_id=uuid_campanha,
             type="teste" if payload.is_test else "massivo",
             target=payload.target,
-            # Config com múltiplas chaves para retrocompatibilidade
-            config=json.dumps({
-                "mensagem": payload.mensagem,
-                "msg": payload.mensagem,  # Compatibilidade com código antigo
-                "media_url": payload.media_url,
-                "media": payload.media_url,  # Compatibilidade
-                "plano_oferta_id": getattr(payload, 'plano_oferta_id', None)
-            }),
-            status='agendado',  # Status inicial
+            config=json.dumps(config_data),
+            status='agendado', 
             data_envio=datetime.utcnow(),
-            total_leads=0,  # Será atualizado no background
+            total_leads=0,
             sent_success=0,
             blocked_count=0,
-            plano_id=getattr(payload, 'plano_oferta_id', None),  # Se tiver oferta
+            plano_id=getattr(payload, 'plano_oferta_id', None),
             promo_price=None
         )
         db.add(nova_campanha)
@@ -7558,23 +7415,19 @@ async def enviar_remarketing(
                 if not bot_data:
                     raise HTTPException(404, "Bot não encontrado")
                 
-                bot = telebot.TeleBot(bot_data.token)
-                target_id = int(payload.specific_user_id)
-                
-                # Enviar teste
-                bot.send_message(target_id, payload.mensagem, parse_mode="HTML")
-                
-                # Atualizar campanha como concluída
-                nova_campanha.status = 'concluido'
-                nova_campanha.sent_success = 1
-                nova_campanha.total_leads = 1
-                db.commit()
-                
-                logger.info(f"✅ Teste enviado para {payload.specific_user_id}")
+                # Para teste simples, usamos a função de background mesmo, 
+                # mas com o ID específico já setado no payload.
+                # Isso garante que a lógica de botão e preço seja testada também!
+                background_tasks.add_task(
+                    processar_envio_remarketing, # Chamando a mesma função para garantir consistência
+                    nova_campanha.id,
+                    payload.bot_id,
+                    payload # Passa o objeto completo
+                )
                 
                 return {
                     "status": "enviado",
-                    "message": f"Teste enviado com sucesso para {payload.specific_user_id}!",
+                    "message": f"Teste iniciado para {payload.specific_user_id}!",
                     "campaign_id": nova_campanha.id
                 }
                 
@@ -7588,13 +7441,10 @@ async def enviar_remarketing(
         # 4. SE FOR MASSIVO, AGENDAR BACKGROUND TASK
         # =========================================================
         background_tasks.add_task(
-            processar_envio_massivo_background,  # ← Nome correto da função
+            processar_envio_remarketing,  # <--- ✅ NOME CORRETO DA FUNÇÃO QUE VOCÊ QUER
             nova_campanha.id,
             payload.bot_id,
-            payload.mensagem,
-            payload.target,
-            payload.media_url,
-            getattr(payload, 'plano_oferta_id', None)
+            payload # <--- ✅ PASSANDO O OBJETO INTEIRO (RemarketingRequest)
         )
         
         logger.info(f"🚀 Campanha {nova_campanha.id} agendada para background")
@@ -7609,12 +7459,10 @@ async def enviar_remarketing(
         }
         
     except HTTPException:
-        # Re-lançar HTTPExceptions (são erros esperados)
         raise
     except Exception as e:
         logger.error(f"❌ Erro ao criar campanha: {e}")
         raise HTTPException(500, detail=str(e))
-
 
 # --- ROTA DE REENVIO INDIVIDUAL (CORRIGIDA PARA HTML) ---
 @app.post("/api/admin/remarketing/send-individual")
