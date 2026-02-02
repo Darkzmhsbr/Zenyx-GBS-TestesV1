@@ -2932,9 +2932,6 @@ async def gerar_pix_pushinpay(
     except Exception as e:
         logger.error(f"❌ Exceção ao gerar PIX: {e}")
         return None
-
-# --- HELPER: Notificar Admin Principal ---
-# --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
 def notificar_admin_principal(bot_db: BotModel, mensagem: str):
     """
@@ -5627,6 +5624,7 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
     """
     Envia um passo e, se não tiver botão e tiver delay, 
     agenda e envia o PRÓXIMO (ou a oferta) automaticamente.
+    BLINDADA COM HTML EM TODOS OS CENÁRIOS.
     """
     try:
         # 1. Configura botão se houver
@@ -5641,18 +5639,42 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
             callback = f"next_step_{passo_atual.step_order}" if prox else "go_checkout"
             markup_step.add(types.InlineKeyboardButton(text=passo_atual.btn_texto, callback_data=callback))
 
-        # 2. Envia a mensagem deste passo
+        # 2. Envia a mensagem deste passo (AGORA COM HTML ✅)
         sent_msg = None
         if passo_atual.msg_media:
             try:
-                if passo_atual.msg_media.lower().endswith(('.mp4', '.mov')):
-                    sent_msg = bot_temp.send_video(chat_id, passo_atual.msg_media, caption=passo_atual.msg_texto, reply_markup=markup_step if passo_atual.mostrar_botao else None)
+                if passo_atual.msg_media.lower().endswith(('.mp4', '.mov', '.avi')):
+                    sent_msg = bot_temp.send_video(
+                        chat_id, 
+                        passo_atual.msg_media, 
+                        caption=passo_atual.msg_texto, 
+                        reply_markup=markup_step if passo_atual.mostrar_botao else None,
+                        parse_mode="HTML" # 🔥 CORREÇÃO AQUI
+                    )
                 else:
-                    sent_msg = bot_temp.send_photo(chat_id, passo_atual.msg_media, caption=passo_atual.msg_texto, reply_markup=markup_step if passo_atual.mostrar_botao else None)
-            except:
-                sent_msg = bot_temp.send_message(chat_id, passo_atual.msg_texto, reply_markup=markup_step if passo_atual.mostrar_botao else None)
+                    sent_msg = bot_temp.send_photo(
+                        chat_id, 
+                        passo_atual.msg_media, 
+                        caption=passo_atual.msg_texto, 
+                        reply_markup=markup_step if passo_atual.mostrar_botao else None,
+                        parse_mode="HTML" # 🔥 CORREÇÃO AQUI
+                    )
+            except Exception as e_media:
+                logger.error(f"Erro ao enviar mídia passo {passo_atual.step_order}: {e_media}")
+                # Fallback se a mídia falhar: envia texto com HTML
+                sent_msg = bot_temp.send_message(
+                    chat_id, 
+                    passo_atual.msg_texto, 
+                    reply_markup=markup_step if passo_atual.mostrar_botao else None,
+                    parse_mode="HTML" # 🔥 CORREÇÃO AQUI
+                )
         else:
-            sent_msg = bot_temp.send_message(chat_id, passo_atual.msg_texto, reply_markup=markup_step if passo_atual.mostrar_botao else None)
+            sent_msg = bot_temp.send_message(
+                chat_id, 
+                passo_atual.msg_texto, 
+                reply_markup=markup_step if passo_atual.mostrar_botao else None,
+                parse_mode="HTML" # 🔥 CORREÇÃO AQUI
+            )
 
         # 3. Lógica Automática (Sem botão + Delay)
         if not passo_atual.mostrar_botao and passo_atual.delay_seconds > 0:
@@ -5680,12 +5702,6 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
     except Exception as e:
         logger.error(f"Erro no passo automático {passo_atual.step_order}: {e}")
 
-# =========================================================
-# 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
-# =========================================================
-# =========================================================
-# 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
-# =========================================================
 # =========================================================
 # 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
 # =========================================================
@@ -7136,16 +7152,15 @@ def del_step(bot_id: int, sid: int, db: Session = Depends(get_db)):
         db.commit()
     return {"status": "deleted"}
 # =========================================================
-# 🔄 FUNÇÃO DE BACKGROUND (LÓGICA BLINDADA: LEADS vs PEDIDOS)
-# =========================================================
-# =========================================================
 # 🔄 FUNÇÃO DE BACKGROUND (LÓGICA BLINDADA V3: SETS PUROS)
 # =========================================================
 def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: RemarketingRequest):
     """
     Executa o envio em background.
-    LÓGICA CORRIGIDA: Usa matemática de conjuntos (Sets) para evitar erro de coluna.
-    Mantém todos os recursos de Expiração e Config Completa.
+    CORREÇÃO APLICADA: 
+    1. Botão agora aponta para 'promo_{uuid}' (evita automação indesejada).
+    2. Salva 'promo_price' na coluna do banco (corrige o valor do PIX).
+    3. Mantém lógica robusta de seleção de público.
     """
     # 🔥 CRIA NOVA SESSÃO DEDICADA
     db = SessionLocal() 
@@ -7191,7 +7206,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                     elif payload.expiration_mode == "hours": data_expiracao = agora + timedelta(hours=val)
                     elif payload.expiration_mode == "days": data_expiracao = agora + timedelta(days=val)
 
-        # --- C. SELEÇÃO DE PÚBLICO (A CORREÇÃO ESTÁ AQUI!) ---
+        # --- C. SELEÇÃO DE PÚBLICO ---
         bot_sender = telebot.TeleBot(bot_db.token)
         target = str(payload.target).lower().strip()
         lista_final_ids = []
@@ -7204,8 +7219,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 adm = db.query(BotAdmin).filter(BotAdmin.bot_id == bot_id).first()
                 if adm: lista_final_ids = [str(adm.telegram_id).strip()]
         else:
-            # --- LÓGICA DE CONJUNTOS (SEM INTERACTION_COUNT) ---
-            
+            # --- LÓGICA DE CONJUNTOS ---
             # 1. Pega TODOS os Pedidos (Status e ID)
             q_pedidos = db.query(Pedido.telegram_id, Pedido.status).filter(Pedido.bot_id == bot_id).all()
             
@@ -7259,13 +7273,15 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update({"total_leads": len(lista_final_ids)})
         db.commit()
 
-        # --- D. MONTAGEM DA MENSAGEM ---
+        # --- D. MONTAGEM DA MENSAGEM (CORREÇÃO DO BOTÃO) ---
         markup = None
         if plano_db:
             markup = types.InlineKeyboardMarkup()
             preco_txt = f"{preco_final:.2f}".replace('.', ',')
             btn_text = f"🔥 {plano_db.nome_exibicao} - R$ {preco_txt}"
-            cb_data = f"checkout_{plano_db.id}" 
+            
+            # 🔥 CORREÇÃO 1: Aponta para 'promo_', que usa o preço customizado e NÃO ativa remarketing
+            cb_data = f"promo_{uuid_campanha}" 
             markup.add(types.InlineKeyboardButton(btn_text, callback_data=cb_data))
 
         # --- E. ENVIO ---
@@ -7299,7 +7315,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 if "blocked" in err or "kicked" in err or "deactivated" in err or "not found" in err:
                     blocked_count += 1
 
-        # --- F. FINALIZAÇÃO ---
+        # --- F. FINALIZAÇÃO (CORREÇÃO DO PREÇO NO BANCO) ---
         config_completa = {
             "msg": payload.mensagem, "media": payload.media_url,
             "offer": payload.incluir_oferta, "plano_id": payload.plano_oferta_id,
@@ -7316,17 +7332,19 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         
         if plano_db:
             update_data["plano_id"] = plano_db.id
+            # 🔥 CORREÇÃO 2: Salva o preço na coluna 'promo_price' para o handler usar
             update_data["promo_price"] = preco_final
-
+        
         db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update(update_data)
         db.commit()
-        logger.info(f"✅ FINALIZADO: {sent_count} envios")
+
+        logger.info(f"✅ Disparo concluído. Sucesso: {sent_count} | Bloqueados: {blocked_count}")
 
     except Exception as e:
-        logger.error(f"Erro thread remarketing: {e}")
+        logger.error(f"❌ Erro thread remarketing: {e}", exc_info=True)
         try:
-             db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update({"status": "erro"})
-             db.commit()
+            db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update({"status": "erro"})
+            db.commit()
         except: pass
     finally:
         db.close()
@@ -7591,14 +7609,6 @@ def delete_remarketing_history(history_id: int, db: Session = Depends(get_db)):
     db.commit()
     
     return {"status": "ok", "message": "Campanha deletada com sucesso"}
-
-
-# =========================================================
-# 📊 ROTA DE DASHBOARD (KPIs REAIS E CUMULATIVOS)
-# =========================================================
-# =========================================================
-# 📊 ROTA DE DASHBOARD V2 (COM FILTRO DE DATA)
-# =========================================================
 # =========================================================
 # 📊 ROTA DE DASHBOARD V2 (COM FILTRO DE DATA E SUPORTE ADMIN)
 # =========================================================
@@ -7947,10 +7957,6 @@ Toque no link abaixo para entrar no Canal VIP:
         return {"status": "error"}
 
 # ============================================================
-# TRECHO 3: FUNÇÃO "enviar_passo_automatico"
-# ============================================================
-
-# ============================================================
 # TRECHO 3: FUNÇÃO "enviar_passo_automatico" (CORRIGIDA + HTML)
 # ============================================================
 
@@ -8106,13 +8112,6 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
             tb.send_message(cid, txt, reply_markup=mk)
         except:
             pass
-
-# =========================================================
-# 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
-# =========================================================
-# =========================================================
-# 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
-# =========================================================
 # =========================================================
 # 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
 # =========================================================
@@ -9109,10 +9108,6 @@ def promote_user_to_superadmin(
     except Exception as e:
         logger.error(f"Erro ao promover/rebaixar usuário: {e}")
         raise HTTPException(status_code=500, detail="Erro ao alterar status de super-admin")
-
-# =========================================================
-# 🔔 ROTAS DE NOTIFICAÇÕES
-# =========================================================
 # =========================================================
 # 🔔 ROTAS DE NOTIFICAÇÕES (CORRIGIDO)
 # =========================================================
