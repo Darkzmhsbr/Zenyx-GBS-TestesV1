@@ -4406,6 +4406,12 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
         if preco_orig == 0:
             preco_orig = float(data.get("preco_atual", 0.0)) * 2
 
+        # Tratamento do canal de destino (Pega do JSON recebido)
+        # 🔥 CORREÇÃO: Usamos data.get() em vez de plano.id_canal_destino
+        canal_destino = data.get("id_canal_destino")
+        if not canal_destino or str(canal_destino).strip() == "":
+            canal_destino = None
+
         novo_plano = PlanoConfig(
             bot_id=bot_id,
             nome_exibicao=data.get("nome_exibicao", "Novo Plano"),
@@ -4413,8 +4419,8 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
             preco_atual=float(data.get("preco_atual", 0.0)),
             preco_cheio=preco_orig,
             dias_duracao=dias_duracao,
-            is_lifetime=is_lifetime,  # ← NOVO CAMPO
-            id_canal_destino=plano.id_canal_destino, # ✅ AGORA SALVA O CANAL
+            is_lifetime=is_lifetime, 
+            id_canal_destino=canal_destino, # ✅ AGORA SALVA O CANAL CORRETAMENTE
             key_id=f"plan_{bot_id}_{int(time.time())}"
         )
         
@@ -4429,13 +4435,19 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
         logger.warning(f"⚠️ Tentando criar plano sem 'preco_cheio' devido a erro: {te}")
         db.rollback()
         try:
+            # Fallback para criação simples
+            canal_destino = data.get("id_canal_destino")
+            if not canal_destino or str(canal_destino).strip() == "":
+                canal_destino = None
+
             novo_plano_fallback = PlanoConfig(
                 bot_id=bot_id,
                 nome_exibicao=data.get("nome_exibicao"),
                 descricao=data.get("descricao"),
                 preco_atual=float(data.get("preco_atual")),
                 dias_duracao=int(data.get("dias_duracao")),
-                is_lifetime=data.get("is_lifetime", False),  # ← NOVO CAMPO
+                is_lifetime=data.get("is_lifetime", False), 
+                id_canal_destino=canal_destino, # ✅ CORRIGIDO AQUI TAMBÉM
                 key_id=f"plan_{bot_id}_{int(time.time())}"
             )
             db.add(novo_plano_fallback)
@@ -4449,7 +4461,7 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Erro genérico ao criar plano: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 # 3. EDITAR PLANO (ROTA UNIFICADA)
 @app.put("/api/admin/bots/{bot_id}/plans/{plan_id}")
 async def update_plan(
