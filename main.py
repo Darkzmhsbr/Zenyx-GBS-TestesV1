@@ -4645,10 +4645,10 @@ async def update_plan(
         if "descricao" in data:
             plano.descricao = data["descricao"]
             
-        # Nota: Verifica se seu banco usa 'preco' ou 'preco_atual'. 
-        # Mantive conforme seu snippet, mas se der erro, mude para plano.preco
+        # ✅ CORREÇÃO MESTRE CÓDIGO FÁCIL: 
+        # O nome da coluna no banco é 'preco_atual', não 'preco'.
         if "preco_atual" in data:
-            plano.preco = float(data["preco_atual"]) 
+            plano.preco_atual = float(data["preco_atual"]) 
             
         if "dias_duracao" in data:
             plano.dias_duracao = int(data["dias_duracao"])
