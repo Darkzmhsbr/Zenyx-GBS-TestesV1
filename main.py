@@ -6672,7 +6672,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         logger.error(f"Erro no webhook: {e}")
 
     return {"status": "ok"}
-
+    
 # ============================================================
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
@@ -6772,12 +6772,6 @@ async def listar_leads(
         return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
 # ============================================================
-# ROTA 2: ESTATÍSTICAS DO FUNIL
-# ============================================================
-# ============================================================
-# 🔥 ROTA DEFINITIVA: ESTATÍSTICAS DO FUNIL (DEDUPLICAÇÃO REAL)
-# ============================================================
-# ============================================================
 # 🔥 ROTA DEFINITIVA: ESTATÍSTICAS DO FUNIL (CONTTAGEM REAL DE HUMANOS)
 # ============================================================
 @app.get("/api/admin/contacts/funnel-stats")
@@ -6844,22 +6838,6 @@ async def obter_estatisticas_funil(
 
 # ============================================================
 # ROTA 3: ATUALIZAR ROTA DE CONTATOS EXISTENTE
-# ============================================================
-# Procure a rota @app.get("/api/admin/contacts") no seu main.py
-# e SUBSTITUA por esta versão atualizada:
-
-# ============================================================
-# 🔥 ROTA ATUALIZADA: /api/admin/contacts
-# SUBSTITUA a rota existente por esta versão
-# ADICIONA SUPORTE PARA FILTROS: meio, fundo, expirado
-# ============================================================
-
-# ============================================================
-# 🔥 ROTA ATUALIZADA: /api/admin/contacts (CORREÇÃO DE FUSO HORÁRIO)
-# ============================================================
-
-# ============================================================
-# 🔥 ROTA ATUALIZADA: /api/admin/contacts
 # ============================================================
 # ============================================================
 # 🔥 ROTA DE CONTATOS (V4.0 - CORREÇÃO TOTAL DE DUPLICATAS)
@@ -9351,6 +9329,7 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
             "total_revenue": 0.0,
             "active_users": 0
         }
+
 # =========================================================
 # 🚑 MIGRAÇÃO DE EMERGÊNCIA (CORREÇÃO DE COLUNA)
 # =========================================================
@@ -9379,6 +9358,9 @@ def check_and_fix_interaction_count():
         logger.error(f"❌ Erro ao verificar interaction_count: {e}")
 
 # =========================================================
+# 🚀 STARTUP UNIFICADO (FUSION V7 + ORIGINAL)
+# =========================================================
+# =========================================================
 # 🚀 STARTUP UNIFICADO (COM CORREÇÃO DE REMARKETING)
 # =========================================================
 @app.on_event("startup")
@@ -9394,15 +9376,6 @@ async def startup_event():
     # 0. 🚑 CORREÇÃO DE EMERGÊNCIA (REMARKETING)
     # Executa antes de tudo para garantir que a coluna exista
     check_and_fix_interaction_count()
-
-    # 🚑 KIT DE EMERGÊNCIA: CRIA COLUNA MSG_PIX FALTANTE
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS msg_pix TEXT;"))
-            conn.commit()
-            print("✅ SUCESSO: Coluna 'msg_pix' criada ou já existente!")
-    except Exception as e:
-        print(f"⚠️ Aviso de Migração (msg_pix): {e}")
 
     # 1. INICIALIZAR HTTP CLIENT
     try:
@@ -9439,6 +9412,14 @@ async def startup_event():
         from migration_v6 import executar_migracao_v6
         from migration_v7 import executar_migracao_v7
         from migration_audit_logs import executar_migracao_audit_logs
+        # Import da nova migração V8 (criação da msg_pix)
+        try:
+            from migration_v8 import executar_migracao_v8
+        except ImportError:
+            # Caso o arquivo ainda não exista ou tenha outro nome, loga o aviso
+            logger.warning("⚠️ Arquivo migration_v8.py não encontrado (import failed).")
+            executar_migracao_v8 = None
+
 
         try: executar_migracao_v3() 
         except Exception as e: logger.warning(f"⚠️ V3: {e}")
@@ -9456,6 +9437,14 @@ async def startup_event():
             executar_migracao_v7()
             print("✅ Migração V7 (Canais) verificada")
         except Exception as e: logger.warning(f"⚠️ V7: {e}")
+
+        # --- MIGRAÇÃO V8 (MSG PIX) ---
+        if executar_migracao_v8:
+            try:
+                executar_migracao_v8()
+                print("✅ Migração V8 (Msg Pix) verificada")
+            except Exception as e:
+                logger.warning(f"⚠️ V8: {e}")
 
         try: executar_migracao_audit_logs()
         except Exception as e: logger.warning(f"⚠️ AuditLogs: {e}")
@@ -9494,7 +9483,7 @@ async def startup_event():
         logger.error(f"❌ Erro Scheduler: {e}")
 
     print("="*60)
-    print("✅ SISTEMA TOTALMENTE OPERACIONAL (V7)")
+    print("✅ SISTEMA TOTALMENTE OPERACIONAL (V7 + V8)")
     print("="*60)
 
 @app.get("/")
