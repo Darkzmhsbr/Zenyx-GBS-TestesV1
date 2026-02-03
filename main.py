@@ -5697,7 +5697,6 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
 
     except Exception as e:
         logger.error(f"Erro no passo automático {passo_atual.step_order}: {e}")
-
 # =========================================================
 # 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
 # =========================================================
@@ -6088,36 +6087,41 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
                         
                         # -----------------------------------------------------------
-                        # 🎨 MENSAGEM PIX: PERSONALIZADA vs PADRÃO
+                        # 🔥 LÓGICA DE MENSAGEM INTELIGENTE (COM {oferta})
                         # -----------------------------------------------------------
                         flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
                         custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
                         
+                        # 1. Constrói o BLOCO DA OFERTA (Bonito)
+                        if desconto_percentual > 0:
+                            oferta_block = f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                            oferta_block += f"✨ Por apenas: <b>R$ {preco_promo:.2f}</b>\n"
+                            oferta_block += f"📊 Economia: <b>{desconto_percentual}% OFF</b>"
+                        else:
+                            oferta_block = f"💰 Valor: <b>R$ {preco_promo:.2f}</b>"
+
                         msg_pix = ""
-                        
+
                         if custom_msg:
                             # --- MODO PERSONALIZADO ---
+                            # Se o usuário colocou {oferta}, substitui pelo bloco bonito
+                            # Se não, substitui {valor} pelo preço simples
                             val_fmt = f"{preco_promo:.2f}".replace('.', ',')
+                            
                             msg_pix = custom_msg.replace("{nome}", first_name)\
                                                 .replace("{plano}", plano.nome_exibicao)\
-                                                .replace("{valor}", val_fmt)
-                            
+                                                .replace("{valor}", val_fmt)\
+                                                .replace("{oferta}", oferta_block) # 🔥 AQUI ESTÁ O SEGREDO
+
                             if "{qrcode}" in msg_pix:
                                 msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
                             else:
                                 msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                         else:
-                            # --- MODO PADRÃO (BONITO/COMPLETO) ---
+                            # --- MODO PADRÃO (HARDCODED) ---
                             msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
                             msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
-                            
-                            if desconto_percentual > 0:
-                                msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
-                                msg_pix += f"✨ Por apenas: <b>R$ {preco_promo:.2f}</b>\n"
-                                msg_pix += f"📊 Economia: <b>{desconto_percentual}% OFF</b>\n\n"
-                            else:
-                                msg_pix += f"💰 Valor: <b>R$ {preco_promo:.2f}</b>\n\n"
-                            
+                            msg_pix += f"{oferta_block}\n\n" # Usa o bloco bonito
                             msg_pix += f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
                             msg_pix += "👆 Toque na chave PIX para copiar\n"
                             msg_pix += "⚡ Acesso liberado automaticamente!"
@@ -6252,36 +6256,35 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
                         
                         # -----------------------------------------------------------
-                        # 🎨 MENSAGEM PIX: PERSONALIZADA vs PADRÃO
+                        # 🔥 LÓGICA DE MENSAGEM INTELIGENTE (COM {oferta})
                         # -----------------------------------------------------------
                         flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
                         custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
                         
+                        if desconto_percentual > 0:
+                            oferta_block = f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                            oferta_block += f"✨ Por apenas: <b>R$ {valor_final:.2f}</b>\n"
+                            oferta_block += f"📊 Economia: <b>{desconto_percentual}% OFF</b>"
+                        else:
+                            oferta_block = f"💰 Valor: <b>R$ {valor_final:.2f}</b>"
+
                         msg_pix = ""
                         
                         if custom_msg:
-                            # --- MODO PERSONALIZADO ---
                             val_fmt = f"{valor_final:.2f}".replace('.', ',')
                             msg_pix = custom_msg.replace("{nome}", first_name)\
                                                 .replace("{plano}", plano.nome_exibicao)\
-                                                .replace("{valor}", val_fmt)
+                                                .replace("{valor}", val_fmt)\
+                                                .replace("{oferta}", oferta_block)
                             
                             if "{qrcode}" in msg_pix:
                                 msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
                             else:
                                 msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                         else:
-                            # --- MODO PADRÃO (BONITO/COMPLETO) ---
                             msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
                             msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
-                            
-                            if desconto_percentual > 0:
-                                msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
-                                msg_pix += f"✨ Por apenas: <b>R$ {valor_final:.2f}</b>\n"
-                                msg_pix += f"📊 Economia: <b>{desconto_percentual}% OFF</b>\n\n"
-                            else:
-                                msg_pix += f"💰 Valor: <b>R$ {valor_final:.2f}</b>\n\n"
-                            
+                            msg_pix += f"{oferta_block}\n\n"
                             msg_pix += f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
                             msg_pix += "👆 Toque na chave PIX para copiar\n"
                             msg_pix += "⚡ Acesso liberado automaticamente!"
@@ -6387,13 +6390,15 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
                         
                         msg_pix = ""
+                        val_fmt = f"{plano.preco_atual:.2f}".replace('.', ',')
                         
                         if custom_msg:
-                            # --- MODO PERSONALIZADO ---
-                            val_fmt = f"{plano.preco_atual:.2f}".replace('.', ',')
+                            # Aqui {oferta} é igual a {valor} porque não tem desconto
+                            oferta_simple = f"💰 Valor: <b>R$ {val_fmt}</b>"
                             msg_pix = custom_msg.replace("{nome}", first_name)\
                                                 .replace("{plano}", plano.nome_exibicao)\
-                                                .replace("{valor}", val_fmt)
+                                                .replace("{valor}", val_fmt)\
+                                                .replace("{oferta}", oferta_simple)
                             
                             if "{qrcode}" in msg_pix:
                                 msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
@@ -6404,7 +6409,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             msg_pix = (
                                 f"🌟 Seu pagamento foi gerado:\n"
                                 f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
-                                f"💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>\n"
+                                f"💰 Valor: <b>R$ {val_fmt}</b>\n"
                                 f"🔐 Pix Copia e Cola:\n\n"
                                 f"<pre>{qr}</pre>\n\n"
                                 f"👆 Toque na chave PIX para copiar\n"
@@ -6491,13 +6496,15 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
                     
                     msg_pix = ""
+                    val_fmt = f"{valor_final:.2f}".replace('.', ',')
                     
                     if custom_msg:
                         # --- MODO PERSONALIZADO ---
-                        val_fmt = f"{valor_final:.2f}".replace('.', ',')
+                        oferta_simple = f"💰 Valor: <b>R$ {val_fmt}</b>"
                         msg_pix = custom_msg.replace("{nome}", first_name)\
                                             .replace("{plano}", nome_final)\
-                                            .replace("{valor}", val_fmt)
+                                            .replace("{valor}", val_fmt)\
+                                            .replace("{oferta}", oferta_simple)
                         
                         if "{qrcode}" in msg_pix:
                             msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
@@ -6508,7 +6515,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         msg_pix = (
                             f"🌟 Pagamento gerado:\n"
                             f"🎁 Plano: <b>{nome_final}</b>\n"
-                            f"💰 Valor: <b>R$ {valor_final:.2f}</b>\n"
+                            f"💰 Valor: <b>R$ {val_fmt}</b>\n"
                             f"🔐 Pix Copia e Cola:\n\n"
                             f"<pre>{qr}</pre>\n\n"
                             f"👆 Toque para copiar\n"
@@ -6620,20 +6627,29 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
                         # -----------------------------------------------------------
-                        # 🎨 MENSAGEM PIX: PERSONALIZADA vs PADRÃO
+                        # 🔥 LÓGICA DE MENSAGEM INTELIGENTE (COM {oferta})
                         # -----------------------------------------------------------
                         flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
                         custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
                         
+                        # 1. Constrói o BLOCO DA OFERTA (Bonito)
+                        if desconto_percentual > 0:
+                            oferta_block = f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                            oferta_block += f"✨ Por apenas: <b>R$ {preco_final:.2f}</b>\n"
+                            oferta_block += f"📉 Economia: <b>{desconto_percentual}% OFF</b>"
+                        else:
+                            oferta_block = f"💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>"
+
                         msg_pix = ""
-                        
+
                         if custom_msg:
                             # --- MODO PERSONALIZADO ---
                             val_fmt = f"{preco_final:.2f}".replace('.', ',')
                             msg_pix = custom_msg.replace("{nome}", first_name)\
                                                 .replace("{plano}", plano.nome_exibicao)\
-                                                .replace("{valor}", val_fmt)
-                            
+                                                .replace("{valor}", val_fmt)\
+                                                .replace("{oferta}", oferta_block)
+
                             if "{qrcode}" in msg_pix:
                                 msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
                             else:
@@ -6642,14 +6658,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             # --- MODO PADRÃO (ANTIGO) ---
                             msg_pix = f"🔥 <b>OFERTA ATIVADA!</b>\n\n"
                             msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
-                            
-                            if desconto_percentual > 0:
-                                msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
-                                msg_pix += f"✨ Por: <b>R$ {preco_final:.2f}</b>\n"
-                                msg_pix += f"📉 Economia: <b>{desconto_percentual}% OFF</b>\n"
-                            else:
-                                msg_pix += f"💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>\n"
-                            
+                            msg_pix += f"{oferta_block}\n"
                             msg_pix += f"\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
 
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
