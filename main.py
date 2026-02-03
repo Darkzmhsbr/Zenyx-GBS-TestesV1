@@ -4653,6 +4653,9 @@ def atualizar_plano(
 # =========================================================
 # 💬 FLUXO DO BOT (V2)
 # =========================================================
+# =========================================================
+# 💬 FLUXO DO BOT (V2)
+# =========================================================
 @app.get("/api/admin/bots/{bot_id}/flow")
 def obter_fluxo(
     bot_id: int, 
@@ -4678,7 +4681,8 @@ def obter_fluxo(
             "mostrar_planos_1": False,
             "start_mode": "padrao",
             "miniapp_url": "",
-            "miniapp_btn_text": "ABRIR LOJA"
+            "miniapp_btn_text": "ABRIR LOJA",
+            "msg_pix": ""  # 🔥 NOVO CAMPO: Retorna vazio se não tiver para o frontend tratar
         }
     
     return fluxo
@@ -4695,6 +4699,8 @@ class FlowUpdate(BaseModel):
     start_mode: Optional[str] = "padrao"
     miniapp_url: Optional[str] = None
     miniapp_btn_text: Optional[str] = None
+    msg_pix: Optional[str] = None  # 🔥 NOVO CAMPO PARA O PIX
+    steps: Optional[List[dict]] = None # 🔥 IMPORTANTE: Aceitar os passos extras
 
 @app.post("/api/admin/bots/{bot_id}/flow")
 def salvar_fluxo(
@@ -4728,6 +4734,32 @@ def salvar_fluxo(
     if flow.miniapp_url is not None: fluxo_db.miniapp_url = flow.miniapp_url
     if flow.miniapp_btn_text: fluxo_db.miniapp_btn_text = flow.miniapp_btn_text
     
+    # 🔥 ATUALIZA MENSAGEM DO PIX
+    if flow.msg_pix is not None: fluxo_db.msg_pix = flow.msg_pix
+
+    # 🔥 ATUALIZA PASSOS EXTRAS (STEPS) - Fundamental para o ChatFlow funcionar completo
+    if flow.steps is not None:
+        # Remove passos antigos
+        db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).delete()
+        
+        # Adiciona novos passos
+        novos_passos = []
+        for i, s in enumerate(flow.steps):
+            novo = BotFlowStep(
+                bot_id=bot_id,
+                step_order=i + 1,
+                msg_texto=s.get('msg_texto'),
+                msg_media=s.get('msg_media'),
+                btn_texto=s.get('btn_texto'),
+                autodestruir=s.get('autodestruir', False),
+                mostrar_botao=s.get('mostrar_botao', True),
+                delay_seconds=s.get('delay_seconds', 0)
+            )
+            novos_passos.append(novo)
+        
+        if novos_passos:
+            db.add_all(novos_passos)
+
     db.commit()
     
     logger.info(f"💾 Fluxo do Bot {bot_id} salvo com sucesso (Owner: {current_user.username})")
@@ -4736,43 +4768,6 @@ def salvar_fluxo(
 
 # =========================================================
 # 🔗 ROTAS DE TRACKING (RASTREAMENTO)
-# =========================================================
-# =========================================================
-# 🔗 ROTAS DE TRACKING (RASTREAMENTO) - VERSÃO CORRIGIDA
-# =========================================================
-# ⚠️ SUBSTITUIR AS LINHAS 2468-2553 DO SEU main.py POR ESTE CÓDIGO
-# =========================================================
-
-# =========================================================
-# 🔗 ROTAS DE TRACKING (RASTREAMENTO) - VERSÃO FINAL CORRIGIDA
-# =========================================================
-
-# =========================================================
-# 🎯 RASTREAMENTO (TRACKING) - BLINDADO E ISOLADO V2 (ASYNC)
-# =========================================================
-
-# --- 1. PASTAS (FOLDERS) ---
-
-# =========================================================
-# 🎯 RASTREAMENTO (TRACKING) - CORRIGIDO (SEM OWNER_ID)
-# =========================================================
-
-# --- 1. PASTAS (FOLDERS) ---
-
-# =========================================================
-# 🎯 RASTREAMENTO (TRACKING) - VERSÃO PERMISSIVA (VISUALIZAÇÃO IMEDIATA)
-# =========================================================
-
-# --- 1. PASTAS (FOLDERS) ---
-
-# =========================================================
-# 🎯 RASTREAMENTO (TRACKING) - V4 (MODO CHEFE SUPREMO)
-# =========================================================
-
-# --- 1. PASTAS (FOLDERS) ---
-
-# =========================================================
-# 🎯 RASTREAMENTO (TRACKING) - V5 (VISÃO LIMPA PARA ADMIN)
 # =========================================================
 
 # --- 1. PASTAS (FOLDERS) ---
@@ -6672,7 +6667,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         logger.error(f"Erro no webhook: {e}")
 
     return {"status": "ok"}
-    
+
 # ============================================================
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
