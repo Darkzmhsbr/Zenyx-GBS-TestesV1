@@ -5706,6 +5706,9 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
 # =========================================================
 # 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
 # =========================================================
+# =========================================================
+# 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
+# =========================================================
 @app.post("/webhook/{token}")
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
     if token == "pix": return {"status": "ignored"}
@@ -6089,19 +6092,40 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
                         
-                        msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
-                        msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                        # -----------------------------------------------------------
+                        # 🎨 MENSAGEM PIX: PERSONALIZADA vs PADRÃO
+                        # -----------------------------------------------------------
+                        flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
+                        custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
                         
-                        if desconto_percentual > 0:
-                            msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
-                            msg_pix += f"✨ Por apenas: <b>R$ {preco_promo:.2f}</b>\n"
-                            msg_pix += f"📊 Economia: <b>{desconto_percentual}% OFF</b>\n\n"
+                        msg_pix = ""
+                        
+                        if custom_msg:
+                            # --- MODO PERSONALIZADO ---
+                            val_fmt = f"{preco_promo:.2f}".replace('.', ',')
+                            msg_pix = custom_msg.replace("{nome}", first_name)\
+                                                .replace("{plano}", plano.nome_exibicao)\
+                                                .replace("{valor}", val_fmt)
+                            
+                            if "{qrcode}" in msg_pix:
+                                msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                            else:
+                                msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                         else:
-                            msg_pix += f"💰 Valor: <b>R$ {preco_promo:.2f}</b>\n\n"
-                        
-                        msg_pix += f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
-                        msg_pix += "👆 Toque na chave PIX para copiar\n"
-                        msg_pix += "⚡ Acesso liberado automaticamente!"
+                            # --- MODO PADRÃO (ANTIGO - PRESERVADO) ---
+                            msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
+                            msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                            
+                            if desconto_percentual > 0:
+                                msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                                msg_pix += f"✨ Por apenas: <b>R$ {preco_promo:.2f}</b>\n"
+                                msg_pix += f"📊 Economia: <b>{desconto_percentual}% OFF</b>\n\n"
+                            else:
+                                msg_pix += f"💰 Valor: <b>R$ {preco_promo:.2f}</b>\n\n"
+                            
+                            msg_pix += f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                            msg_pix += "👆 Toque na chave PIX para copiar\n"
+                            msg_pix += "⚡ Acesso liberado automaticamente!"
                         
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                         
@@ -6138,7 +6162,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     # ==============================================================================
                     # 💣 CORREÇÃO MESTRE: AUTO-DESTRUIÇÃO APÓS CLIQUE (Bulletproof)
                     # ==============================================================================
-                    # Verifica se a função e o dicionário existem na memória
                     if (remarketing_cfg and 
                         remarketing_cfg.auto_destruct_enabled and 
                         remarketing_cfg.auto_destruct_after_click and
@@ -6146,7 +6169,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         
                         dict_pendente = enviar_remarketing_automatico.pending_destructions
                         
-                        # Tenta encontrar a chave tanto como INT quanto como STR (O Grande Pulo do Gato 🐱)
                         dados_destruicao = dict_pendente.get(chat_id) or dict_pendente.get(str(chat_id))
                         
                         if dados_destruicao:
@@ -6154,7 +6176,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             
                             msg_id_to_del = dados_destruicao.get('message_id')
                             btns_id_to_del = dados_destruicao.get('buttons_message_id')
-                            # Usamos bot_temp (atual) ao invés do salvo, pois é mais seguro
                             tempo_para_explodir = dados_destruicao.get('destruct_seconds', 5)
                             
                             def auto_delete_after_click():
@@ -6167,18 +6188,13 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 except Exception as e:
                                     logger.warning(f"⚠️ Falha ao deletar msg após clique (já deletada?): {e}")
 
-                            # Dispara a thread de destruição
                             threading.Thread(target=auto_delete_after_click, daemon=True).start()
                             
-                            # Remove do dicionário para liberar memória (Remove ambas as versões da chave por garantia)
                             if chat_id in dict_pendente: del dict_pendente[chat_id]
                             if str(chat_id) in dict_pendente: del dict_pendente[str(chat_id)]
                         else:
-                            # Debug caso não encontre (útil para logs)
                             logger.warning(f"⚠️ Clique detectado, mas não achei agendamento para {chat_id} (Restartou o servidor?)")
 
-                    # ==============================================================================
-                    # FIM DA CORREÇÃO
                     # ==============================================================================
                     
                     # Gera PIX com valor promocional
@@ -6240,25 +6256,45 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
                         
-                        msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
-                        msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                        # -----------------------------------------------------------
+                        # 🎨 MENSAGEM PIX: PERSONALIZADA vs PADRÃO
+                        # -----------------------------------------------------------
+                        flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
+                        custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
                         
-                        if desconto_percentual > 0:
-                            msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
-                            msg_pix += f"✨ Por apenas: <b>R$ {valor_final:.2f}</b>\n"
-                            msg_pix += f"📊 Economia: <b>{desconto_percentual}% OFF</b>\n\n"
+                        msg_pix = ""
+                        
+                        if custom_msg:
+                            # --- MODO PERSONALIZADO ---
+                            val_fmt = f"{valor_final:.2f}".replace('.', ',')
+                            msg_pix = custom_msg.replace("{nome}", first_name)\
+                                                .replace("{plano}", plano.nome_exibicao)\
+                                                .replace("{valor}", val_fmt)
+                            
+                            if "{qrcode}" in msg_pix:
+                                msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                            else:
+                                msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                         else:
-                            msg_pix += f"💰 Valor: <b>R$ {valor_final:.2f}</b>\n\n"
-                        
-                        msg_pix += f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
-                        msg_pix += "👆 Toque na chave PIX para copiar\n"
-                        msg_pix += "⚡ Acesso liberado automaticamente!"
+                            # --- MODO PADRÃO (ANTIGO - PRESERVADO) ---
+                            msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
+                            msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                            
+                            if desconto_percentual > 0:
+                                msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                                msg_pix += f"✨ Por apenas: <b>R$ {valor_final:.2f}</b>\n"
+                                msg_pix += f"📊 Economia: <b>{desconto_percentual}% OFF</b>\n\n"
+                            else:
+                                msg_pix += f"💰 Valor: <b>R$ {valor_final:.2f}</b>\n\n"
+                            
+                            msg_pix += f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                            msg_pix += "👆 Toque na chave PIX para copiar\n"
+                            msg_pix += "⚡ Acesso liberado automaticamente!"
                         
                         # Inicia mensagens alternantes NOVAMENTE após clicar
                         alternar_mensagens_pagamento(bot_temp, chat_id, bot_db.id)
                         
                         # Agenda remarketing novamente (se configurado)
-                        # MESTRE OBS: Se quiser evitar loop infinito, remova ou condicione essa linha abaixo
                         agendar_remarketing_automatico(bot_temp, chat_id, bot_db.id)
                         
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
@@ -6349,15 +6385,36 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
 
-                        msg_pix = (
-                            f"🌟 Seu pagamento foi gerado:\n"
-                            f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
-                            f"💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>\n"
-                            f"🔐 Pix Copia e Cola:\n\n"
-                            f"<pre>{qr}</pre>\n\n"
-                            f"👆 Toque na chave PIX para copiar\n"
-                            f"⚡ Acesso liberado automaticamente!"
-                        )
+                        # -----------------------------------------------------------
+                        # 🎨 MENSAGEM PIX: PERSONALIZADA vs PADRÃO
+                        # -----------------------------------------------------------
+                        flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
+                        custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
+                        
+                        msg_pix = ""
+                        
+                        if custom_msg:
+                            # --- MODO PERSONALIZADO ---
+                            val_fmt = f"{plano.preco_atual:.2f}".replace('.', ',')
+                            msg_pix = custom_msg.replace("{nome}", first_name)\
+                                                .replace("{plano}", plano.nome_exibicao)\
+                                                .replace("{valor}", val_fmt)
+                            
+                            if "{qrcode}" in msg_pix:
+                                msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                            else:
+                                msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
+                        else:
+                            # --- MODO PADRÃO (ANTIGO - PRESERVADO) ---
+                            msg_pix = (
+                                f"🌟 Seu pagamento foi gerado:\n"
+                                f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                                f"💰 Valor: <b>R$ {plano.preco_atual:.2f}</b>\n"
+                                f"🔐 Pix Copia e Cola:\n\n"
+                                f"<pre>{qr}</pre>\n\n"
+                                f"👆 Toque na chave PIX para copiar\n"
+                                f"⚡ Acesso liberado automaticamente!"
+                            )
                         
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                         
@@ -6432,60 +6489,73 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     markup_pix = types.InlineKeyboardMarkup()
                     markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
 
-                    msg_pix = (
-                        f"🌟 Pagamento gerado:\n"
-                        f"🎁 Plano: <b>{nome_final}</b>\n"
-                        f"💰 Valor: <b>R$ {valor_final:.2f}</b>\n"
-                        f"🔐 Pix Copia e Cola:\n\n"
-                        f"<pre>{qr}</pre>\n\n"
-                        f"👆 Toque para copiar\n"
-                        f"⚡ Acesso automático!"
-                    )
+                    # -----------------------------------------------------------
+                    # 🎨 MENSAGEM PIX (BUMP): PERSONALIZADA vs PADRÃO
+                    # -----------------------------------------------------------
+                    flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
+                    custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
+                    
+                    msg_pix = ""
+                    
+                    if custom_msg:
+                        # --- MODO PERSONALIZADO ---
+                        val_fmt = f"{valor_final:.2f}".replace('.', ',')
+                        msg_pix = custom_msg.replace("{nome}", first_name)\
+                                            .replace("{plano}", nome_final)\
+                                            .replace("{valor}", val_fmt)
+                        
+                        if "{qrcode}" in msg_pix:
+                            msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                        else:
+                            msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
+                    else:
+                        # --- MODO PADRÃO (ANTIGO - PRESERVADO) ---
+                        msg_pix = (
+                            f"🌟 Pagamento gerado:\n"
+                            f"🎁 Plano: <b>{nome_final}</b>\n"
+                            f"💰 Valor: <b>R$ {valor_final:.2f}</b>\n"
+                            f"🔐 Pix Copia e Cola:\n\n"
+                            f"<pre>{qr}</pre>\n\n"
+                            f"👆 Toque para copiar\n"
+                            f"⚡ Acesso automático!"
+                        )
 
                     bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                     
                 else:
                     bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
-            # --- D) PROMO (Campanhas Manuais / Antigas) ---
-           # --- D) PROMO (Campanhas Manuais) - LÓGICA BLINDADA ---
+            # --- D) PROMO (Campanhas Manuais) - LÓGICA BLINDADA ---
             elif data.startswith("promo_"):
                 try:
-                    # 1. Extração do UUID
                     try: 
                         campanha_uuid = data.split("_")[1]
                     except: 
                         campanha_uuid = ""
                     
-                    # 2. Busca a Campanha
                     campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.campaign_id == campanha_uuid).first()
                     
-                    # 3. Validações de Existência e Data
                     if not campanha:
                         bot_temp.send_message(chat_id, "❌ Oferta não encontrada ou link inválido.")
                         return {"status": "error"}
                     
-                    # Verifica expiração (se o campo existir no banco)
                     if hasattr(campanha, 'expiration_at') and campanha.expiration_at:
                         if datetime.utcnow() > campanha.expiration_at:
                             bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
                             return {"status": "expired"}
                     
-                    # 4. Busca o Plano
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
                     
                     if not plano:
                         bot_temp.send_message(chat_id, "❌ O plano desta oferta não existe mais.")
                         return {"status": "error"}
 
-                    # 5. Define Preço
-                    # Tenta pegar promo_price se existir na tabela, senão usa o do plano
+                    # Define Preço (Custom ou Original)
                     preco_final = float(plano.preco_atual)
                     if hasattr(campanha, 'promo_price') and campanha.promo_price:
                         if campanha.promo_price > 0:
                             preco_final = float(campanha.promo_price)
                     
-                    # 6. Calcula desconto visual
                     desconto_percentual = 0
                     if plano.preco_atual > preco_final:
                         try:
@@ -6497,8 +6567,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     mytx = str(uuid.uuid4())
                     
-                    # 7. Geração do PIX (Async)
                     try:
+                        # 🔥 NÃO REINICIA O CICLO DE REMARKETING
                         pix = await gerar_pix_pushinpay(
                             valor_float=preco_final,
                             transaction_id=mytx,
@@ -6518,29 +6588,23 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
                         txid = str(pix.get('id') or mytx).lower()
                         
-                        # Salva o pedido
                         novo_pedido = Pedido(
                             bot_id=bot_db.id, 
                             telegram_id=str(chat_id), 
                             first_name=first_name, 
-                            username=username,
+                            username=username, 
                             plano_nome=f"{plano.nome_exibicao} (OFERTA)", 
                             plano_id=plano.id, 
-                            valor=preco_final,
+                            valor=preco_final, 
                             transaction_id=txid, 
                             qr_code=qr, 
                             status="pending", 
                             tem_order_bump=False, 
-                            created_at=datetime.utcnow(),
+                            created_at=datetime.utcnow(), 
                             tracking_id=None 
                         )
                         db.add(novo_pedido)
                         
-                        # ======================================================================
-                        # 🚨 CORREÇÃO DO ERRO 'CLICKS' 🚨
-                        # Verificamos se a coluna EXISTE antes de tentar somar.
-                        # Se não existir, apenas logamos um aviso e CONTINUAMOS o fluxo.
-                        # ======================================================================
                         try:
                             if hasattr(campanha, 'clicks'):
                                 if campanha.clicks is None:
@@ -6553,7 +6617,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             logger.warning(f"⚠️ Erro não fatal ao contar clique: {e_click}")
                         
                         db.commit()
-                        # ======================================================================
                         
                         try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                         except: pass
@@ -6561,17 +6624,38 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
-                        msg_pix = f"🔥 <b>OFERTA ATIVADA!</b>\n\n"
-                        msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                        # -----------------------------------------------------------
+                        # 🎨 MENSAGEM PIX: PERSONALIZADA vs PADRÃO
+                        # -----------------------------------------------------------
+                        flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
+                        custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
                         
-                        if desconto_percentual > 0:
-                            msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
-                            msg_pix += f"✨ Por: <b>R$ {preco_final:.2f}</b>\n"
-                            msg_pix += f"📉 Economia: <b>{desconto_percentual}% OFF</b>\n"
-                        else:
-                            msg_pix += f"💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>\n"
+                        msg_pix = ""
+                        
+                        if custom_msg:
+                            # --- MODO PERSONALIZADO ---
+                            val_fmt = f"{preco_final:.2f}".replace('.', ',')
+                            msg_pix = custom_msg.replace("{nome}", first_name)\
+                                                .replace("{plano}", plano.nome_exibicao)\
+                                                .replace("{valor}", val_fmt)
                             
-                        msg_pix += f"\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
+                            if "{qrcode}" in msg_pix:
+                                msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                            else:
+                                msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
+                        else:
+                            # --- MODO PADRÃO (ANTIGO - PRESERVADO) ---
+                            msg_pix = f"🔥 <b>OFERTA ATIVADA!</b>\n\n"
+                            msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                            
+                            if desconto_percentual > 0:
+                                msg_pix += f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                                msg_pix += f"✨ Por: <b>R$ {preco_final:.2f}</b>\n"
+                                msg_pix += f"📉 Economia: <b>{desconto_percentual}% OFF</b>\n"
+                            else:
+                                msg_pix += f"💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>\n"
+                            
+                            msg_pix += f"\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
 
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                     else:
@@ -9267,7 +9351,6 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
             "total_revenue": 0.0,
             "active_users": 0
         }
-
 # =========================================================
 # 🚑 MIGRAÇÃO DE EMERGÊNCIA (CORREÇÃO DE COLUNA)
 # =========================================================
@@ -9296,9 +9379,6 @@ def check_and_fix_interaction_count():
         logger.error(f"❌ Erro ao verificar interaction_count: {e}")
 
 # =========================================================
-# 🚀 STARTUP UNIFICADO (FUSION V7 + ORIGINAL)
-# =========================================================
-# =========================================================
 # 🚀 STARTUP UNIFICADO (COM CORREÇÃO DE REMARKETING)
 # =========================================================
 @app.on_event("startup")
@@ -9314,6 +9394,15 @@ async def startup_event():
     # 0. 🚑 CORREÇÃO DE EMERGÊNCIA (REMARKETING)
     # Executa antes de tudo para garantir que a coluna exista
     check_and_fix_interaction_count()
+
+    # 🚑 KIT DE EMERGÊNCIA: CRIA COLUNA MSG_PIX FALTANTE
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS msg_pix TEXT;"))
+            conn.commit()
+            print("✅ SUCESSO: Coluna 'msg_pix' criada ou já existente!")
+    except Exception as e:
+        print(f"⚠️ Aviso de Migração (msg_pix): {e}")
 
     # 1. INICIALIZAR HTTP CLIENT
     try:
