@@ -6109,7 +6109,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             else:
                                 msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                         else:
-                            # --- MODO PADRÃO (ANTIGO) ---
+                            # --- MODO PADRÃO (ANTIGO - PRESERVADO) ---
                             msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
                             msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
                             
@@ -6273,7 +6273,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             else:
                                 msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                         else:
-                            # --- MODO PADRÃO (ANTIGO) ---
+                            # --- MODO PADRÃO (ANTIGO - PRESERVADO) ---
                             msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
                             msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
                             
@@ -6402,7 +6402,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             else:
                                 msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                         else:
-                            # --- MODO PADRÃO (ANTIGO) ---
+                            # --- MODO PADRÃO (ANTIGO - PRESERVADO) ---
                             msg_pix = (
                                 f"🌟 Seu pagamento foi gerado:\n"
                                 f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
@@ -6506,7 +6506,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         else:
                             msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                     else:
-                        # --- MODO PADRÃO (ANTIGO) ---
+                        # --- MODO PADRÃO (ANTIGO - PRESERVADO) ---
                         msg_pix = (
                             f"🌟 Pagamento gerado:\n"
                             f"🎁 Plano: <b>{nome_final}</b>\n"
@@ -6641,7 +6641,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             else:
                                 msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                         else:
-                            # --- MODO PADRÃO (ANTIGO) ---
+                            # --- MODO PADRÃO (ANTIGO - PRESERVADO) ---
                             msg_pix = f"🔥 <b>OFERTA ATIVADA!</b>\n\n"
                             msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
                             
