@@ -6001,15 +6001,49 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
 
-            # --- A) NAVEGAÇÃO (step_) COM CORREÇÃO ---
+            # --- A) NAVEGAÇÃO (step_) COM AUTO-DESTRUIÇÃO INTELIGENTE ---
             if data.startswith("step_"):
                 try: current_step = int(data.split("_")[1])
                 except: current_step = 1
                 
+                # Carrega todos os passos
                 steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_db.id).order_by(BotFlowStep.step_order).all()
                 target_step = None
                 is_last = False
                 
+                # ==============================================================================
+                # 🗑️ GUILHOTINA: LÓGICA DE LIMPEZA IMEDIATA AO CLICAR
+                # ==============================================================================
+                msg_anterior_id = update.callback_query.message.message_id
+                
+                # CASO 1: O usuário clicou no botão da MENSAGEM DE BOAS VINDAS (indo para o passo 1)
+                if current_step == 1:
+                    # Como a mensagem de boas-vindas não é um "Passo" no banco, assumimos que
+                    # se tem botão levando ao passo 1, ela deve ser limpa para dar foco.
+                    try: 
+                        bot_temp.delete_message(chat_id, msg_anterior_id)
+                        logger.info(f"🗑️ Mensagem de Boas-Vindas deletada IMEDIATAMENTE após clique.")
+                    except Exception as e: 
+                        # Pode falhar se o timer paralelo deletou milissegundos antes, ignoramos.
+                        pass
+
+                # CASO 2: O usuário clicou em um PASSO DO FLUXO (indo para 2, 3...)
+                elif current_step > 1:
+                    # Verifica se o passo ANTERIOR (que o usuário acabou de ler) tinha autodestruir ligado
+                    # Matematica: Se vou pro passo 2 (index 1), o anterior foi o passo 1 (index 0).
+                    # Index do anterior = current_step - 2
+                    prev_index = current_step - 2
+                    
+                    if prev_index >= 0 and prev_index < len(steps):
+                        passo_anterior = steps[prev_index]
+                        if passo_anterior.autodestruir:
+                            try:
+                                bot_temp.delete_message(chat_id, msg_anterior_id)
+                                logger.info(f"🗑️ Passo {passo_anterior.step_order} deletado IMEDIATAMENTE após clique.")
+                            except: pass
+                # ==============================================================================
+
+                # Define qual é o PRÓXIMO passo a ser enviado
                 if current_step <= len(steps): target_step = steps[current_step - 1]
                 else: is_last = True
 
@@ -6028,18 +6062,24 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         else:
                             sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto, reply_markup=mk, parse_mode="HTML")
                     except:
+                        # Fallback caso falhe HTML ou Mídia
                         sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk)
 
-                    # 🔥 CORREÇÃO APLICADA AQUI TAMBÉM (Auto-Destruição no Clique Manual)
+                    # --- TIMER DE SEGURANÇA (BACKUP) ---
+                    # Agenda destruição para caso o usuário NÃO CLIQUE no botão e abandone o chat.
+                    # Se ele clicar, a "Guilhotina" acima deleta antes do timer, e o timer só falha silenciosamente depois.
                     if sent_msg and target_step.autodestruir:
-                        # Usa o delay do passo ou 10s padrão
-                        tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 10
+                        # Se tiver delay configurado, usa ele. Se não, dá 20 segundos de leitura "segura".
+                        tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 20
                         agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
 
-                    # Lógica de Delay para pular automaticamente (se não tiver botão)
-                    if not target_step.mostrar_botao and target_step.delay_seconds > 0:
-                        time.sleep(target_step.delay_seconds)
-                        # Chama o próximo recursivamente
+                    # Lógica de Navegação Automática (Recursividade para passos SEM botão)
+                    if not target_step.mostrar_botao:
+                        # Se não tem botão, usamos o delay para ditar o ritmo
+                        delay = target_step.delay_seconds if target_step.delay_seconds > 0 else 0
+                        if delay > 0: time.sleep(delay)
+                        
+                        # Chama o próximo
                         prox = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_db.id, BotFlowStep.step_order == target_step.step_order + 1).first()
                         if prox: enviar_passo_automatico(bot_temp, chat_id, prox, bot_db, db)
                         else: enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
@@ -8197,7 +8237,7 @@ def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
             
     except Exception as e:
         logger.error(f"❌ [BOT {bot_db.id}] Erro crítico passo automático: {e}")
-        
+
 # =========================================================
 # 📤 FUNÇÃO AUXILIAR: ENVIAR OFERTA FINAL (CORRIGIDA)
 # =========================================================
