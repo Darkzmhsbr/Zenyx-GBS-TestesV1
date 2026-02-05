@@ -69,6 +69,27 @@ from database import (
 
 import update_db 
 
+# ============================================================
+# NOVA FUNÇÃO: AGENDAMENTO DE AUTO-DESTRUIÇÃO (SEM TRAVAR)
+# ============================================================
+def agendar_destruicao_msg(bot, chat_id, message_id, delay_seconds=5):
+    """
+    Agenda a exclusão de uma mensagem em uma thread separada para não travar o bot.
+    """
+    if delay_seconds <= 0: return
+
+    def tarefa_destruir():
+        time.sleep(delay_seconds)
+        try:
+            bot.delete_message(chat_id, message_id)
+            logger.info(f"💣 Mensagem {message_id} destruída com sucesso.")
+        except Exception as e:
+            # Ignora erro se a mensagem já foi deletada ou não existe mais
+            pass
+
+    # Inicia o timer em paralelo
+    threading.Thread(target=tarefa_destruir, daemon=True).start()
+
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -5937,22 +5958,30 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     else: 
                         mk.add(types.InlineKeyboardButton(flow.btn_text_1 if flow else "Ver Conteúdo", callback_data="step_1"))
 
-                # 🔥 BLOCO DE ENVIO COM LOG DE ERRO REAL
+                # 🔥 BLOCO DE ENVIO COM LOG E CORREÇÃO DE AUTO-DESTRUIÇÃO
                 try:
                     logger.info(f"📤 Tentando enviar menu para {chat_id}...")
+                    sent_msg_start = None
+                    
                     if media:
                         if media.endswith(('.mp4', '.mov')): 
-                            bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
+                            sent_msg_start = bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
                         else: 
-                            bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
+                            sent_msg_start = bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
                     else: 
-                        bot_temp.send_message(chat_id, msg_txt, reply_markup=mk, parse_mode="HTML")
+                        sent_msg_start = bot_temp.send_message(chat_id, msg_txt, reply_markup=mk, parse_mode="HTML")
                     
                     logger.info("✅ Menu enviado com sucesso!")
 
+                    # 🔥 CORREÇÃO: Verifica se deve auto-destruir a mensagem de START
+                    # (Como não tem campo específico no banco para start, deixei comentado a chamada.
+                    # Se quiser ativar, basta descomentar a linha abaixo)
+                    if sent_msg_start:
+                        # agendar_destruicao_msg(bot_temp, chat_id, sent_msg_start.message_id, 60) 
+                        pass
+
                 except Exception as e_envio:
-                    logger.error(f"❌ ERRO AO ENVIAR MENSAGEM: {e_envio}")
-                    # Tenta fallback sem HTML
+                    logger.error(f"❌ ERRO AO ENVIAR MENSAGEM START: {e_envio}")
                     try: bot_temp.send_message(chat_id, msg_txt, reply_markup=mk)
                     except: pass
 
@@ -5972,7 +6001,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
 
-            # --- A) NAVEGAÇÃO (step_) ---
+            # --- A) NAVEGAÇÃO (step_) COM CORREÇÃO ---
             if data.startswith("step_"):
                 try: current_step = int(data.split("_")[1])
                 except: current_step = 1
@@ -6001,12 +6030,16 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     except:
                         sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk)
 
+                    # 🔥 CORREÇÃO APLICADA AQUI TAMBÉM (Auto-Destruição no Clique Manual)
+                    if sent_msg and target_step.autodestruir:
+                        # Usa o delay do passo ou 10s padrão
+                        tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 10
+                        agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
+
+                    # Lógica de Delay para pular automaticamente (se não tiver botão)
                     if not target_step.mostrar_botao and target_step.delay_seconds > 0:
                         time.sleep(target_step.delay_seconds)
-                        if target_step.autodestruir and sent_msg:
-                            try: bot_temp.delete_message(chat_id, sent_msg.message_id)
-                            except: pass
-                        
+                        # Chama o próximo recursivamente
                         prox = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_db.id, BotFlowStep.step_order == target_step.step_order + 1).first()
                         if prox: enviar_passo_automatico(bot_temp, chat_id, prox, bot_db, db)
                         else: enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
@@ -8074,26 +8107,29 @@ Toque no link abaixo para entrar no Canal VIP:
 # TRECHO 3: FUNÇÃO "enviar_passo_automatico" (CORRIGIDA + HTML)
 # ============================================================
 
+# ============================================================
+# TRECHO 3: FUNÇÃO "enviar_passo_automatico" (CORRIGIDA COMPLETA)
+# ============================================================
+
 def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
     """
-    Envia um passo automaticamente após o delay (COM HTML).
-    Similar à lógica do next_step_, mas sem callback do usuário.
+    Envia um passo automaticamente e gerencia auto-destruição e próximo passo.
     """
-    logger.info(f"✅ [BOT {bot_db.id}] Enviando passo {passo.step_order} automaticamente: {passo.msg_texto[:30]}...")
+    logger.info(f"✅ [BOT {bot_db.id}] Enviando passo {passo.step_order}: {passo.msg_texto[:30]}...")
     
-    # 1. Verifica se existe passo seguinte (CRÍTICO: Fazer isso ANTES de tudo)
+    # 1. Verifica se existe passo seguinte
     passo_seguinte = db.query(BotFlowStep).filter(
         BotFlowStep.bot_id == bot_db.id, 
         BotFlowStep.step_order == passo.step_order + 1
     ).first()
     
-    # 2. Define o callback do botão (Baseado na existência do próximo)
+    # 2. Define o callback do botão
     if passo_seguinte:
         next_callback = f"next_step_{passo.step_order}"
     else:
         next_callback = "go_checkout"
     
-    # 3. Cria botão (se configurado para mostrar)
+    # 3. Cria botão (se configurado)
     markup_step = types.InlineKeyboardMarkup()
     if passo.mostrar_botao:
         markup_step.add(types.InlineKeyboardButton(
@@ -8101,72 +8137,67 @@ def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
             callback_data=next_callback
         ))
     
-    # 4. Envia a mensagem e SALVA o message_id (Com HTML)
+    # 4. Envia a mensagem
     sent_msg = None
     try:
+        # Tenta enviar Mídia
         if passo.msg_media:
             try:
                 if passo.msg_media.lower().endswith(('.mp4', '.mov')):
                     sent_msg = bot_temp.send_video(
-                        chat_id, 
-                        passo.msg_media, 
-                        caption=passo.msg_texto, 
+                        chat_id, passo.msg_media, caption=passo.msg_texto, 
                         reply_markup=markup_step if passo.mostrar_botao else None,
-                        parse_mode="HTML" # 🔥 Adicionado HTML
+                        parse_mode="HTML"
                     )
                 else:
                     sent_msg = bot_temp.send_photo(
-                        chat_id, 
-                        passo.msg_media, 
-                        caption=passo.msg_texto, 
+                        chat_id, passo.msg_media, caption=passo.msg_texto, 
                         reply_markup=markup_step if passo.mostrar_botao else None,
-                        parse_mode="HTML" # 🔥 Adicionado HTML
+                        parse_mode="HTML"
                     )
             except Exception as e_media:
-                logger.error(f"Erro ao enviar mídia no passo automático: {e_media}")
-                # Fallback para texto se a mídia falhar
+                logger.error(f"Erro mídia passo auto: {e_media}")
+                # Fallback para texto
                 sent_msg = bot_temp.send_message(
-                    chat_id, 
-                    passo.msg_texto, 
+                    chat_id, passo.msg_texto, 
                     reply_markup=markup_step if passo.mostrar_botao else None,
-                    parse_mode="HTML" # 🔥 Adicionado HTML
+                    parse_mode="HTML"
                 )
         else:
+            # Envia Apenas Texto
             sent_msg = bot_temp.send_message(
-                chat_id, 
-                passo.msg_texto, 
+                chat_id, passo.msg_texto, 
                 reply_markup=markup_step if passo.mostrar_botao else None,
-                parse_mode="HTML" # 🔥 Adicionado HTML
+                parse_mode="HTML"
             )
-        
-        # 5. Lógica Automática (Recursividade e Delay)
-        # Se NÃO tem botão E tem delay E tem próximo passo
-        if not passo.mostrar_botao and passo.delay_seconds > 0 and passo_seguinte:
-            logger.info(f"⏰ [BOT {bot_db.id}] Aguardando {passo.delay_seconds}s antes do próximo...")
-            time.sleep(passo.delay_seconds)
+
+        # ==============================================================================
+        # 🔥 CORREÇÃO MESTRE: AUTO-DESTRUIÇÃO DESACOPLADA
+        # Agora roda INDEPENDENTE se tem botão, se tem delay ou se é o último passo.
+        # ==============================================================================
+        if sent_msg and passo.autodestruir:
+            # Se tiver delay configurado no passo, usa ele. Se não, usa 10s padrão de leitura.
+            tempo_vida = passo.delay_seconds if passo.delay_seconds > 0 else 10
+            logger.info(f"💣 Agendando destruição do passo {passo.step_order} para daqui {tempo_vida}s")
+            agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo_vida)
+
+        # 5. Lógica de Navegação Automática (Recursividade)
+        # Se NÃO tem botão, o bot deve chamar o próximo passo sozinho após o delay
+        if not passo.mostrar_botao:
+            delay = passo.delay_seconds if passo.delay_seconds > 0 else 0
             
-            # Auto-destruir antes de enviar a próxima
-            if passo.autodestruir and sent_msg:
-                try:
-                    bot_temp.delete_message(chat_id, sent_msg.message_id)
-                    logger.info(f"💣 [BOT {bot_db.id}] Mensagem do passo {passo.step_order} auto-destruída (automático)")
-                except:
-                    pass
-            
-            # Chama o próximo passo (Recursivo)
-            enviar_passo_automatico(bot_temp, chat_id, passo_seguinte, bot_db, db)
-            
-        # Se NÃO tem botão E NÃO tem próximo passo (Fim da Linha)
-        elif not passo.mostrar_botao and not passo_seguinte:
-            # Acabaram os passos, vai pro checkout (Oferta Final)
-            # Se tiver delay no último passo antes da oferta, espera também
-            if passo.delay_seconds > 0:
-                 time.sleep(passo.delay_seconds)
-                 
-            enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
+            if delay > 0:
+                time.sleep(delay) # Espera o tempo antes de enviar o PRÓXIMO
+
+            if passo_seguinte:
+                enviar_passo_automatico(bot_temp, chat_id, passo_seguinte, bot_db, db)
+            else:
+                # Fim da linha -> Oferta Final
+                enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
             
     except Exception as e:
-        logger.error(f"❌ [BOT {bot_db.id}] Erro crítico ao enviar passo automático: {e}")
+        logger.error(f"❌ [BOT {bot_db.id}] Erro crítico passo automático: {e}")
+        
 # =========================================================
 # 📤 FUNÇÃO AUXILIAR: ENVIAR OFERTA FINAL (CORRIGIDA)
 # =========================================================
