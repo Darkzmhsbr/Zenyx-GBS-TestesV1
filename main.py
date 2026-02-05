@@ -2718,7 +2718,42 @@ def registrar_webhook_para_retry(
         return None
     finally:
         db.close()
-
+# =========================================================
+# 🏢 BUSCAR PUSHIN PAY ID DA PLATAFORMA (ZENYX)
+# =========================================================
+def get_plataforma_pushin_id(db: Session) -> str:
+    """
+    Retorna o pushin_pay_id da plataforma Zenyx para receber as taxas.
+    Prioridade:
+    1. SystemConfig (pushin_plataforma_id)
+    2. Primeiro Super Admin encontrado
+    3. None se não encontrar
+    """
+    try:
+        # 1. Tenta buscar da SystemConfig
+        config = db.query(SystemConfig).filter(
+            SystemConfig.key == "pushin_plataforma_id"  # ✅ CORRIGIDO: key ao invés de chave
+        ).first()
+        
+        if config and config.value:  # ✅ CORRIGIDO: value ao invés de valor
+            return config.value
+        
+        # 2. Busca o primeiro Super Admin com pushin_pay_id configurado
+        from database import User
+        super_admin = db.query(User).filter(
+            User.is_superuser == True,
+            User.pushin_pay_id.isnot(None)
+        ).first()
+        
+        if super_admin and super_admin.pushin_pay_id:
+            return super_admin.pushin_pay_id
+        
+        logger.warning("⚠️ Nenhum pushin_pay_id da plataforma configurado! Split desabilitado.")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar pushin_pay_id da plataforma: {e}")
+        return None
 # =========================================================
 # 🔄 PROCESSAMENTO BACKGROUND DE REMARKETING
 # =========================================================
