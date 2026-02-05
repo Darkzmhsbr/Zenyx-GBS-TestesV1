@@ -2774,180 +2774,63 @@ def get_plataforma_pushin_id(db: Session) -> str:
     except Exception as e:
         logger.error(f"Erro ao buscar pushin_pay_id da plataforma: {e}")
         return None
-# =========================================================
-# 🔌 INTEGRAÇÃO PUSHIN PAY (CORRIGIDA COM REMARKETING)
-# =========================================================
-async def gerar_pix_pushinpay(
-    valor_float: float, 
-    transaction_id: str, 
-    bot_id: int, 
-    db: Session,
-    user_telegram_id: str = None,      
-    user_first_name: str = None,       
-    plano_nome: str = None,
-    agendar_remarketing: bool = True
-):
-    """
-    Gera PIX com Split automático de taxa para a plataforma + Remarketing integrado.
-    🔥 VERSÃO CORRIGIDA: Usa token do bot (se existir) ou fallback para plataforma
-    """
-    
-    # ======================================================================
-    # 🔥 CORREÇÃO 1: Buscar token do BOT primeiro
-    # ======================================================================
-    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
-    if not bot:
-        logger.error(f"❌ Bot {bot_id} não encontrado!")
-        return None
-    
-    # 🔥 USA TOKEN DO BOT (se existir) ou fallback para plataforma
-    token = bot.pushin_token if bot.pushin_token else get_pushin_token()
-    
-    # 🔥 LOG DEBUG 1
-    logger.info(f"🔍 [DEBUG] Bot ID: {bot_id}")
-    logger.info(f"🔍 [DEBUG] Bot tem token? {'SIM ('+str(len(bot.pushin_token or ''))+' chars)' if bot.pushin_token else 'NÃO'}")
-    if not bot.pushin_token:
-        logger.warning(f"⚠️ [DEBUG] USANDO TOKEN DA PLATAFORMA (fallback)!")
-    else:
-        logger.info(f"✅ [DEBUG] USANDO TOKEN DO USUÁRIO: {token[:10]}...")
-    
-    if not token:
-        logger.error("❌ NENHUM token disponível (nem do bot, nem da plataforma)!")
-        return None
-    
-    url = "https://api.pushinpay.com.br/api/pix/cashIn"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
-    
-    # URL do Webhook
-    seus_dominio = "zenyx-gbs-testesv1-production.up.railway.app" 
-    
-    # Valor em centavos
-    valor_centavos = int(valor_float * 100)
-    
-    # Monta payload básico
-    payload = {
-        "value": valor_centavos, 
-        "webhook_url": f"https://{seus_dominio}/webhook/pix",
-        "external_reference": transaction_id
-    }
-    
-    # ========================================
-    # 💰 LÓGICA DE SPLIT (TAXA DA PLATAFORMA)
-    # ========================================
-    try:
-        if bot and bot.owner_id:
-            # Busca o dono do bot (membro)
-            from database import User
-            owner = db.query(User).filter(User.id == bot.owner_id).first()
+# ========================================
+# 💰 LÓGICA DE SPLIT (TAXA DA PLATAFORMA)
+# ========================================
+try:
+    if bot and bot.owner_id:
+        # Busca o dono do bot (membro)
+        from database import User
+        owner = db.query(User).filter(User.id == bot.owner_id).first()
+        
+        if owner:
+            # Busca o pushin_pay_id da PLATAFORMA (para receber a taxa)
+            plataforma_id = get_plataforma_pushin_id(db)
             
-            if owner:
-                # Busca o pushin_pay_id da PLATAFORMA (para receber a taxa)
-                plataforma_id = get_plataforma_pushin_id(db)
+            if plataforma_id:
+                # Define a taxa (padrão: R$ 0,60)
+                taxa_centavos = owner.taxa_venda or 60
                 
-                if plataforma_id:
-                    # Define a taxa (padrão: R$ 0,60)
-                    taxa_centavos = owner.taxa_venda or 60
-                    
-                    # 🔥 LOG DEBUG 2
-                    logger.info(f"🔍 [DEBUG] Checando split:")
-                    logger.info(f"  Taxa: R$ {taxa_centavos/100:.2f} ({taxa_centavos} centavos)")
-                    logger.info(f"  Valor total: R$ {valor_centavos/100:.2f} ({valor_centavos} centavos)")
-                    logger.info(f"  Percentual: {(taxa_centavos/valor_centavos)*100:.1f}%")
-                    
-                    # Validação: Taxa não pode ser maior que 50% ou maior que valor total
-                    if taxa_centavos >= valor_centavos:
-                        logger.warning(f"⚠️ [DEBUG] Taxa ({taxa_centavos}) >= Valor Total ({valor_centavos}). Split NÃO APLICADO!")
-                    elif taxa_centavos >= (valor_centavos * 0.5):
-                        logger.warning(f"⚠️ [DEBUG] Taxa muito alta (>50%)! Split NÃO APLICADO!")
-                    else:
-                        # Monta o split_rules
-                        payload["split_rules"] = [
-                            {
-                                "value": taxa_centavos,
-                                "account_id": plataforma_id,
-                                "charge_processing_fee": False
-                            }
-                        ]
-                        
-                        # 🔥 LOG DEBUG 3
-                        logger.info(f"✅ [DEBUG] SPLIT CONFIGURADO!")
-                        logger.info(f"  Split value: {taxa_centavos} centavos")
-                        logger.info(f"  Account ID: {plataforma_id}")
-                        logger.info(f"  Usuário receberá: R$ {(valor_centavos - taxa_centavos)/100:.2f}")
+                # 🔥 CALCULA TAXA DA PUSHINPAY (aproximadamente 3%)
+                taxa_pushinpay = int(valor_centavos * 0.03)  # 3% do valor
+                valor_disponivel = valor_centavos - taxa_pushinpay
+                
+                # 🔥 LOG DEBUG 2
+                logger.info(f"🔍 [DEBUG] Checando split:")
+                logger.info(f"  Valor total: R$ {valor_centavos/100:.2f} ({valor_centavos} centavos)")
+                logger.info(f"  Taxa PushinPay (~3%): R$ {taxa_pushinpay/100:.2f} ({taxa_pushinpay} centavos)")
+                logger.info(f"  Valor disponível após taxa: R$ {valor_disponivel/100:.2f} ({valor_disponivel} centavos)")
+                logger.info(f"  Sua taxa desejada: R$ {taxa_centavos/100:.2f} ({taxa_centavos} centavos)")
+                
+                # 🔥 VALIDAÇÃO CORRIGIDA: Verifica se sua taxa cabe no valor disponível
+                if taxa_centavos >= valor_disponivel:
+                    logger.warning(f"⚠️ [DEBUG] Taxa ({taxa_centavos}) >= Valor Disponível ({valor_disponivel}). Split NÃO APLICADO!")
+                    logger.warning(f"   💡 Sugestão: Use valores acima de R$ 2,00 para garantir que o split funcione.")
                 else:
-                    logger.warning("⚠️ [DEBUG] Pushin Pay ID da plataforma não configurado. Gerando PIX SEM split.")
-            else:
-                logger.warning(f"⚠️ [DEBUG] Owner do bot {bot_id} não encontrado. Gerando PIX SEM split.")
-        else:
-            logger.warning(f"⚠️ [DEBUG] Bot {bot_id} sem owner_id. Gerando PIX SEM split.")
-            
-    except Exception as e:
-        logger.error(f"❌ Erro ao configurar split: {e}. Gerando PIX SEM split.")
-    
-    # ========================================
-    # 📤 ENVIA REQUISIÇÃO PARA PUSHIN PAY
-    # ========================================
-    try:
-        # 🔥 LOG DEBUG 4
-        logger.info(f"📤 [DEBUG] Enviando para PushinPay:")
-        logger.info(f"  Token usado: {token[:10]}...")
-        logger.info(f"  Payload split_rules: {payload.get('split_rules', [])}")
-        
-        logger.info(f"📤 Gerando PIX de R$ {valor_float:.2f}. Webhook: https://{seus_dominio}/webhook/pix")
-        
-        response = await http_client.post(url, json=payload, headers=headers, timeout=10)
-        
-        if response.status_code in [200, 201]:
-            pix_response = response.json()
-            
-            # 🔥 LOG DEBUG 5
-            logger.info(f"✅ [DEBUG] Resposta PushinPay ({response.status_code}):")
-            logger.info(f"  Split retornado: {pix_response.get('split_rules', [])}")
-            if not pix_response.get('split_rules'):
-                logger.warning(f"⚠️ [DEBUG] API NÃO RETORNOU SPLIT!")
-            
-            logger.info(f"✅ PIX gerado com sucesso! ID: {pix_response.get('id')}")
-            
-            # ============================================================
-            # 🎯 AGENDAMENTO CONDICIONAL
-            # ============================================================
-            if agendar_remarketing and user_telegram_id:
-                try:
-                    chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
+                    # Monta o split_rules
+                    payload["split_rules"] = [
+                        {
+                            "value": taxa_centavos,
+                            "account_id": plataforma_id,
+                            "charge_processing_fee": False
+                        }
+                    ]
                     
-                    if chat_id_int:
-                        # Cancela agendamentos anteriores
-                        cancelar_remarketing(chat_id_int)
-                        
-                        # Agenda novo ciclo
-                        schedule_remarketing_and_alternating(
-                            bot_id=bot_id,
-                            chat_id=chat_id_int,
-                            payment_message_id=0,
-                            user_info={
-                                'first_name': user_first_name or "Cliente",
-                                'plano': plano_nome or "Plano",
-                                'valor': valor_float
-                            }
-                        )
-                        logger.info(f"📧 [REMARKETING] Ciclo iniciado para {user_first_name}")
-                except Exception as e:
-                    logger.error(f"❌ Erro ao agendar remarketing: {e}")
-            # ============================================================
-            
-            return pix_response
+                    # 🔥 LOG DEBUG 3
+                    logger.info(f"✅ [DEBUG] SPLIT CONFIGURADO!")
+                    logger.info(f"  Split value: {taxa_centavos} centavos")
+                    logger.info(f"  Account ID: {plataforma_id}")
+                    logger.info(f"  Usuário receberá: R$ {(valor_disponivel - taxa_centavos)/100:.2f}")
+            else:
+                logger.warning("⚠️ [DEBUG] Pushin Pay ID da plataforma não configurado. Gerando PIX SEM split.")
         else:
-            logger.error(f"❌ Erro PushinPay ({response.status_code}): {response.text}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"❌ Erro ao gerar PIX: {e}")
-        return None
+            logger.warning(f"⚠️ [DEBUG] Owner do bot {bot_id} não encontrado. Gerando PIX SEM split.")
+    else:
+        logger.warning(f"⚠️ [DEBUG] Bot {bot_id} sem owner_id. Gerando PIX SEM split.")
         
+except Exception as e:
+    logger.error(f"❌ Erro ao configurar split: {e}. Gerando PIX SEM split.")
+
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
 def notificar_admin_principal(bot_db: BotModel, mensagem: str):
     """
