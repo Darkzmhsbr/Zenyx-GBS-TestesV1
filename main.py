@@ -5639,7 +5639,7 @@ def enviar_oferta_final(bot_temp, chat_id, fluxo, bot_id, db):
         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
         for p in planos:
             mk.add(types.InlineKeyboardButton(
-                f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", 
+                f"{p.nome_exibicao} - R$ {p.preco_atual:.2f}", 
                 callback_data=f"checkout_{p.id}"
             ))
     
@@ -5933,7 +5933,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
                         for pl in planos: 
                             preco_txt = f"R$ {pl.preco_atual:.2f}".replace('.', ',')
-                            mk.add(types.InlineKeyboardButton(f"💎 {pl.nome_exibicao} - {preco_txt}", callback_data=f"checkout_{pl.id}"))
+                            mk.add(types.InlineKeyboardButton(f" {pl.nome_exibicao} - {preco_txt}", callback_data=f"checkout_{pl.id}"))
                     else: 
                         mk.add(types.InlineKeyboardButton(flow.btn_text_1 if flow else "Ver Conteúdo", callback_data="step_1"))
 
@@ -8179,7 +8179,7 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
         for p in planos:
             mk.add(types.InlineKeyboardButton(
-                f"💎 {p.nome_exibicao} - R$ {p.preco_atual:.2f}", 
+                f"{p.nome_exibicao} - R$ {p.preco_atual:.2f}", 
                 callback_data=f"checkout_{p.id}"
             ))
     
