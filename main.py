@@ -3402,6 +3402,14 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         if not pushin_token:
             pushin_token = token_plataforma
 
+        # ADICIONE LOGO APÓS:
+        logger.info(f"🔍 [DEBUG] Bot ID: {bot_atual.id}")
+        logger.info(f"🔍 [DEBUG] Bot tem token? {'SIM ('+str(len(bot_atual.pushin_token or ''))+' chars)' if bot_atual.pushin_token else 'NÃO'}")
+        if not bot_atual.pushin_token:
+            logger.warning(f"⚠️ [DEBUG] USANDO TOKEN DA PLATAFORMA (fallback)!")
+        else:
+            logger.info(f"✅ [DEBUG] USANDO TOKEN DO USUÁRIO: {pushin_token[:10]}...")
+
         # Tratamento de ID
         user_clean = str(data.username).strip().lower().replace("@", "") if data.username else "anonimo"
         tid_clean = str(data.telegram_id).strip()
@@ -3473,9 +3481,14 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         if membro_dono and hasattr(membro_dono, 'taxa_venda') and membro_dono.taxa_venda:
             taxa_centavos = int(membro_dono.taxa_venda)
 
-        # Regra: Taxa muito alta (>50%)
+        # SUBSTITUA POR:
+        logger.info(f"🔍 [DEBUG] Checando split:")
+        logger.info(f"  Taxa: R$ {taxa_centavos/100:.2f} ({taxa_centavos} centavos)")
+        logger.info(f"  Valor total: R$ {valor_total_centavos/100:.2f} ({valor_total_centavos} centavos)")
+        logger.info(f"  Percentual: {(taxa_centavos/valor_total_centavos)*100:.1f}%")
+
         if taxa_centavos >= (valor_total_centavos * 0.5):
-            logger.warning(f"⚠️ Taxa muito alta. Split cancelado.")
+            logger.warning(f"⚠️ [DEBUG] TAXA MUITO ALTA! Split NÃO APLICADO!")
         else:
             payload["split_rules"] = [
                 {
@@ -3484,7 +3497,10 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
                     "charge_processing_fee": False
                 }
             ]
-            logger.info(f"✅ SPLIT (split_rules): Admin R$ {taxa_centavos/100:.2f} -> Conta {PLATAFORMA_ID}")
+            logger.info(f"✅ [DEBUG] SPLIT CONFIGURADO!")
+            logger.info(f"  Split value: {taxa_centavos} centavos")
+            logger.info(f"  Account ID: {PLATAFORMA_ID}")
+            logger.info(f"  Usuário receberá: R$ {(valor_total_centavos - taxa_centavos)/100:.2f}")
 
         # ======================================================================
         # 4. ENVIA (HTTPX ASYNC)
@@ -3495,6 +3511,11 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             "Content-Type": "application/json", 
             "Accept": "application/json" 
         }
+
+        # ADICIONE ANTES:
+        logger.info(f"📤 [DEBUG] Enviando para PushinPay:")
+        logger.info(f"  Token usado: {pushin_token[:10]}...")
+        logger.info(f"  Payload split_rules: {payload.get('split_rules', [])}")
         
         req = await http_client.post(url, json=payload, headers=headers, timeout=15)
         
@@ -3503,6 +3524,12 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
             txid = str(resp.get('id') or resp.get('txid'))
             copia_cola = resp.get('qr_code_text') or resp.get('pixCopiaEcola')
             qr_image = resp.get('qr_code_image_url') or resp.get('qr_code')
+
+            # ADICIONE LOGO APÓS:
+            logger.info(f"✅ [DEBUG] Resposta PushinPay ({req.status_code}):")
+            logger.info(f"  Split retornado: {resp.get('split_rules', [])}")
+            if not resp.get('split_rules'):
+                logger.warning(f"⚠️ [DEBUG] API NÃO RETORNOU SPLIT!")
 
         # Sucesso na geração do PIX
             novo_pedido = Pedido(
