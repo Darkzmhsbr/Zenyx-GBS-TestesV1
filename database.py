@@ -276,6 +276,9 @@ class BotFlow(Base):
     msg_2_media = Column(String, nullable=True)
     mostrar_planos_2 = Column(Boolean, default=False)
 
+    # 🔥 [NOVO] Configuração Avançada de Botões (JSON) - MENSAGEM 2 (OFERTA FINAL)
+    buttons_config_2 = Column(JSON, nullable=True)
+
     # --- MENSAGEM PIX (PERSONALIZADA) ---
     msg_pix = Column(Text, nullable=True)  # 🔥 NOVO CAMPO ADICIONADO
 

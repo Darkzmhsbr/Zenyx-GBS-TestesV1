@@ -3124,6 +3124,7 @@ class FlowUpdate(BaseModel):
 
     # 🔥 [NOVO] Recebe a lista de botões personalizados do Frontend
     buttons_config: Optional[List[dict]] = None
+    buttons_config_2: Optional[List[dict]] = None  # 🔥 Botões da mensagem final
 
     # 🔥 NOVOS CAMPOS (ESSENCIAIS PARA O MINI APP)
     start_mode: Optional[str] = "padrao"
@@ -4829,6 +4830,7 @@ class FlowUpdate(BaseModel):
     miniapp_btn_text: Optional[str] = None
     msg_pix: Optional[str] = None  # 🔥 NOVO CAMPO PARA O PIX
     buttons_config: Optional[List[dict]] = None  # 🔥 CONFIGURAÇÃO DE BOTÕES (PLAYLIST)
+    buttons_config_2: Optional[List[dict]] = None  # 🔥 Botões da mensagem final
     steps: Optional[List[dict]] = None # 🔥 IMPORTANTE: Aceitar os passos extras
 
 @app.post("/api/admin/bots/{bot_id}/flow")
@@ -4870,6 +4872,9 @@ def salvar_fluxo(
     # 🔥 ATUALIZA CONFIGURAÇÃO DE BOTÕES (PLAYLIST)
     if flow.buttons_config is not None: 
         fluxo_db.buttons_config = flow.buttons_config
+
+    # 🔥 ATUALIZA CONFIGURAÇÃO DE BOTÕES (MENSAGEM 2 - OFERTA)
+    if flow.buttons_config_2 is not None: fluxo_db.buttons_config_2 = flow.buttons_config_2
 
     # 🔥 ATUALIZA PASSOS EXTRAS (STEPS) - Fundamental para o ChatFlow funcionar completo
     if flow.steps is not None:
@@ -10365,3 +10370,16 @@ async def debug_flow(bot_id: int, db: Session = Depends(get_db)):
             "status": "error",
             "mensagem": str(e)
         }
+
+@app.get("/fix-buttons-msg2")
+async def fix_buttons_msg2(db: Session = Depends(get_db)):
+    try:
+        from sqlalchemy import text
+        db.execute(text("ALTER TABLE bot_flows ADD COLUMN buttons_config_2 JSON;"))
+        db.commit()
+        return {"status": "success", "message": "Coluna buttons_config_2 criada!"}
+    except Exception as e:
+        db.rollback()
+        if "already exists" in str(e).lower():
+            return {"status": "ok", "message": "Coluna já existe"}
+        return {"status": "error", "message": str(e)}
