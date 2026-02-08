@@ -141,7 +141,7 @@ class OrderBumpConfig(Base):
     __tablename__ = "order_bump_config"
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
-        
+
     ativo = Column(Boolean, default=False)
     nome_produto = Column(String) # Nome do produto extra
     preco = Column(Float)         # Valor a ser somado
@@ -422,6 +422,7 @@ class Lead(Base):
 # 1. Configuração Visual Global
 class MiniAppConfig(Base):
     __tablename__ = "miniapp_config"
+    id = Column(Integer, primary_key=True, index=True)  # ✅ ADICIONE ESTA LINHA
     bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     
     # Visual Base
