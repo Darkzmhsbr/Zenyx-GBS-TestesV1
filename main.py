@@ -4198,57 +4198,60 @@ def deletar_bot(
     current_user = Depends(get_current_user)
 ):
     """
-    Deleta bot com LIMPEZA TOTAL (Cascade Manual) e log de auditoria.
-    Funciona mesmo se o bot tiver vendas, leads e planos vinculados.
+    Deleta bot com LIMPEZA FORÇADA (Query Delete + Flush).
+    Resolve erros de Foreign Key Violation (ex: planos_config).
     """
-    # 1. Verifica se o bot existe e pertence ao usuário (Segurança)
+    # 1. Verifica existência e permissão
     bot = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
-    # Salva dados para o log antes de apagar
-    nome_bot = bot.nome
-    token_bot = bot.token
-    canal_vip = bot.id_canal_vip
-    username_bot = bot.username
+    # Salva dados para log
+    dados_log = {
+        "nome": bot.nome,
+        "token": bot.token,
+        "canal_vip": bot.id_canal_vip,
+        "username": bot.username
+    }
     
     try:
-        # 2. Tenta remover o Webhook do Telegram (Limpeza externa)
-        # Envolvemos em try/except para que, se o token for inválido, não impeça a exclusão do banco
+        # 2. Tenta remover Webhook (sem travar se falhar)
         try:
-            if token_bot:
-                tb = telebot.TeleBot(token_bot)
+            if dados_log["token"]:
+                tb = telebot.TeleBot(dados_log["token"])
                 tb.delete_webhook()
-        except Exception as e_telegram:
-            logger.warning(f"⚠️ Não foi possível remover webhook do Telegram (Token pode ser inválido): {e_telegram}")
+        except:
+            pass 
 
-        # 3. FAXINA PESADA (Apaga os dependentes na ordem correta)
-        # O uso de synchronize_session=False é mais rápido para deletar em massa
+        # 3. FAXINA PESADA VIA QUERY (Mais rápido e seguro que deletar objetos)
+        # Importante: A ordem importa! Deletamos do mais específico para o mais geral.
         
-        # A. Apaga Planos Configurados (O erro que você teve foi aqui!)
+        # A. Tabelas de Configuração (O ERRO ESTAVA AQUI)
+        # Usamos synchronize_session=False para ignorar objetos em memória e ir direto no banco
         db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # B. Apaga Fluxos do Bot
         db.query(BotFlow).filter(BotFlow.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(BotAdmin).filter(BotAdmin.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).delete(synchronize_session=False)
         
-        # C. Apaga Campanhas e Logs de Remarketing
+        # B. Tabelas de Remarketing/Logs
         db.query(RemarketingLog).filter(RemarketingLog.bot_id == bot_id).delete(synchronize_session=False)
         db.query(RemarketingCampaign).filter(RemarketingCampaign.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # D. Apaga Mensagens Alternadas
         db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).delete(synchronize_session=False)
         
-        # E. Apaga Leads (Geralmente é a tabela maior)
+        # C. Tabelas de Negócio (Leads e Pedidos)
         db.query(Lead).filter(Lead.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # F. Apaga Pedidos (Vendas)
         db.query(Pedido).filter(Pedido.bot_id == bot_id).delete(synchronize_session=False)
 
-        # 4. Finalmente, apaga o Pai (O Bot)
-        db.delete(bot)
+        # 🔥 O SEGREDO: FLUSH
+        # Obriga o banco a confirmar que apagou tudo acima ANTES de tentar apagar o bot
+        db.flush() 
+
+        # 4. Apaga o Pai (O Bot)
+        # MUDANÇA: Usamos query().delete() em vez de db.delete(bot) para evitar conflito de sessão
+        db.query(BotModel).filter(BotModel.id == bot_id).delete(synchronize_session=False)
         
-        # 5. Efetiva todas as mudanças no banco
+        # 5. Efetiva tudo
         db.commit()
         
-        # 6. 📋 AUDITORIA: Registra a ação
+        # 6. Auditoria
         log_action(
             db=db,
             user_id=current_user.id,
@@ -4256,25 +4259,21 @@ def deletar_bot(
             action="bot_deleted",
             resource_type="bot",
             resource_id=bot_id,
-            description=f"Deletou bot '{nome_bot}' e todos os dados vinculados",
-            details={
-                "bot_name": nome_bot,
-                "username": username_bot,
-                "canal_vip": canal_vip,
-                "cleanup": "full_cascade_manual"
-            },
+            description=f"Deletou bot '{dados_log['nome']}' (Forced Cleanup)",
+            details=dados_log,
             ip_address=get_client_ip(request),
             user_agent=request.headers.get("user-agent")
         )
         
-        logger.info(f"🗑️ Bot deletado com sucesso: {nome_bot} (Owner: {current_user.username})")
-        return {"status": "deletado", "bot_nome": nome_bot, "msg": "Bot e todos os dados vinculados foram removidos."}
+        logger.info(f"🗑️ Bot {bot_id} deletado com sucesso (SQL Query Method).")
+        return {"status": "deletado", "bot_nome": dados_log["nome"]}
 
     except Exception as e:
-        db.rollback() # Se der qualquer erro no meio, desfaz tudo para não corromper o banco
-        logger.error(f"❌ Erro crítico ao deletar bot {bot_id}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Erro interno ao excluir bot: {str(e)}")
-        
+        db.rollback()
+        logger.error(f"❌ Erro persistente ao deletar bot {bot_id}: {str(e)}")
+        # Retorna o erro exato para sabermos se sobrou alguma tabela
+        raise HTTPException(status_code=500, detail=f"Erro de Integridade: {str(e)}")
+
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 @app.post("/api/admin/bots/{bot_id}/toggle")
