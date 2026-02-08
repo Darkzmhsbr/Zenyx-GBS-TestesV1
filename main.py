@@ -4864,6 +4864,12 @@ def salvar_fluxo(
     
     # 🔥 ATUALIZA MENSAGEM DO PIX
     if flow.msg_pix is not None: fluxo_db.msg_pix = flow.msg_pix
+    
+    # 🔥 ATUALIZA CONFIGURAÇÃO DE BOTÕES (PLAYLIST)
+    if flow.buttons_config is not None: fluxo_db.buttons_config = flow.buttons_config
+
+    # 🔥 ATUALIZA PASSOS EXTRAS (STEPS) - Fundamental para o ChatFlow funcionar completo
+    if flow.steps is not None:
 
     # 🔥 ATUALIZA PASSOS EXTRAS (STEPS) - Fundamental para o ChatFlow funcionar completo
     if flow.steps is not None:
