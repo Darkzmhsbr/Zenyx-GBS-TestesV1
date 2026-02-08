@@ -174,7 +174,7 @@ class PlanoConfig(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     id_canal_destino = Column(String, nullable=True) 
     
-    bot = relationship("BotModel", back_populates="planos")  # ✅ Nome correto do model
+    bot = relationship("Bot", back_populates="planos")
 
 # =========================================================
 # 📢 REMARKETING
