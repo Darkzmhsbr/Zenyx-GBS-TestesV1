@@ -3122,6 +3122,9 @@ class FlowUpdate(BaseModel):
     mostrar_planos_2: bool
     mostrar_planos_1: Optional[bool] = False # 🔥 NOVO CAMPO
 
+    # 🔥 [NOVO] Recebe a lista de botões personalizados do Frontend
+    buttons_config: Optional[List[dict]] = None
+
     # 🔥 NOVOS CAMPOS (ESSENCIAIS PARA O MINI APP)
     start_mode: Optional[str] = "padrao"
     miniapp_url: Optional[str] = None
@@ -3133,6 +3136,9 @@ class FlowStepCreate(BaseModel):
     btn_texto: str = "Próximo ▶️"
     step_order: int
 
+    # 🔥 [NOVO] Suporte a botões personalizados na criação
+    buttons_config: Optional[List[dict]] = None
+
 class FlowStepUpdate(BaseModel):
     """Modelo para atualizar um passo existente"""
     msg_texto: Optional[str] = None
@@ -3141,6 +3147,9 @@ class FlowStepUpdate(BaseModel):
     autodestruir: Optional[bool] = None      # [NOVO V3]
     mostrar_botao: Optional[bool] = None     # [NOVO V3]
     delay_seconds: Optional[int] = None  # [NOVO V4]
+
+    # 🔥 [NOVO] Suporte a botões personalizados na atualização
+    buttons_config: Optional[List[dict]] = None
 
 
 class UserUpdateCRM(BaseModel):
