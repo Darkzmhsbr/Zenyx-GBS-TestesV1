@@ -42,7 +42,7 @@ from threading import Lock
 from database import (
     SessionLocal, 
     init_db, 
-    Bot as BotModel,  # ← RENOMEADO para evitar conflito com TeleBot
+    BotModel,  # ← RENOMEADO para evitar conflito com TeleBot
     PlanoConfig, 
     BotFlow, 
     BotFlowStep, 
