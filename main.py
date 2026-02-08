@@ -5746,6 +5746,12 @@ def enviar_oferta_final(bot_temp, chat_id, fluxo, bot_id, db):
                     btn.get('text', 'Link'), 
                     url=btn.get('value')
                 ))
+            elif btn.get('type') == 'action':  # 🔥 NOVO: Botão de ação
+                # Adiciona botão de ação (próximo passo)
+                mk.add(types.InlineKeyboardButton(
+                    btn.get('text', 'Próximo'), 
+                    callback_data=btn.get('value', 'step_1')
+                ))
     
     # 🔥 FALLBACK: Lógica antiga (se não tiver buttons_config_2)
     elif fluxo and fluxo.mostrar_planos_2:
@@ -6046,16 +6052,19 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             if btn.get('type') == 'plan':
                                 plano = db.query(PlanoConfig).filter(PlanoConfig.id == btn.get('value')).first()
                                 if plano:
-                                    preco_txt = f"R$ {plano.preco_atual:.2f}".replace('.', ',')
                                     mk.add(types.InlineKeyboardButton(
-                                        f"{plano.nome_exibicao}",  # 🔥 SEMPRE USA O NOME DO PLANO
+                                        f"{plano.nome_exibicao}", 
                                         callback_data=f"checkout_{plano.id}"
                                     ))
                             elif btn.get('type') == 'link':
-                                # Adiciona botão de link
                                 mk.add(types.InlineKeyboardButton(
                                     btn.get('text', 'Link'), 
                                     url=btn.get('value')
+                                ))
+                            elif btn.get('type') == 'action':  # 🔥 NOVO
+                                mk.add(types.InlineKeyboardButton(
+                                    btn.get('text', 'Próximo'), 
+                                    callback_data=btn.get('value', 'step_1')
                                 ))
                     
                     # 🔥 FALLBACK: Lógica antiga (se não tiver buttons_config)
@@ -8350,6 +8359,9 @@ def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
 # =========================================================
 # 📤 FUNÇÃO AUXILIAR: ENVIAR OFERTA FINAL (CORRIGIDA)
 # =========================================================
+# =========================================================
+# 📤 FUNÇÃO AUXILIAR: ENVIAR OFERTA FINAL (CORRIGIDA)
+# =========================================================
 def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
     """Envia a oferta final (Planos) com formatação HTML correta e suporte a buttons_config_2"""
     mk = types.InlineKeyboardMarkup()
@@ -8371,6 +8383,12 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
                 mk.add(types.InlineKeyboardButton(
                     btn.get('text', 'Link'), 
                     url=btn.get('value')
+                ))
+            elif btn.get('type') == 'action':  # 🔥 NOVO: Botão de ação
+                # Adiciona botão de ação (próximo passo)
+                mk.add(types.InlineKeyboardButton(
+                    btn.get('text', 'Próximo'), 
+                    callback_data=btn.get('value', 'step_1')
                 ))
     
     # 🔥 FALLBACK: Lógica antiga (se não tiver buttons_config_2)
@@ -8397,7 +8415,7 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
     except Exception as e:
         logger.error(f"Erro ao enviar oferta final: {e}")
         tb.send_message(cid, txt, reply_markup=mk)
-        
+
 # =========================================================
 # 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
 # =========================================================
