@@ -6021,12 +6021,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         # Renderiza botões personalizados (híbridos)
                         for btn in flow.buttons_config:
                             if btn.get('type') == 'plan':
-                                # Busca o plano pelo ID
                                 plano = db.query(PlanoConfig).filter(PlanoConfig.id == btn.get('value')).first()
                                 if plano:
                                     preco_txt = f"R$ {plano.preco_atual:.2f}".replace('.', ',')
                                     mk.add(types.InlineKeyboardButton(
-                                        f"{btn.get('text', plano.nome_exibicao)}", 
+                                        f"{plano.nome_exibicao}",  # 🔥 SEMPRE USA O NOME DO PLANO
                                         callback_data=f"checkout_{plano.id}"
                                     ))
                             elif btn.get('type') == 'link':
