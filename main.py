@@ -5746,11 +5746,15 @@ def enviar_oferta_final(bot_temp, chat_id, fluxo, bot_id, db):
                     btn.get('text', 'Link'), 
                     url=btn.get('value')
                 ))
-            elif btn.get('type') == 'action':  # 🔥 NOVO: Botão de ação
-                # Adiciona botão de ação (próximo passo)
+            elif btn.get('type') == 'action':
+                callback = btn.get('value', 'step_1')
+                # 🔥 Se o botão tem autodestruir, adiciona flag no callback_data
+                if btn.get('autodestruir'):
+                    callback = f"autodelete_{callback}"
+                
                 mk.add(types.InlineKeyboardButton(
                     btn.get('text', 'Próximo'), 
-                    callback_data=btn.get('value', 'step_1')
+                    callback_data=callback
                 ))
     
     # 🔥 FALLBACK: Lógica antiga (se não tiver buttons_config_2)
@@ -6061,10 +6065,15 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                     btn.get('text', 'Link'), 
                                     url=btn.get('value')
                                 ))
-                            elif btn.get('type') == 'action':  # 🔥 NOVO
+                            elif btn.get('type') == 'action':
+                                callback = btn.get('value', 'step_1')
+                                # 🔥 Se o botão tem autodestruir, adiciona flag no callback_data
+                                if btn.get('autodestruir'):
+                                    callback = f"autodelete_{callback}"
+                                
                                 mk.add(types.InlineKeyboardButton(
                                     btn.get('text', 'Próximo'), 
-                                    callback_data=btn.get('value', 'step_1')
+                                    callback_data=callback
                                 ))
                     
                     # 🔥 FALLBACK: Lógica antiga (se não tiver buttons_config)
@@ -6118,6 +6127,20 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             data = update.callback_query.data
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
+
+            # 🔥 HANDLER PARA AUTO-DESTRUIR (buttons_config com autodestruir=true)
+            if data.startswith("autodelete_"):
+                # Deleta a mensagem anterior
+                try:
+                    msg_id = update.callback_query.message.message_id
+                    bot_temp.delete_message(chat_id, msg_id)
+                    logger.info(f"🗑️ Mensagem deletada via botão auto-destrutivo")
+                except Exception as e:
+                    logger.error(f"❌ Erro ao deletar mensagem: {e}")
+                
+                # Remove o prefixo e processa o comando normal
+                data = data.replace("autodelete_", "")
+                # Atualiza a variável para que os handlers abaixo processem normalmente
 
             # --- A) NAVEGAÇÃO (step_) COM AUTO-DESTRUIÇÃO INTELIGENTE ---
             if data.startswith("step_"):
@@ -8384,11 +8407,15 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
                     btn.get('text', 'Link'), 
                     url=btn.get('value')
                 ))
-            elif btn.get('type') == 'action':  # 🔥 NOVO: Botão de ação
-                # Adiciona botão de ação (próximo passo)
+            elif btn.get('type') == 'action':
+                callback = btn.get('value', 'step_1')
+                # 🔥 Se o botão tem autodestruir, adiciona flag no callback_data
+                if btn.get('autodestruir'):
+                    callback = f"autodelete_{callback}"
+                
                 mk.add(types.InlineKeyboardButton(
                     btn.get('text', 'Próximo'), 
-                    callback_data=btn.get('value', 'step_1')
+                    callback_data=callback
                 ))
     
     # 🔥 FALLBACK: Lógica antiga (se não tiver buttons_config_2)
