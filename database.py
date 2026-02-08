@@ -53,7 +53,7 @@ class User(Base):
     taxa_venda = Column(Integer, default=60)      # Taxa em centavos (Padrão: 60)
 
     # RELACIONAMENTO: Um usuário possui vários bots
-    bots = relationship("BotModel", back_populates="owner")  # ✅ CORRIGIDO
+    bots = relationship("Bot", back_populates="owner")
     
     # Relacionamentos de Logs e Notificações
     audit_logs = relationship("AuditLog", back_populates="user")
@@ -71,10 +71,7 @@ class SystemConfig(Base):
 # =========================================================
 # 🤖 BOTS
 # =========================================================
-# =========================================================
-# 🤖 BOTS (TABELA PRINCIPAL)
-# =========================================================
-class BotModel(Base):  # ← MUDANÇA CRÍTICA: de "Bot" para "BotModel"
+class Bot(Base):
     __tablename__ = "bots"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -95,20 +92,8 @@ class BotModel(Base):  # ← MUDANÇA CRÍTICA: de "Bot" para "BotModel"
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # 🆕 RELACIONAMENTO COM USUÁRIO (OWNER)
-    owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)  # ← ADICIONADO ondelete CASCADE
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # nullable=True para migração
     owner = relationship("User", back_populates="bots")
-    
-    # Novos campos (Landing Page)
-    bg_color = Column(String(20), default="#000000")
-    banner_desk_url = Column(String(500), nullable=True)
-    video_preview_url = Column(String(500), nullable=True)
-    model_img_url = Column(String(500), nullable=True)
-    model_name = Column(String(100), nullable=True)
-    model_desc = Column(Text, nullable=True)
-    footer_banner_url = Column(String(500), nullable=True)
-    deco_lines_url = Column(String(500), nullable=True)
-    model_name_color = Column(String(20), default="#FFFFFF")
-    model_desc_color = Column(String(20), default="#CCCCCC")
     
     # --- RELACIONAMENTOS (CASCADE) ---
     planos = relationship("PlanoConfig", back_populates="bot", cascade="all, delete-orphan")
@@ -143,11 +128,11 @@ class BotModel(Base):  # ← MUDANÇA CRÍTICA: de "Bot" para "BotModel"
 class BotAdmin(Base):
     __tablename__ = "bot_admins"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
     telegram_id = Column(String)
     nome = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    bot = relationship("BotModel", back_populates="admins")  # ✅ CORRIGIDO
+    bot = relationship("Bot", back_populates="admins")
 
 # =========================================================
 # 🛒 ORDER BUMP (OFERTA EXTRA NO CHECKOUT)
@@ -155,8 +140,8 @@ class BotAdmin(Base):
 class OrderBumpConfig(Base):
     __tablename__ = "order_bump_config"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
-
+    bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
+    
     ativo = Column(Boolean, default=False)
     nome_produto = Column(String) # Nome do produto extra
     preco = Column(Float)         # Valor a ser somado
@@ -172,24 +157,31 @@ class OrderBumpConfig(Base):
     btn_aceitar = Column(String, default="✅ SIM, ADICIONAR")
     btn_recusar = Column(String, default="❌ NÃO, OBRIGADO")
     
-    bot = relationship("BotModel", back_populates="order_bump")  # ✅ CORRIGIDO
+    bot = relationship("Bot", back_populates="order_bump")
 
+# =========================================================
+# 💲 PLANOS
+# =========================================================
 class PlanoConfig(Base):
     __tablename__ = "plano_config"
     
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)  # ✅ COM CASCADE
+    bot_id = Column(Integer, ForeignKey("bots.id"))
     nome_exibicao = Column(String(100))
     descricao = Column(Text)
     preco_atual = Column(Float)
     preco_cheio = Column(Float)
     dias_duracao = Column(Integer, default=30)
-    is_lifetime = Column(Boolean, default=False)
+    is_lifetime = Column(Boolean, default=False)  # ← ADICIONAR ESTA LINHA
     key_id = Column(String(100), unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    # 👇 ADICIONE ESTA LINHA AQUI 👇
     id_canal_destino = Column(String, nullable=True) 
+    # 👆 FIM DA ADIÇÃO 👆
     
-    bot = relationship("BotModel", back_populates="planos")  # ✅ CORRIGIDO
+    # Relacionamentos (manter tudo que já existe abaixo)
+    bot = relationship("Bot", back_populates="planos")
 
 # =========================================================
 # 📢 REMARKETING
@@ -199,7 +191,7 @@ class RemarketingCampaign(Base):
     
     # Identificação
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
     campaign_id = Column(String, unique=True)
     
     # Configuração
@@ -227,7 +219,7 @@ class RemarketingCampaign(Base):
     data_envio = Column(DateTime, default=datetime.utcnow)
     
     # Relacionamento
-    bot = relationship("BotModel", back_populates="remarketing_campaigns")  # ✅ CORRIGIDO
+    bot = relationship("Bot", back_populates="remarketing_campaigns")
 
 # =========================================================
 # 🔄 WEBHOOK RETRY SYSTEM
@@ -260,8 +252,8 @@ class WebhookRetry(Base):
 class BotFlow(Base):
     __tablename__ = "bot_flows"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
-    bot = relationship("BotModel", back_populates="fluxo")  # ✅ CORRIGIDO
+    bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
+    bot = relationship("Bot", back_populates="fluxo")
     
     # --- CONFIGURAÇÃO DE MODO DE INÍCIO ---
     start_mode = Column(String, default="padrao") # 'padrao', 'miniapp'
@@ -289,7 +281,7 @@ class BotFlow(Base):
 class BotFlowStep(Base):
     __tablename__ = "bot_flow_steps"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
     step_order = Column(Integer, default=1)
     msg_texto = Column(Text, nullable=True)
     msg_media = Column(String, nullable=True)
@@ -303,7 +295,7 @@ class BotFlowStep(Base):
     delay_seconds = Column(Integer, default=0)
     
     created_at = Column(DateTime, default=datetime.utcnow)
-    bot = relationship("BotModel", back_populates="steps")  # ✅ CORRIGIDO
+    bot = relationship("Bot", back_populates="steps")
 
 # =========================================================
 # 🔗 TRACKING (RASTREAMENTO DE LINKS)
@@ -321,7 +313,7 @@ class TrackingLink(Base):
     __tablename__ = "tracking_links"
     id = Column(Integer, primary_key=True, index=True)
     folder_id = Column(Integer, ForeignKey("tracking_folders.id"))
-    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
     
     nome = Column(String)      # Ex: "Stories Manhã"
     codigo = Column(String, unique=True, index=True) # Ex: "xyz123" (o parâmetro do /start)
@@ -336,7 +328,7 @@ class TrackingLink(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     folder = relationship("TrackingFolder", back_populates="links")
-    bot = relationship("BotModel", back_populates="tracking_links")  # ✅ CORRIGIDO
+    bot = relationship("Bot", back_populates="tracking_links")
 
 # =========================================================
 # 🛒 PEDIDOS
@@ -344,7 +336,7 @@ class TrackingLink(Base):
 class Pedido(Base):
     __tablename__ = "pedidos"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
     
     telegram_id = Column(String)
     first_name = Column(String, nullable=True)
@@ -426,7 +418,7 @@ class Lead(Base):
     # No arquivo database.py, dentro de class Lead(Base):
 
     # Substitua a linha antiga do relationship por esta:
-    bot = relationship("BotModel", back_populates="leads", overlaps="bot_ref")  # ✅ CORRIGIDO
+    bot = relationship("Bot", back_populates="leads", overlaps="bot_ref")
     # Se TrackingLink tiver back_populates="leads", descomente abaixo:
     # tracking_link = relationship("TrackingLink", back_populates="leads")
 
@@ -437,8 +429,7 @@ class Lead(Base):
 # 1. Configuração Visual Global
 class MiniAppConfig(Base):
     __tablename__ = "miniapp_config"
-    id = Column(Integer, primary_key=True, index=True)  # ✅ ADICIONE ESTA LINHA
-    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
+    bot_id = Column(Integer, ForeignKey("bots.id"), primary_key=True)
     
     # Visual Base
     logo_url = Column(String, nullable=True)
@@ -459,13 +450,13 @@ class MiniAppConfig(Base):
     # Rodapé
     footer_text = Column(String, default="© 2026 Premium Club.")
 
-    bot = relationship("BotModel", back_populates="miniapp_categories")  # ✅ CORRIGIDO
+    bot = relationship("Bot", back_populates="miniapp_config")
 
 # 2. Categorias e Conteúdo
 class MiniAppCategory(Base):
     __tablename__ = "miniapp_categories"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
+    bot_id = Column(Integer, ForeignKey("bots.id"))
     slug = Column(String)
     title = Column(String)
     description = Column(String)
@@ -492,7 +483,7 @@ class MiniAppCategory(Base):
     is_hacker_mode = Column(Boolean, default=False)
     content_json = Column(Text)
     
-    bot = relationship("BotModel", back_populates="miniapp_categories")
+    bot = relationship("Bot", back_populates="miniapp_categories")
 
 # =========================================================
 # 📋 AUDIT LOGS (FASE 3.3 - AUDITORIA)
@@ -584,7 +575,7 @@ class RemarketingConfig(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    bot = relationship("BotModel", back_populates="remarketing_config")  # ✅ CORRIGIDO
+    bot = relationship("Bot", back_populates="remarketing_config")
     
     def __repr__(self):
         return f"<RemarketingConfig(bot_id={self.bot_id}, active={self.is_active}, delay={self.delay_minutes}min)>"
@@ -614,7 +605,7 @@ class AlternatingMessages(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    bot = relationship("BotModel", back_populates="alternating_messages")  # ✅ CORRIGIDO
+    bot = relationship("Bot", back_populates="alternating_messages")
     
     def __repr__(self):
         return f"<AlternatingMessages(bot_id={self.bot_id}, active={self.is_active}, msgs={len(self.messages)})>"
@@ -651,7 +642,7 @@ class RemarketingLog(Base):
     campaign_id = Column(String, nullable=True)
     
     # Relacionamento
-    bot = relationship("BotModel", back_populates="remarketing_logs")  # ✅ CORRIGIDO
+    bot = relationship("Bot", back_populates="remarketing_logs")
     
     def __repr__(self):
         return f"<RemarketingLog(bot_id={self.bot_id}, user_id={self.user_id}, status={self.status})>"

@@ -42,7 +42,7 @@ from threading import Lock
 from database import (
     SessionLocal, 
     init_db, 
-    BotModel,  # ← RENOMEADO para evitar conflito com TeleBot
+    Bot as BotModel,  # ← RENOMEADO para evitar conflito com TeleBot
     PlanoConfig, 
     BotFlow, 
     BotFlowStep, 
@@ -4189,8 +4189,6 @@ def update_bot(
     logger.info(f"✅ Bot atualizado: {bot_db.nome} (Owner: {current_user.username})")
     return {"status": "ok", "msg": "Bot atualizado com sucesso"}
 
-# --- ROTA: EXCLUIR BOT (COM LIMPEZA TOTAL E AUDITORIA) ---
-# --- ROTA: EXCLUIR BOT (VERSÃO SIMPLIFICADA E FUNCIONAL) ---
 @app.delete("/api/admin/bots/{bot_id}")
 def deletar_bot(
     bot_id: int,
@@ -4199,14 +4197,13 @@ def deletar_bot(
     current_user = Depends(get_current_user)
 ):
     """
-    Deleta bot usando método ORM (respeita cascade relationships).
-    Após corrigir database.py com ondelete="CASCADE", o PostgreSQL
-    fará a limpeza automaticamente.
+    Deleta bot usando método ORM que respeita CASCADE do SQLAlchemy.
+    Simples e funcional.
     """
     # 1. Verifica existência e permissão
     bot = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
-    # Salva dados para log antes de deletar
+    # Salva dados para log
     dados_log = {
         "nome": bot.nome,
         "token": bot.token,
@@ -4215,7 +4212,7 @@ def deletar_bot(
     }
     
     try:
-        # 2. Tenta remover Webhook do Telegram (sem travar se falhar)
+        # 2. Remove Webhook do Telegram (sem travar se falhar)
         try:
             if dados_log["token"]:
                 tb = telebot.TeleBot(dados_log["token"])
@@ -4223,23 +4220,42 @@ def deletar_bot(
                 logger.info(f"🔗 Webhook removido para bot {bot_id}")
         except Exception as e:
             logger.warning(f"⚠️ Não foi possível remover webhook: {e}")
-            pass  # Continua mesmo se falhar
 
-        # 3. MÉTODO ORM: Deleta o bot (cascade faz o resto)
-        # Com ondelete="CASCADE" no database.py, o PostgreSQL apaga automaticamente:
-        # - plano_config
-        # - bot_flow e bot_flow_steps  
-        # - bot_admins
-        # - leads
-        # - pedidos
-        # - remarketing_campaign e remarketing_log
-        # - alternating_messages
-        # - order_bump_config
+        # 3. SOLUÇÃO: Deletar dependências MANUALMENTE antes do bot
+        # A ordem importa! Do mais dependente para o menos dependente
         
-        db.delete(bot)  # ✅ Usa método ORM que respeita relationships
+        # 3a. Deletar configurações específicas
+        db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).delete(synchronize_session=False)
+        
+        # 3b. Deletar categorias e links
+        db.query(MiniAppCategory).filter(MiniAppCategory.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(TrackingLink).filter(TrackingLink.bot_id == bot_id).delete(synchronize_session=False)
+        
+        # 3c. Deletar logs e campanhas
+        db.query(RemarketingLog).filter(RemarketingLog.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(RemarketingCampaign).filter(RemarketingCampaign.bot_id == bot_id).delete(synchronize_session=False)
+        
+        # 3d. Deletar dados de negócio
+        db.query(Pedido).filter(Pedido.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(Lead).filter(Lead.bot_id == bot_id).delete(synchronize_session=False)
+        
+        # 3e. Deletar planos e configurações de fluxo
+        db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(BotFlow).filter(BotFlow.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(BotAdmin).filter(BotAdmin.bot_id == bot_id).delete(synchronize_session=False)
+        
+        # 3f. FLUSH para garantir que tudo foi deletado ANTES de deletar o bot
+        db.flush()
+        
+        # 4. Agora sim, deleta o bot (método ORM)
+        db.delete(bot)
         db.commit()
         
-        # 4. Auditoria
+        # 5. Auditoria
         log_action(
             db=db,
             user_id=current_user.id,
@@ -4247,23 +4263,20 @@ def deletar_bot(
             action="bot_deleted",
             resource_type="bot",
             resource_id=bot_id,
-            description=f"Deletou bot '{dados_log['nome']}' (Cascade Delete)",
+            description=f"Deletou bot '{dados_log['nome']}'",
             details=dados_log,
             ip_address=get_client_ip(request),
             user_agent=request.headers.get("user-agent")
         )
         
-        logger.info(f"🗑️ Bot {bot_id} '{dados_log['nome']}' deletado com sucesso (incluindo todos os dados relacionados)")
+        logger.info(f"🗑️ Bot {bot_id} '{dados_log['nome']}' deletado com sucesso")
         return {"status": "deletado", "bot_nome": dados_log["nome"]}
 
     except Exception as e:
         db.rollback()
         logger.error(f"❌ Erro ao deletar bot {bot_id}: {str(e)}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Erro ao excluir bot: {str(e)}"
-        )
-
+        raise HTTPException(status_code=500, detail=f"Erro ao excluir bot: {str(e)}")
+        
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 @app.post("/api/admin/bots/{bot_id}/toggle")
