@@ -4197,13 +4197,10 @@ def deletar_bot(
     current_user = Depends(get_current_user)
 ):
     """
-    Deleta bot usando método ORM que respeita CASCADE do SQLAlchemy.
-    Simples e funcional.
+    Deleta bot - agora funciona com CASCADE do PostgreSQL
     """
-    # 1. Verifica existência e permissão
     bot = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
-    # Salva dados para log
     dados_log = {
         "nome": bot.nome,
         "token": bot.token,
@@ -4212,50 +4209,20 @@ def deletar_bot(
     }
     
     try:
-        # 2. Remove Webhook do Telegram (sem travar se falhar)
+        # Remove webhook
         try:
             if dados_log["token"]:
                 tb = telebot.TeleBot(dados_log["token"])
                 tb.delete_webhook()
                 logger.info(f"🔗 Webhook removido para bot {bot_id}")
         except Exception as e:
-            logger.warning(f"⚠️ Não foi possível remover webhook: {e}")
+            logger.warning(f"⚠️ Webhook: {e}")
 
-        # 3. SOLUÇÃO: Deletar dependências MANUALMENTE antes do bot
-        # A ordem importa! Do mais dependente para o menos dependente
-        
-        # 3a. Deletar configurações específicas
-        db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).delete(synchronize_session=False)
-        db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).delete(synchronize_session=False)
-        db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).delete(synchronize_session=False)
-        db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # 3b. Deletar categorias e links
-        db.query(MiniAppCategory).filter(MiniAppCategory.bot_id == bot_id).delete(synchronize_session=False)
-        db.query(TrackingLink).filter(TrackingLink.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # 3c. Deletar logs e campanhas
-        db.query(RemarketingLog).filter(RemarketingLog.bot_id == bot_id).delete(synchronize_session=False)
-        db.query(RemarketingCampaign).filter(RemarketingCampaign.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # 3d. Deletar dados de negócio
-        db.query(Pedido).filter(Pedido.bot_id == bot_id).delete(synchronize_session=False)
-        db.query(Lead).filter(Lead.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # 3e. Deletar planos e configurações de fluxo
-        db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).delete(synchronize_session=False)
-        db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).delete(synchronize_session=False)
-        db.query(BotFlow).filter(BotFlow.bot_id == bot_id).delete(synchronize_session=False)
-        db.query(BotAdmin).filter(BotAdmin.bot_id == bot_id).delete(synchronize_session=False)
-        
-        # 3f. FLUSH para garantir que tudo foi deletado ANTES de deletar o bot
-        db.flush()
-        
-        # 4. Agora sim, deleta o bot (método ORM)
+        # Deleta o bot (CASCADE faz o resto automaticamente)
         db.delete(bot)
         db.commit()
         
-        # 5. Auditoria
+        # Auditoria
         log_action(
             db=db,
             user_id=current_user.id,
@@ -4269,14 +4236,14 @@ def deletar_bot(
             user_agent=request.headers.get("user-agent")
         )
         
-        logger.info(f"🗑️ Bot {bot_id} '{dados_log['nome']}' deletado com sucesso")
+        logger.info(f"🗑️ Bot {bot_id} deletado com sucesso")
         return {"status": "deletado", "bot_nome": dados_log["nome"]}
 
     except Exception as e:
         db.rollback()
         logger.error(f"❌ Erro ao deletar bot {bot_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Erro ao excluir bot: {str(e)}")
-        
+
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 @app.post("/api/admin/bots/{bot_id}/toggle")
