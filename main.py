@@ -4465,8 +4465,32 @@ def listar_bots(
 # 1. LISTAR PLANOS
 @app.get("/api/admin/bots/{bot_id}/plans")
 def list_plans(bot_id: int, db: Session = Depends(get_db)):
-    planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
-    return planos
+    try:
+        logger.info(f"📋 Buscando planos para bot_id: {bot_id}")
+        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
+        
+        # 🔥 Serializa manualmente para evitar problemas com JSON/NULL
+        result = []
+        for p in planos:
+            result.append({
+                "id": p.id,
+                "bot_id": p.bot_id,
+                "nome_exibicao": p.nome_exibicao,
+                "descricao": p.descricao,
+                "preco_atual": p.preco_atual,
+                "preco_cheio": p.preco_cheio,
+                "dias_duracao": p.dias_duracao,
+                "is_lifetime": p.is_lifetime,
+                "key_id": p.key_id,
+                "id_canal_destino": p.id_canal_destino
+            })
+        
+        logger.info(f"✅ {len(result)} plano(s) encontrado(s)")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao buscar planos: {e}")
+        return []
 
 # 2. CRIAR PLANO (CORRIGIDO)
 @app.post("/api/admin/bots/{bot_id}/plans")
