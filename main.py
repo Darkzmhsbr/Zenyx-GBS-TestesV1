@@ -10206,3 +10206,64 @@ def nuke_duplicate_leads(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         return {"status": "erro", "msg": str(e)}
+
+# ============================================================================
+# 🔧 ENDPOINT TEMPORÁRIO PARA CORRIGIR O BANCO DE DADOS
+# ============================================================================
+@app.get("/fix-database-now")
+async def fix_database_emergency(db: Session = Depends(get_db)):
+    """
+    Endpoint de emergência para criar as colunas buttons_config
+    Acesse: https://seu-dominio.railway.app/fix-database-now
+    """
+    try:
+        from sqlalchemy import text
+        
+        resultados = []
+        
+        # 1. Adicionar coluna em bot_flows
+        try:
+            db.execute(text("ALTER TABLE bot_flows ADD COLUMN buttons_config JSON;"))
+            db.commit()
+            resultados.append("✅ Coluna buttons_config CRIADA em bot_flows")
+        except Exception as e:
+            if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+                resultados.append("ℹ️ Coluna buttons_config JÁ EXISTE em bot_flows")
+            else:
+                resultados.append(f"⚠️ Erro em bot_flows: {str(e)}")
+        
+        # 2. Adicionar coluna em bot_flow_steps
+        try:
+            db.execute(text("ALTER TABLE bot_flow_steps ADD COLUMN buttons_config JSON;"))
+            db.commit()
+            resultados.append("✅ Coluna buttons_config CRIADA em bot_flow_steps")
+        except Exception as e:
+            if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+                resultados.append("ℹ️ Coluna buttons_config JÁ EXISTE em bot_flow_steps")
+            else:
+                resultados.append(f"⚠️ Erro em bot_flow_steps: {str(e)}")
+        
+        # 3. Verificação final
+        resultado_verificacao = db.execute(text("""
+            SELECT table_name, column_name, data_type
+            FROM information_schema.columns
+            WHERE table_name IN ('bot_flows', 'bot_flow_steps')
+            AND column_name = 'buttons_config'
+            ORDER BY table_name;
+        """)).fetchall()
+        
+        return {
+            "status": "success",
+            "mensagem": "Processo de correção executado!",
+            "resultados": resultados,
+            "colunas_encontradas": [
+                {"tabela": r[0], "coluna": r[1], "tipo": r[2]} 
+                for r in resultado_verificacao
+            ]
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "mensagem": f"Erro ao executar correção: {str(e)}"
+        }
