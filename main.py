@@ -4828,6 +4828,7 @@ class FlowUpdate(BaseModel):
     miniapp_url: Optional[str] = None
     miniapp_btn_text: Optional[str] = None
     msg_pix: Optional[str] = None  # 🔥 NOVO CAMPO PARA O PIX
+    buttons_config: Optional[List[dict]] = None  # 🔥 CONFIGURAÇÃO DE BOTÕES (PLAYLIST)
     steps: Optional[List[dict]] = None # 🔥 IMPORTANTE: Aceitar os passos extras
 
 @app.post("/api/admin/bots/{bot_id}/flow")
