@@ -4769,23 +4769,17 @@ def atualizar_plano(
 # =========================================================
 # 💬 FLUXO DO BOT (V2)
 # =========================================================
-# =========================================================
-# 💬 FLUXO DO BOT (V2)
-# =========================================================
 @app.get("/api/admin/bots/{bot_id}/flow")
 def obter_fluxo(
     bot_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+    current_user = Depends(get_current_user)
 ):
-    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
     verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
-    # ... RESTO DO CÓDIGO PERMANECE IGUAL
     fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
     
     if not fluxo:
-        # Retorna padrão se não existir
         return {
             "msg_boas_vindas": "Olá! Seja bem-vindo(a).",
             "media_url": "",
@@ -4798,10 +4792,28 @@ def obter_fluxo(
             "start_mode": "padrao",
             "miniapp_url": "",
             "miniapp_btn_text": "ABRIR LOJA",
-            "msg_pix": ""  # 🔥 NOVO CAMPO: Retorna vazio se não tiver para o frontend tratar
+            "msg_pix": "",
+            "buttons_config": []  # 🔥 ADICIONA CAMPO VAZIO
         }
     
-    return fluxo
+    # 🔥 SERIALIZA MANUALMENTE PARA GARANTIR QUE buttons_config SEJA INCLUÍDO
+    return {
+        "id": fluxo.id,
+        "bot_id": fluxo.bot_id,
+        "msg_boas_vindas": fluxo.msg_boas_vindas,
+        "media_url": fluxo.media_url,
+        "btn_text_1": fluxo.btn_text_1,
+        "autodestruir_1": fluxo.autodestruir_1,
+        "msg_2_texto": fluxo.msg_2_texto,
+        "msg_2_media": fluxo.msg_2_media,
+        "mostrar_planos_2": fluxo.mostrar_planos_2,
+        "mostrar_planos_1": fluxo.mostrar_planos_1,
+        "start_mode": fluxo.start_mode,
+        "miniapp_url": fluxo.miniapp_url,
+        "miniapp_btn_text": fluxo.miniapp_btn_text,
+        "msg_pix": fluxo.msg_pix,
+        "buttons_config": fluxo.buttons_config if fluxo.buttons_config else []  # 🔥 GARANTE QUE SEJA ARRAY
+    }
 
 class FlowUpdate(BaseModel):
     msg_boas_vindas: Optional[str] = None
