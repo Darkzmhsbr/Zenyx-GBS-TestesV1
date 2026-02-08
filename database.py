@@ -71,7 +71,10 @@ class SystemConfig(Base):
 # =========================================================
 # 🤖 BOTS
 # =========================================================
-class Bot(Base):
+# =========================================================
+# 🤖 BOTS (TABELA PRINCIPAL)
+# =========================================================
+class BotModel(Base):  # ← MUDANÇA CRÍTICA: de "Bot" para "BotModel"
     __tablename__ = "bots"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -92,8 +95,20 @@ class Bot(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # 🆕 RELACIONAMENTO COM USUÁRIO (OWNER)
-    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # nullable=True para migração
+    owner_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)  # ← ADICIONADO ondelete CASCADE
     owner = relationship("User", back_populates="bots")
+    
+    # Novos campos (Landing Page)
+    bg_color = Column(String(20), default="#000000")
+    banner_desk_url = Column(String(500), nullable=True)
+    video_preview_url = Column(String(500), nullable=True)
+    model_img_url = Column(String(500), nullable=True)
+    model_name = Column(String(100), nullable=True)
+    model_desc = Column(Text, nullable=True)
+    footer_banner_url = Column(String(500), nullable=True)
+    deco_lines_url = Column(String(500), nullable=True)
+    model_name_color = Column(String(20), default="#FFFFFF")
+    model_desc_color = Column(String(20), default="#CCCCCC")
     
     # --- RELACIONAMENTOS (CASCADE) ---
     planos = relationship("PlanoConfig", back_populates="bot", cascade="all, delete-orphan")
@@ -444,7 +459,7 @@ class MiniAppConfig(Base):
     # Rodapé
     footer_text = Column(String, default="© 2026 Premium Club.")
 
-    bot = relationship("Bot", back_populates="miniapp_config")
+    bot = relationship("BotModel", back_populates="planos")
 
 # 2. Categorias e Conteúdo
 class MiniAppCategory(Base):
