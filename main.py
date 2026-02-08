@@ -10210,16 +10210,25 @@ def nuke_duplicate_leads(db: Session = Depends(get_db)):
 # ============================================================================
 # 🔧 ENDPOINT TEMPORÁRIO PARA CORRIGIR O BANCO DE DADOS
 # ============================================================================
+# ============================================================================
+# 🔧 ENDPOINT TEMPORÁRIO PARA CORRIGIR O BANCO DE DADOS (V2 - COM ROLLBACK)
+# ============================================================================
 @app.get("/fix-database-now")
 async def fix_database_emergency(db: Session = Depends(get_db)):
     """
     Endpoint de emergência para criar as colunas buttons_config
-    Acesse: https://seu-dominio.railway.app/fix-database-now
+    Acesse: https://zenyx-gbs-testesv1-production.up.railway.app/fix-database-now
     """
     try:
         from sqlalchemy import text
         
         resultados = []
+        
+        # 🔥 FORÇA ROLLBACK DE QUALQUER TRANSAÇÃO PENDENTE
+        try:
+            db.rollback()
+        except:
+            pass
         
         # 1. Adicionar coluna em bot_flows
         try:
@@ -10227,10 +10236,12 @@ async def fix_database_emergency(db: Session = Depends(get_db)):
             db.commit()
             resultados.append("✅ Coluna buttons_config CRIADA em bot_flows")
         except Exception as e:
-            if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+            db.rollback()  # 🔥 Rollback após erro
+            error_msg = str(e).lower()
+            if "already exists" in error_msg or "duplicate" in error_msg:
                 resultados.append("ℹ️ Coluna buttons_config JÁ EXISTE em bot_flows")
             else:
-                resultados.append(f"⚠️ Erro em bot_flows: {str(e)}")
+                resultados.append(f"⚠️ Erro em bot_flows: {str(e)[:200]}")
         
         # 2. Adicionar coluna em bot_flow_steps
         try:
@@ -10238,32 +10249,46 @@ async def fix_database_emergency(db: Session = Depends(get_db)):
             db.commit()
             resultados.append("✅ Coluna buttons_config CRIADA em bot_flow_steps")
         except Exception as e:
-            if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
+            db.rollback()  # 🔥 Rollback após erro
+            error_msg = str(e).lower()
+            if "already exists" in error_msg or "duplicate" in error_msg:
                 resultados.append("ℹ️ Coluna buttons_config JÁ EXISTE em bot_flow_steps")
             else:
-                resultados.append(f"⚠️ Erro em bot_flow_steps: {str(e)}")
+                resultados.append(f"⚠️ Erro em bot_flow_steps: {str(e)[:200]}")
         
-        # 3. Verificação final
-        resultado_verificacao = db.execute(text("""
-            SELECT table_name, column_name, data_type
-            FROM information_schema.columns
-            WHERE table_name IN ('bot_flows', 'bot_flow_steps')
-            AND column_name = 'buttons_config'
-            ORDER BY table_name;
-        """)).fetchall()
-        
-        return {
-            "status": "success",
-            "mensagem": "Processo de correção executado!",
-            "resultados": resultados,
-            "colunas_encontradas": [
+        # 3. Verificação final (em uma nova transação limpa)
+        try:
+            db.rollback()  # 🔥 Garante transação limpa antes da verificação
+            resultado_verificacao = db.execute(text("""
+                SELECT table_name, column_name, data_type
+                FROM information_schema.columns
+                WHERE table_name IN ('bot_flows', 'bot_flow_steps')
+                AND column_name = 'buttons_config'
+                ORDER BY table_name;
+            """)).fetchall()
+            
+            colunas = [
                 {"tabela": r[0], "coluna": r[1], "tipo": r[2]} 
                 for r in resultado_verificacao
             ]
+        except Exception as e:
+            colunas = []
+            resultados.append(f"⚠️ Erro na verificação: {str(e)[:200]}")
+        
+        return {
+            "status": "success" if len(colunas) > 0 else "partial",
+            "mensagem": "Processo de correção executado!",
+            "resultados": resultados,
+            "colunas_encontradas": colunas,
+            "total_colunas": len(colunas)
         }
         
     except Exception as e:
+        try:
+            db.rollback()
+        except:
+            pass
         return {
             "status": "error",
-            "mensagem": f"Erro ao executar correção: {str(e)}"
+            "mensagem": f"Erro ao executar correção: {str(e)[:500]}"
         }
