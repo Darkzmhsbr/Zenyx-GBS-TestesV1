@@ -5725,9 +5725,30 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
 # =========================================================
 
 def enviar_oferta_final(bot_temp, chat_id, fluxo, bot_id, db):
-    """Envia a oferta final (Planos) com HTML"""
+    """Envia a oferta final (Planos) com HTML e suporte a buttons_config_2"""
     mk = types.InlineKeyboardMarkup()
-    if fluxo and fluxo.mostrar_planos_2:
+    
+    # 🔥 NOVA LÓGICA: Usa buttons_config_2 se existir
+    if fluxo and fluxo.buttons_config_2 and len(fluxo.buttons_config_2) > 0:
+        # Renderiza botões personalizados (híbridos)
+        for btn in fluxo.buttons_config_2:
+            if btn.get('type') == 'plan':
+                # Busca o plano pelo ID
+                plano = db.query(PlanoConfig).filter(PlanoConfig.id == btn.get('value')).first()
+                if plano:
+                    mk.add(types.InlineKeyboardButton(
+                        f"{plano.nome_exibicao}",  # 🔥 Usa apenas o nome
+                        callback_data=f"checkout_{plano.id}"
+                    ))
+            elif btn.get('type') == 'link':
+                # Adiciona botão de link
+                mk.add(types.InlineKeyboardButton(
+                    btn.get('text', 'Link'), 
+                    url=btn.get('value')
+                ))
+    
+    # 🔥 FALLBACK: Lógica antiga (se não tiver buttons_config_2)
+    elif fluxo and fluxo.mostrar_planos_2:
         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
         for p in planos:
             mk.add(types.InlineKeyboardButton(
@@ -5741,13 +5762,10 @@ def enviar_oferta_final(bot_temp, chat_id, fluxo, bot_id, db):
     try:
         if media:
             if media.lower().endswith(('.mp4', '.mov', '.avi')): 
-                # 🔥 parse_mode="HTML"
                 bot_temp.send_video(chat_id, media, caption=texto, reply_markup=mk, parse_mode="HTML")
             else: 
-                # 🔥 parse_mode="HTML"
                 bot_temp.send_photo(chat_id, media, caption=texto, reply_markup=mk, parse_mode="HTML")
         else:
-            # 🔥 parse_mode="HTML"
             bot_temp.send_message(chat_id, texto, reply_markup=mk, parse_mode="HTML")
             
     except Exception as e:
@@ -8333,11 +8351,30 @@ def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
 # 📤 FUNÇÃO AUXILIAR: ENVIAR OFERTA FINAL (CORRIGIDA)
 # =========================================================
 def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
-    """Envia a oferta final (Planos) com formatação HTML correta"""
+    """Envia a oferta final (Planos) com formatação HTML correta e suporte a buttons_config_2"""
     mk = types.InlineKeyboardMarkup()
     
-    # Busca os planos apenas se a configuração mandar mostrar
-    if fluxo and fluxo.mostrar_planos_2:
+    # 🔥 NOVA LÓGICA: Usa buttons_config_2 se existir
+    if fluxo and fluxo.buttons_config_2 and len(fluxo.buttons_config_2) > 0:
+        # Renderiza botões personalizados (híbridos)
+        for btn in fluxo.buttons_config_2:
+            if btn.get('type') == 'plan':
+                # Busca o plano pelo ID
+                plano = db.query(PlanoConfig).filter(PlanoConfig.id == btn.get('value')).first()
+                if plano:
+                    mk.add(types.InlineKeyboardButton(
+                        f"{plano.nome_exibicao}",  # 🔥 Usa apenas o nome
+                        callback_data=f"checkout_{plano.id}"
+                    ))
+            elif btn.get('type') == 'link':
+                # Adiciona botão de link
+                mk.add(types.InlineKeyboardButton(
+                    btn.get('text', 'Link'), 
+                    url=btn.get('value')
+                ))
+    
+    # 🔥 FALLBACK: Lógica antiga (se não tiver buttons_config_2)
+    elif fluxo and fluxo.mostrar_planos_2:
         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
         for p in planos:
             mk.add(types.InlineKeyboardButton(
@@ -8345,49 +8382,22 @@ def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
                 callback_data=f"checkout_{p.id}"
             ))
     
-    # Texto e Mídia (Fallback se não houver configuração)
     txt = fluxo.msg_2_texto if (fluxo and fluxo.msg_2_texto) else "Escolha seu plano:"
     med = fluxo.msg_2_media if fluxo else None
     
     try:
         if med:
-            # Verifica se é vídeo
             if med.lower().endswith(('.mp4', '.mov', '.avi')): 
-                tb.send_video(
-                    cid, 
-                    med, 
-                    caption=txt, 
-                    reply_markup=mk, 
-                    parse_mode="HTML"  # 🔥 CORREÇÃO: Ativa formatação no vídeo
-                )
-            # Senão, assume que é foto
+                tb.send_video(cid, med, caption=txt, reply_markup=mk, parse_mode="HTML")
             else: 
-                tb.send_photo(
-                    cid, 
-                    med, 
-                    caption=txt, 
-                    reply_markup=mk, 
-                    parse_mode="HTML"  # 🔥 CORREÇÃO: Ativa formatação na foto
-                )
+                tb.send_photo(cid, med, caption=txt, reply_markup=mk, parse_mode="HTML")
         else:
-            # Apenas Texto
-            tb.send_message(
-                cid, 
-                txt, 
-                reply_markup=mk, 
-                parse_mode="HTML",      # 🔥 CORREÇÃO: Ativa formatação no texto
-                disable_web_page_preview=True
-            )
+            tb.send_message(cid, txt, reply_markup=mk, parse_mode="HTML")
             
     except Exception as e:
-        # Log de erro para ajudar no debug
-        logger.error(f"Erro ao enviar oferta final (HTML falhou?): {e}")
+        logger.error(f"Erro ao enviar oferta final: {e}")
+        tb.send_message(cid, txt, reply_markup=mk)
         
-        # Fallback de segurança: Tenta enviar SEM HTML se der erro na formatação
-        try:
-            tb.send_message(cid, txt, reply_markup=mk)
-        except:
-            pass
 # =========================================================
 # 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
 # =========================================================
