@@ -6016,11 +6016,32 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 
                 # SE FOR PADRÃO
                 else:
-                    if flow and flow.mostrar_planos_1:
+                    # 🔥 NOVA LÓGICA: Usa buttons_config se existir
+                    if flow and flow.buttons_config and len(flow.buttons_config) > 0:
+                        # Renderiza botões personalizados (híbridos)
+                        for btn in flow.buttons_config:
+                            if btn.get('type') == 'plan':
+                                # Busca o plano pelo ID
+                                plano = db.query(PlanoConfig).filter(PlanoConfig.id == btn.get('value')).first()
+                                if plano:
+                                    preco_txt = f"R$ {plano.preco_atual:.2f}".replace('.', ',')
+                                    mk.add(types.InlineKeyboardButton(
+                                        f"{btn.get('text', plano.nome_exibicao)}", 
+                                        callback_data=f"checkout_{plano.id}"
+                                    ))
+                            elif btn.get('type') == 'link':
+                                # Adiciona botão de link
+                                mk.add(types.InlineKeyboardButton(
+                                    btn.get('text', 'Link'), 
+                                    url=btn.get('value')
+                                ))
+                    
+                    # 🔥 FALLBACK: Lógica antiga (se não tiver buttons_config)
+                    elif flow and flow.mostrar_planos_1:
                         planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
                         for pl in planos: 
                             preco_txt = f"R$ {pl.preco_atual:.2f}".replace('.', ',')
-                            mk.add(types.InlineKeyboardButton(f" {pl.nome_exibicao} - {preco_txt}", callback_data=f"checkout_{pl.id}"))
+                            mk.add(types.InlineKeyboardButton(f"{pl.nome_exibicao} - {preco_txt}", callback_data=f"checkout_{pl.id}"))
                     else: 
                         mk.add(types.InlineKeyboardButton(flow.btn_text_1 if flow else "Ver Conteúdo", callback_data="step_1"))
 
