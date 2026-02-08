@@ -10304,3 +10304,38 @@ async def fix_database_emergency(db: Session = Depends(get_db)):
             "status": "error",
             "mensagem": f"Erro ao executar correção: {str(e)[:500]}"
         }
+
+# ============================================================================
+# 🐛 DEBUG: Verificar o que está sendo retornado no flow
+# ============================================================================
+@app.get("/debug-flow/{bot_id}")
+async def debug_flow(bot_id: int, db: Session = Depends(get_db)):
+    """
+    Endpoint de debug para ver EXATAMENTE o que está no banco
+    Acesse: https://seu-dominio.railway.app/debug-flow/14
+    """
+    try:
+        fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+        
+        if not fluxo:
+            return {"erro": "Fluxo não encontrado"}
+        
+        # Retorna TUDO do banco, incluindo valores brutos
+        return {
+            "status": "success",
+            "dados_brutos": {
+                "id": fluxo.id,
+                "bot_id": fluxo.bot_id,
+                "buttons_config": fluxo.buttons_config,
+                "buttons_config_type": str(type(fluxo.buttons_config)),
+                "buttons_config_is_none": fluxo.buttons_config is None,
+                "buttons_config_is_empty": fluxo.buttons_config == [],
+                "msg_boas_vindas": fluxo.msg_boas_vindas[:50] if fluxo.msg_boas_vindas else None,
+                "start_mode": fluxo.start_mode
+            }
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "mensagem": str(e)
+        }
