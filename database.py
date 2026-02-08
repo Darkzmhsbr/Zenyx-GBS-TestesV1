@@ -53,7 +53,7 @@ class User(Base):
     taxa_venda = Column(Integer, default=60)      # Taxa em centavos (Padrão: 60)
 
     # RELACIONAMENTO: Um usuário possui vários bots
-    bots = relationship("Bot", back_populates="owner")
+    bots = relationship("BotModel", back_populates="owner")  # ✅ CORRIGIDO
     
     # Relacionamentos de Logs e Notificações
     audit_logs = relationship("AuditLog", back_populates="user")
@@ -147,7 +147,7 @@ class BotAdmin(Base):
     telegram_id = Column(String)
     nome = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    bot = relationship("Bot", back_populates="admins")
+    bot = relationship("BotModel", back_populates="admins")  # ✅ CORRIGIDO
 
 # =========================================================
 # 🛒 ORDER BUMP (OFERTA EXTRA NO CHECKOUT)
@@ -172,7 +172,7 @@ class OrderBumpConfig(Base):
     btn_aceitar = Column(String, default="✅ SIM, ADICIONAR")
     btn_recusar = Column(String, default="❌ NÃO, OBRIGADO")
     
-    bot = relationship("Bot", back_populates="order_bump")
+    bot = relationship("BotModel", back_populates="order_bump")  # ✅ CORRIGIDO
 
 class PlanoConfig(Base):
     __tablename__ = "plano_config"
@@ -189,7 +189,7 @@ class PlanoConfig(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     id_canal_destino = Column(String, nullable=True) 
     
-    bot = relationship("Bot", back_populates="planos")
+    bot = relationship("BotModel", back_populates="planos")  # ✅ CORRIGIDO
 
 # =========================================================
 # 📢 REMARKETING
@@ -227,7 +227,7 @@ class RemarketingCampaign(Base):
     data_envio = Column(DateTime, default=datetime.utcnow)
     
     # Relacionamento
-    bot = relationship("Bot", back_populates="remarketing_campaigns")
+    bot = relationship("BotModel", back_populates="remarketing_campaigns")  # ✅ CORRIGIDO
 
 # =========================================================
 # 🔄 WEBHOOK RETRY SYSTEM
@@ -261,7 +261,7 @@ class BotFlow(Base):
     __tablename__ = "bot_flows"
     id = Column(Integer, primary_key=True, index=True)
     bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
-    bot = relationship("Bot", back_populates="fluxo")
+    bot = relationship("BotModel", back_populates="fluxo")  # ✅ CORRIGIDO
     
     # --- CONFIGURAÇÃO DE MODO DE INÍCIO ---
     start_mode = Column(String, default="padrao") # 'padrao', 'miniapp'
@@ -303,7 +303,7 @@ class BotFlowStep(Base):
     delay_seconds = Column(Integer, default=0)
     
     created_at = Column(DateTime, default=datetime.utcnow)
-    bot = relationship("Bot", back_populates="steps")
+    bot = relationship("BotModel", back_populates="steps")  # ✅ CORRIGIDO
 
 # =========================================================
 # 🔗 TRACKING (RASTREAMENTO DE LINKS)
@@ -336,7 +336,7 @@ class TrackingLink(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     folder = relationship("TrackingFolder", back_populates="links")
-    bot = relationship("Bot", back_populates="tracking_links")
+    bot = relationship("BotModel", back_populates="tracking_links")  # ✅ CORRIGIDO
 
 # =========================================================
 # 🛒 PEDIDOS
@@ -426,7 +426,7 @@ class Lead(Base):
     # No arquivo database.py, dentro de class Lead(Base):
 
     # Substitua a linha antiga do relationship por esta:
-    bot = relationship("Bot", back_populates="leads", overlaps="bot_ref")
+    bot = relationship("BotModel", back_populates="leads", overlaps="bot_ref")  # ✅ CORRIGIDO
     # Se TrackingLink tiver back_populates="leads", descomente abaixo:
     # tracking_link = relationship("TrackingLink", back_populates="leads")
 
@@ -459,7 +459,7 @@ class MiniAppConfig(Base):
     # Rodapé
     footer_text = Column(String, default="© 2026 Premium Club.")
 
-    bot = relationship("BotModel", back_populates="planos")
+    bot = relationship("BotModel", back_populates="miniapp_categories")  # ✅ CORRIGIDO
 
 # 2. Categorias e Conteúdo
 class MiniAppCategory(Base):
@@ -492,7 +492,7 @@ class MiniAppCategory(Base):
     is_hacker_mode = Column(Boolean, default=False)
     content_json = Column(Text)
     
-    bot = relationship("Bot", back_populates="miniapp_categories")
+    bot = relationship("BotModel", back_populates="miniapp_categories")
 
 # =========================================================
 # 📋 AUDIT LOGS (FASE 3.3 - AUDITORIA)
@@ -584,7 +584,7 @@ class RemarketingConfig(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    bot = relationship("Bot", back_populates="remarketing_config")
+    bot = relationship("BotModel", back_populates="remarketing_config")  # ✅ CORRIGIDO
     
     def __repr__(self):
         return f"<RemarketingConfig(bot_id={self.bot_id}, active={self.is_active}, delay={self.delay_minutes}min)>"
@@ -614,7 +614,7 @@ class AlternatingMessages(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
-    bot = relationship("Bot", back_populates="alternating_messages")
+    bot = relationship("BotModel", back_populates="alternating_messages")  # ✅ CORRIGIDO
     
     def __repr__(self):
         return f"<AlternatingMessages(bot_id={self.bot_id}, active={self.is_active}, msgs={len(self.messages)})>"
@@ -651,7 +651,7 @@ class RemarketingLog(Base):
     campaign_id = Column(String, nullable=True)
     
     # Relacionamento
-    bot = relationship("Bot", back_populates="remarketing_logs")
+    bot = relationship("BotModel", back_populates="remarketing_logs")  # ✅ CORRIGIDO
     
     def __repr__(self):
         return f"<RemarketingLog(bot_id={self.bot_id}, user_id={self.user_id}, status={self.status})>"
