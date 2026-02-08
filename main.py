@@ -4189,6 +4189,7 @@ def update_bot(
     logger.info(f"✅ Bot atualizado: {bot_db.nome} (Owner: {current_user.username})")
     return {"status": "ok", "msg": "Bot atualizado com sucesso"}
 
+# --- ROTA: EXCLUIR BOT (COM LIMPEZA TOTAL E AUDITORIA) ---
 @app.delete("/api/admin/bots/{bot_id}")
 def deletar_bot(
     bot_id: int,
@@ -4197,38 +4198,83 @@ def deletar_bot(
     current_user = Depends(get_current_user)
 ):
     """
-    Deleta bot apenas se pertencer ao usuário
-    🆕 Agora com log de auditoria
+    Deleta bot com LIMPEZA TOTAL (Cascade Manual) e log de auditoria.
+    Funciona mesmo se o bot tiver vendas, leads e planos vinculados.
     """
+    # 1. Verifica se o bot existe e pertence ao usuário (Segurança)
     bot = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
+    # Salva dados para o log antes de apagar
     nome_bot = bot.nome
+    token_bot = bot.token
     canal_vip = bot.id_canal_vip
-    username = bot.username
+    username_bot = bot.username
     
-    db.delete(bot)
-    db.commit()
-    
-    # 📋 AUDITORIA: Bot deletado
-    log_action(
-        db=db,
-        user_id=current_user.id,
-        username=current_user.username,
-        action="bot_deleted",
-        resource_type="bot",
-        resource_id=bot_id,
-        description=f"Deletou bot '{nome_bot}'",
-        details={
-            "bot_name": nome_bot,
-            "username": username,
-            "canal_vip": canal_vip
-        },
-        ip_address=get_client_ip(request),
-        user_agent=request.headers.get("user-agent")
-    )
-    
-    logger.info(f"🗑 Bot deletado: {nome_bot} (Owner: {current_user.username})")
-    return {"status": "deletado", "bot_nome": nome_bot}
+    try:
+        # 2. Tenta remover o Webhook do Telegram (Limpeza externa)
+        # Envolvemos em try/except para que, se o token for inválido, não impeça a exclusão do banco
+        try:
+            if token_bot:
+                tb = telebot.TeleBot(token_bot)
+                tb.delete_webhook()
+        except Exception as e_telegram:
+            logger.warning(f"⚠️ Não foi possível remover webhook do Telegram (Token pode ser inválido): {e_telegram}")
+
+        # 3. FAXINA PESADA (Apaga os dependentes na ordem correta)
+        # O uso de synchronize_session=False é mais rápido para deletar em massa
+        
+        # A. Apaga Planos Configurados (O erro que você teve foi aqui!)
+        db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).delete(synchronize_session=False)
+        
+        # B. Apaga Fluxos do Bot
+        db.query(BotFlow).filter(BotFlow.bot_id == bot_id).delete(synchronize_session=False)
+        
+        # C. Apaga Campanhas e Logs de Remarketing
+        db.query(RemarketingLog).filter(RemarketingLog.bot_id == bot_id).delete(synchronize_session=False)
+        db.query(RemarketingCampaign).filter(RemarketingCampaign.bot_id == bot_id).delete(synchronize_session=False)
+        
+        # D. Apaga Mensagens Alternadas
+        db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).delete(synchronize_session=False)
+        
+        # E. Apaga Leads (Geralmente é a tabela maior)
+        db.query(Lead).filter(Lead.bot_id == bot_id).delete(synchronize_session=False)
+        
+        # F. Apaga Pedidos (Vendas)
+        db.query(Pedido).filter(Pedido.bot_id == bot_id).delete(synchronize_session=False)
+
+        # 4. Finalmente, apaga o Pai (O Bot)
+        db.delete(bot)
+        
+        # 5. Efetiva todas as mudanças no banco
+        db.commit()
+        
+        # 6. 📋 AUDITORIA: Registra a ação
+        log_action(
+            db=db,
+            user_id=current_user.id,
+            username=current_user.username,
+            action="bot_deleted",
+            resource_type="bot",
+            resource_id=bot_id,
+            description=f"Deletou bot '{nome_bot}' e todos os dados vinculados",
+            details={
+                "bot_name": nome_bot,
+                "username": username_bot,
+                "canal_vip": canal_vip,
+                "cleanup": "full_cascade_manual"
+            },
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent")
+        )
+        
+        logger.info(f"🗑️ Bot deletado com sucesso: {nome_bot} (Owner: {current_user.username})")
+        return {"status": "deletado", "bot_nome": nome_bot, "msg": "Bot e todos os dados vinculados foram removidos."}
+
+    except Exception as e:
+        db.rollback() # Se der qualquer erro no meio, desfaz tudo para não corromper o banco
+        logger.error(f"❌ Erro crítico ao deletar bot {bot_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro interno ao excluir bot: {str(e)}")
+        
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 # --- NOVA ROTA: LIGAR/DESLIGAR BOT (TOGGLE) ---
 @app.post("/api/admin/bots/{bot_id}/toggle")
