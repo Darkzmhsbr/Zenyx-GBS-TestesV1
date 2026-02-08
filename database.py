@@ -128,7 +128,7 @@ class Bot(Base):
 class BotAdmin(Base):
     __tablename__ = "bot_admins"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"))
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     telegram_id = Column(String)
     nome = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -140,8 +140,8 @@ class BotAdmin(Base):
 class OrderBumpConfig(Base):
     __tablename__ = "order_bump_config"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
-    
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
+        
     ativo = Column(Boolean, default=False)
     nome_produto = Column(String) # Nome do produto extra
     preco = Column(Float)         # Valor a ser somado
@@ -159,29 +159,22 @@ class OrderBumpConfig(Base):
     
     bot = relationship("Bot", back_populates="order_bump")
 
-# =========================================================
-# 💲 PLANOS
-# =========================================================
 class PlanoConfig(Base):
     __tablename__ = "plano_config"
     
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"))
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)  # ✅ COM CASCADE
     nome_exibicao = Column(String(100))
     descricao = Column(Text)
     preco_atual = Column(Float)
     preco_cheio = Column(Float)
     dias_duracao = Column(Integer, default=30)
-    is_lifetime = Column(Boolean, default=False)  # ← ADICIONAR ESTA LINHA
+    is_lifetime = Column(Boolean, default=False)
     key_id = Column(String(100), unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-
-    # 👇 ADICIONE ESTA LINHA AQUI 👇
     id_canal_destino = Column(String, nullable=True) 
-    # 👆 FIM DA ADIÇÃO 👆
     
-    # Relacionamentos (manter tudo que já existe abaixo)
-    bot = relationship("Bot", back_populates="planos")
+    bot = relationship("BotModel", back_populates="planos")  # ✅ Nome correto do model
 
 # =========================================================
 # 📢 REMARKETING
@@ -191,7 +184,7 @@ class RemarketingCampaign(Base):
     
     # Identificação
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"))
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     campaign_id = Column(String, unique=True)
     
     # Configuração
@@ -252,7 +245,7 @@ class WebhookRetry(Base):
 class BotFlow(Base):
     __tablename__ = "bot_flows"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     bot = relationship("Bot", back_populates="fluxo")
     
     # --- CONFIGURAÇÃO DE MODO DE INÍCIO ---
@@ -281,7 +274,7 @@ class BotFlow(Base):
 class BotFlowStep(Base):
     __tablename__ = "bot_flow_steps"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"))
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     step_order = Column(Integer, default=1)
     msg_texto = Column(Text, nullable=True)
     msg_media = Column(String, nullable=True)
@@ -313,7 +306,7 @@ class TrackingLink(Base):
     __tablename__ = "tracking_links"
     id = Column(Integer, primary_key=True, index=True)
     folder_id = Column(Integer, ForeignKey("tracking_folders.id"))
-    bot_id = Column(Integer, ForeignKey("bots.id"))
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     
     nome = Column(String)      # Ex: "Stories Manhã"
     codigo = Column(String, unique=True, index=True) # Ex: "xyz123" (o parâmetro do /start)
@@ -336,7 +329,7 @@ class TrackingLink(Base):
 class Pedido(Base):
     __tablename__ = "pedidos"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"))
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     
     telegram_id = Column(String)
     first_name = Column(String, nullable=True)
@@ -429,7 +422,7 @@ class Lead(Base):
 # 1. Configuração Visual Global
 class MiniAppConfig(Base):
     __tablename__ = "miniapp_config"
-    bot_id = Column(Integer, ForeignKey("bots.id"), primary_key=True)
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     
     # Visual Base
     logo_url = Column(String, nullable=True)
@@ -456,7 +449,7 @@ class MiniAppConfig(Base):
 class MiniAppCategory(Base):
     __tablename__ = "miniapp_categories"
     id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"))
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), nullable=False)
     slug = Column(String)
     title = Column(String)
     description = Column(String)
