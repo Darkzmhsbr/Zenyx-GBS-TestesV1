@@ -1040,14 +1040,13 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
         
         db = SessionLocal()
         try:
-            # ✅ CORREÇÃO MESTRE: Busca config SEM filtrar por 'is_active' para permitir Alternating separado
+            # Busca config SEM filtrar por 'is_active' para permitir Alternating separado
             config = db.query(RemarketingConfig).filter(
                 RemarketingConfig.bot_id == bot_id
             ).first()
             
+            # Objeto dummy se não existir config, para não quebrar
             if not config:
-                logger.warning(f"⚠️ [SCHEDULE] Config não encontrada para bot {bot_id}. Criando defaults virtuais.")
-                # Cria um objeto dummy apenas para não quebrar o fluxo se não existir config no banco
                 class DummyConfig:
                     is_active = False
                     message_text = ""
@@ -1066,8 +1065,6 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 logger.error(f"❌ [SCHEDULE] Bot {bot_id} não encontrado ou sem token")
                 return
             
-            logger.info(f"✅ [SCHEDULE] Bot validado - Token: {bot.token[:10]}...")
-
             config_dict = {
                 'message_text': config.message_text, 
                 'media_url': config.media_url, 
@@ -1080,7 +1077,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             }
 
             # ==================================================================
-            # 1. Agenda Mensagens Alternantes (INDEPENDENTE DO REMARKETING)
+            # 1. Agenda Mensagens Alternantes (INTELIGENTE 🧠)
             # ==================================================================
             alt_config = db.query(AlternatingMessages).filter(
                 AlternatingMessages.bot_id == bot_id, 
@@ -1090,11 +1087,23 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             if alt_config and alt_config.messages:
                 logger.info(f"✅ [SCHEDULE] Mensagens alternantes ativadas - {len(alt_config.messages)} mensagens")
                 
-                # Calcula quando parar (baseado no delay do remarketing ou padrão 60 min se inativo)
-                delay_base = config.delay_minutes if config.delay_minutes > 0 else 60
-                stop_at = datetime.now() + timedelta(minutes=delay_base) - timedelta(seconds=alt_config.stop_before_remarketing_seconds)
+                # 🧠 LÓGICA DE TEMPO: 
+                # Se Remarketing ATIVO -> Para antes do remarketing
+                # Se Remarketing INATIVO -> Usa o tempo definido na própria rotação (ou 60 min padrão)
                 
-                logger.info(f"⏰ [SCHEDULE] Alternating vai parar em: {stop_at.strftime('%H:%M:%S')}")
+                agora = datetime.now()
+                
+                if config.is_active:
+                    # Lógica padrão: Parar X segundos antes do disparo
+                    delay_base_minutes = config.delay_minutes
+                    stop_at = agora + timedelta(minutes=delay_base_minutes) - timedelta(seconds=alt_config.stop_before_remarketing_seconds)
+                    logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Ativo. Parar em: {stop_at.strftime('%H:%M:%S')}")
+                else:
+                    # Nova Lógica: Tempo independente
+                    # Tenta pegar o campo novo, se não existir usa 60 minutos
+                    duracao_rotacao = getattr(alt_config, 'max_duration_minutes', 60)
+                    stop_at = agora + timedelta(minutes=duracao_rotacao)
+                    logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Inativo. Rotação por {duracao_rotacao} min. Parar em: {stop_at.strftime('%H:%M:%S')}")
                 
                 loop = asyncio.get_event_loop()
                 task = loop.create_task(start_alternating_messages_job(
@@ -1102,7 +1111,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                     chat_id, 
                     payment_message_id, 
                     alt_config.messages, 
-                    alt_config.rotation_interval_seconds, # ✅ INTERVALO RESTAURADO AQUI
+                    alt_config.rotation_interval_seconds, 
                     stop_at, 
                     alt_config.auto_destruct_final, 
                     bot_id
@@ -1110,9 +1119,9 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 with remarketing_lock: 
                     alternating_tasks[chat_id] = task
                 
-                logger.info(f"✅ [SCHEDULE] Task de alternating criada para {chat_id}")
+                logger.info(f"✅ [SCHEDULE] Task de alternating iniciada")
             else:
-                logger.info(f"ℹ️ [SCHEDULE] Mensagens alternantes desativadas ou sem mensagens")
+                logger.info(f"ℹ️ [SCHEDULE] Mensagens alternantes desativadas")
 
             # ==================================================================
             # 2. Agenda Remarketing Automático (SOMENTE SE ATIVO)
@@ -1131,9 +1140,9 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 with remarketing_lock: 
                     remarketing_timers[chat_id] = task
                 
-                logger.info(f"✅ [SCHEDULE] Task de remarketing criada para {chat_id}")
+                logger.info(f"✅ [SCHEDULE] Task de remarketing criada")
             else:
-                logger.info(f"⏸️ [SCHEDULE] Remarketing principal está INATIVO. Apenas alternating (se houver) foi agendado.")
+                logger.info(f"⏸️ [SCHEDULE] Remarketing principal está INATIVO.")
 
         finally: 
             db.close()
@@ -1195,19 +1204,27 @@ async def delayed_delete_message(token: str, chat_id: int, message_id: int, dela
 # ========================================
 # 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL - V5 FINAL)
 # ========================================
+# ========================================
+# 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL - V6)
+# ========================================
 async def enviar_mensagens_alternantes():
     """
     Envia mensagens alternantes. 
-    V5: Correção de atributo 'comprou' inexistente e lógica de fim de ciclo.
+    V6: Adiciona coluna max_duration_minutes e lógica de tempo independente.
     """
     db = SessionLocal()
     try:
         # ---------------------------------------------------------
-        # 1. AUTO-MIGRAÇÃO (Garante que as colunas existam)
+        # 1. AUTO-MIGRAÇÃO (Colunas V4 + Nova Coluna V6)
         # ---------------------------------------------------------
         try:
+            # Colunas da V4 (Destruição final)
             db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS last_message_auto_destruct BOOLEAN DEFAULT FALSE"))
             db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS last_message_destruct_seconds INTEGER DEFAULT 60"))
+            
+            # ✅ NOVA COLUNA V6 (Tempo de rotação independente)
+            db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS max_duration_minutes INTEGER DEFAULT 60"))
+            
             db.commit()
         except Exception as e_mig:
             db.rollback()
@@ -1220,29 +1237,39 @@ async def enviar_mensagens_alternantes():
         
         for bot_db in bots:
             try:
-                # Verifica token básico
                 if not bot_db.token: continue
 
-                # Busca configuração
+                # Busca configs
+                remarketing_config = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_db.id).first()
                 alt_config = db.query(AlternatingMessages).filter(
                     AlternatingMessages.bot_id == bot_db.id,
                     AlternatingMessages.is_active == True
                 ).first()
                 
-                # Se não tiver config ou não tiver mensagens cadastradas, pula
                 if not alt_config or not alt_config.messages:
                     continue
                 
                 # Definições de tempo
                 intervalo_segundos = alt_config.rotation_interval_seconds or 3600
-                tempo_limite = datetime.utcnow() - timedelta(hours=24) # Só pega leads das últimas 24h
                 
+                # Lógica de Tempo Limite para o JOB (Backup do Scheduler)
+                # Se remarketing ativo, limite é 24h (o scheduler cuida do tempo exato).
+                # Se remarketing inativo, o limite é a duração configurada.
+                max_duration = getattr(alt_config, 'max_duration_minutes', 60)
+                
+                if remarketing_config and remarketing_config.is_active:
+                     # Modo Seguro: Olha leads de até 24h atrás
+                     tempo_limite_criacao = datetime.utcnow() - timedelta(hours=24)
+                else:
+                     # Modo Independente: Olha leads dentro da janela de duração definida
+                     # Ex: Se duração é 10 min, só pega leads criados nos últimos 10 min
+                     tempo_limite_criacao = datetime.utcnow() - timedelta(minutes=max_duration)
+
                 # Definições da Lógica Final
                 destruir_ultima = getattr(alt_config, 'last_message_auto_destruct', False)
                 tempo_destruicao = getattr(alt_config, 'last_message_destruct_seconds', 60)
                 
-                # ✅ CORREÇÃO MESTRE: QUERY SEM 'Lead.comprou'
-                # A lógica "Pedido.id == None" já garante que não houve compra paga.
+                # Query leads elegíveis
                 leads_elegiveis = db.query(Lead).outerjoin(
                     Pedido,
                     and_(
@@ -1252,21 +1279,18 @@ async def enviar_mensagens_alternantes():
                     )
                 ).filter(
                     Lead.bot_id == bot_db.id,
-                    # Lead.comprou == False,  <-- ❌ REMOVIDO (Causava o erro)
                     Lead.status != "blocked",
-                    Pedido.id == None,        # ✅ Isso garante que não comprou
-                    Lead.created_at > tempo_limite
+                    Pedido.id == None,
+                    Lead.created_at > tempo_limite_criacao # ✅ Filtra pela janela de tempo correta
                 ).all()
                 
                 if not leads_elegiveis: continue
                 
-                # Prepara instância do TeleBot
                 bot_temp = TeleBot(bot_db.telegram_token, threaded=False)
                 bot_temp.parse_mode = "HTML"
                 
                 for lead in leads_elegiveis:
                     try:
-                        # Busca ou Cria o Estado do Lead
                         state = db.query(AlternatingMessageState).filter(
                             AlternatingMessageState.bot_id == bot_db.id,
                             AlternatingMessageState.user_id == lead.user_id
@@ -1277,7 +1301,7 @@ async def enviar_mensagens_alternantes():
                                 bot_id=bot_db.id,
                                 user_id=lead.user_id,
                                 last_message_index=-1,
-                                last_sent_at=datetime.utcnow() - timedelta(days=1) # Força envio imediato se for novo
+                                last_sent_at=datetime.utcnow() - timedelta(days=1)
                             )
                             db.add(state)
                             db.commit()
@@ -1286,28 +1310,27 @@ async def enviar_mensagens_alternantes():
                         mensagens = alt_config.messages
                         total_msgs = len(mensagens)
 
-                        # 🛑 TRAVA DE FIM DE CICLO:
+                        # 🛑 TRAVA DE FIM DE CICLO
                         if destruir_ultima and state.last_message_index >= (total_msgs - 1):
-                            continue # Já enviou a última e era para destruir -> FIM.
+                            continue 
                         
-                        # Verifica Intervalo de Tempo
+                        # Verifica Intervalo
                         tempo_desde_ultimo = (datetime.utcnow() - state.last_sent_at).total_seconds()
                         if tempo_desde_ultimo < intervalo_segundos:
                             continue
                         
-                        # Define qual mensagem enviar
+                        # Define próxima mensagem
                         proximo_index = (state.last_message_index + 1) % total_msgs
                         mensagem_atual = mensagens[proximo_index]
                         
-                        # Extrai texto
                         texto_envio = mensagem_atual if isinstance(mensagem_atual, str) else mensagem_atual.get('content', '')
                         
                         if not texto_envio or not texto_envio.strip(): continue
                         
-                        # 📤 ENVIA A MENSAGEM
+                        # Envia
                         sent_msg = bot_temp.send_message(lead.user_id, texto_envio)
                         
-                        # Lógica Pós-Envio: É a última?
+                        # Lógica da Última Mensagem
                         eh_ultima = (proximo_index == total_msgs - 1)
                         
                         if eh_ultima and destruir_ultima:
@@ -1319,7 +1342,7 @@ async def enviar_mensagens_alternantes():
                                 tempo_destruicao
                             ))
                             
-                        # Atualiza estado no banco
+                        # Atualiza estado
                         state.last_message_index = proximo_index
                         state.last_sent_at = datetime.utcnow()
                         db.commit()
