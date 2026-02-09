@@ -1845,7 +1845,7 @@ def get_auto_remarketing_stats(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Retorna estatísticas de remarketing completas"""
+    """Retorna estatísticas de remarketing com nomes reais"""
     try:
         bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
         if not bot:
@@ -1854,7 +1854,7 @@ def get_auto_remarketing_stats(
         if bot.owner_id != current_user.id and not current_user.is_superuser:
             raise HTTPException(status_code=403, detail="Acesso negado")
         
-        # 1. Métricas Básicas
+        # 1. Totais
         total_sent = db.query(RemarketingLog).filter(
             RemarketingLog.bot_id == bot_id
         ).count()
@@ -1872,8 +1872,7 @@ def get_auto_remarketing_stats(
             func.date(RemarketingLog.sent_at) == hoje
         ).count()
 
-        # 2. ✅ CORREÇÃO MESTRE: Cálculo de Receita Recuperada
-        # Soma o valor dos pedidos onde o user_id bate com um log convertido
+        # 2. Receita Recuperada
         receita_query = db.query(func.sum(Pedido.valor)).join(
             RemarketingLog,
             and_(
@@ -1885,33 +1884,50 @@ def get_auto_remarketing_stats(
         
         total_revenue = receita_query.scalar() or 0.0
 
-        # 3. Logs Recentes
-        recent_logs_db = db.query(RemarketingLog).filter(
+        # 3. Logs Recentes + Nome do Lead (JOIN)
+        # Buscamos o Log e tentamos achar o Lead correspondente
+        results = db.query(RemarketingLog, Lead).outerjoin(
+            Lead, 
+            and_(Lead.user_id == RemarketingLog.user_id, Lead.bot_id == bot_id)
+        ).filter(
             RemarketingLog.bot_id == bot_id
         ).order_by(RemarketingLog.sent_at.desc()).limit(20).all()
         
-        # ✅ CORREÇÃO MESTRE: Mapeamento exato para o Frontend
-        recent_data = [
-            {
+        recent_data = []
+        for log, lead in results:
+            # Lógica para definir o nome de exibição
+            display_name = log.user_id # Fallback é o ID
+            username_display = ""
+            
+            if lead:
+                if lead.first_name:
+                    display_name = lead.first_name
+                    if lead.last_name: display_name += f" {lead.last_name}"
+                elif lead.username:
+                    display_name = lead.username
+                
+                if lead.username:
+                    username_display = f"(@{lead.username})"
+
+            recent_data.append({
                 "id": log.id,
-                "user_id": log.user_id,          # CORREÇÃO: Nome chave igual ao frontend
-                "user_telegram_id": log.user_id, # Mantendo compatibilidade
+                "user_id": log.user_id,
+                "user_name": display_name,       # ✅ NOVO: Nome real
+                "user_username": username_display, # ✅ NOVO: @username
                 "sent_at": log.sent_at.isoformat(),
                 "status": log.status,
                 "converted": log.converted,
                 "error_message": getattr(log, 'error_message', None)
-            }
-            for log in recent_logs_db
-        ]
+            })
         
         return {
             "total_sent": total_sent,
             "total_converted": total_converted,
             "conversion_rate": round(conversion_rate, 2),
             "today_sent": today_sent,
-            "total_revenue": total_revenue, # Nova métrica
-            "logs": recent_data,            # ✅ ALIAS: Frontend usa 'stats.logs'
-            "recent_logs": recent_data      # Backup
+            "total_revenue": total_revenue,
+            "logs": recent_data,
+            "recent_logs": recent_data 
         }
         
     except HTTPException:
@@ -1919,7 +1935,7 @@ def get_auto_remarketing_stats(
     except Exception as e:
         logger.error(f"❌ Erro stats: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
+        
 # =========================================================
 # 🔒 FUNÇÃO HELPER: VERIFICAR PROPRIEDADE DO BOT
 # =========================================================
