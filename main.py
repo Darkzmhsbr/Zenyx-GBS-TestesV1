@@ -1079,8 +1079,18 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                     stop_at = agora + timedelta(seconds=tempo_total_segundos)
                     logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Ativo. Parar em: {stop_at.strftime('%H:%M:%S')}")
                 else:
-                    # Se remarketing INATIVO: Usa a duração definida na alternância (ou 60 min)
-                    duracao_rotacao = getattr(alt_config, 'max_duration_minutes', 60)
+                    # ✅ CORREÇÃO CRÍTICA: Buscar DIRETAMENTE do banco sem getattr
+                    # Verificar se o campo existe na tabela
+                    if hasattr(alt_config, 'max_duration_minutes') and alt_config.max_duration_minutes is not None:
+                        duracao_rotacao = alt_config.max_duration_minutes
+                    else:
+                        # Se não existir no banco, buscar do JSON da coluna (se aplicável)
+                        duracao_rotacao = 60  # Fallback seguro
+                    
+                    # ✅ LOG CRÍTICO DE DEBUG
+                    logger.info(f"🔍 [SCHEDULE-DEBUG-CRITICO] max_duration_minutes do banco: {alt_config.max_duration_minutes if hasattr(alt_config, 'max_duration_minutes') else 'CAMPO NÃO EXISTE'}")
+                    logger.info(f"🔍 [SCHEDULE-DEBUG-CRITICO] Duração calculada: {duracao_rotacao} minutos")
+                    
                     tempo_total_segundos = duracao_rotacao * 60
                     stop_at = agora + timedelta(seconds=tempo_total_segundos)
                     logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Inativo. Rotação por {duracao_rotacao} min. Parar em: {stop_at.strftime('%H:%M:%S')}")
