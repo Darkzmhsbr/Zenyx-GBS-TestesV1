@@ -7786,14 +7786,12 @@ async def enviar_remarketing(
         # =========================================================
         uuid_campanha = str(uuid.uuid4())
         
-        # Cria JSON de config com todos os campos novos
+        # 🔥 CORRIGIDO: Cria JSON de config com TODOS os campos necessários
         config_data = {
             "mensagem": payload.mensagem,
-            "msg": payload.mensagem,
             "media_url": payload.media_url,
-            "media": payload.media_url,
+            "incluir_oferta": getattr(payload, 'incluir_oferta', False),  # ✅ CAMPO ADICIONADO
             "plano_oferta_id": getattr(payload, 'plano_oferta_id', None),
-            # NOVOS CAMPOS:
             "price_mode": getattr(payload, 'price_mode', 'original'),
             "custom_price": getattr(payload, 'custom_price', None),
             "expiration_mode": getattr(payload, 'expiration_mode', 'none'),
