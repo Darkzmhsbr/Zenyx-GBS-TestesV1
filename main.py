@@ -21,6 +21,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 from typing import List, Optional, Dict  # ✅ ADICIONAR Dict
 from datetime import datetime, timedelta
+from pytz import timezone
 
 # --- IMPORTS DE MIGRATION ---
 from force_migration import forcar_atualizacao_tabelas
@@ -95,6 +96,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Zenyx Gbot SaaS")
+
+# 🔥 CONFIGURAÇÃO DE FUSO HORÁRIO - BRASÍLIA/SÃO PAULO
+BRAZIL_TZ = timezone('America/Sao_Paulo')
+
+def now_brazil():
+    """Retorna datetime atual no horário de Brasília/São Paulo"""
+    return datetime.now(BRAZIL_TZ)
 
 # =========================================================
 # ✅ VARIÁVEIS GLOBAIS PARA REMARKETING
@@ -346,7 +354,7 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
             log = RemarketingLog(
                 bot_id=bot_id,
                 user_id=str(chat_id),
-                sent_at=datetime.utcnow(),
+                sent_at=now_brazil(),
                 message_sent=mensagem,
                 promo_values=promo_values,
                 status='sent'
@@ -495,7 +503,7 @@ async def verificar_vencimentos():
             # Buscar pedidos ativos que venceram
             pedidos_vencidos = db.query(Pedido).filter(
                 Pedido.status == 'ativo',
-                Pedido.validade < datetime.now()
+                Pedido.validade < now_brazil()
             ).all()
             
             if not pedidos_vencidos:
@@ -509,7 +517,7 @@ async def verificar_vencimentos():
                 try:
                     # Atualizar status do pedido
                     pedido.status = 'vencido'
-                    pedido.updated_at = datetime.now()
+                    pedido.updated_at = now_brazil()
                     
                     # Remover do grupo Telegram (se configurado)
                     if pedido.grupo_id and pedido.user and pedido.user.telegram_id:
@@ -576,7 +584,7 @@ async def processar_webhooks_pendentes():
             webhooks = db.query(WebhookRetry).filter(
                 WebhookRetry.status == 'pending',
                 WebhookRetry.attempts < WebhookRetry.max_attempts,
-                (WebhookRetry.next_retry == None) | (WebhookRetry.next_retry <= datetime.now())
+                (WebhookRetry.next_retry == None) | (WebhookRetry.next_retry <= now_brazil())
             ).order_by(WebhookRetry.created_at).limit(10).all()
             
             if not webhooks:
@@ -607,12 +615,12 @@ async def processar_webhooks_pendentes():
                     # Atualizar registro
                     if success:
                         webhook.status = 'success'
-                        webhook.updated_at = datetime.now()
+                        webhook.updated_at = now_brazil()
                         logger.info(f"✅ [WEBHOOK-RETRY] Webhook #{webhook.id} processado")
                     else:
                         # Calcular próximo retry (exponential backoff)
                         backoff_minutes = 2 ** webhook.attempts  # 2, 4, 8, 16, 32
-                        webhook.next_retry = datetime.now() + timedelta(minutes=backoff_minutes)
+                        webhook.next_retry = now_brazil() + timedelta(minutes=backoff_minutes)
                         
                         # Verificar se esgotou tentativas
                         if webhook.attempts >= webhook.max_attempts:
@@ -626,7 +634,7 @@ async def processar_webhooks_pendentes():
                             webhook.status = 'pending'
                         
                         webhook.last_error = error_msg
-                        webhook.updated_at = datetime.now()
+                        webhook.updated_at = now_brazil()
                     
                     db.commit()
                 
@@ -697,7 +705,7 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
         bot_alt = TeleBot(token, threaded=False)
         bot_alt.parse_mode = "HTML"
         
-        tempo_inicio = datetime.now()
+        tempo_inicio = now_brazil()
         logger.info(f"✅ [ALTERNATING] Iniciado - Chat: {chat_id}, Msgs: {len(messages)}")
         logger.info(f"🕐 [ALTERNATING-TIMER] Início: {tempo_inicio.strftime('%H:%M:%S')}")
         logger.info(f"🕐 [ALTERNATING-TIMER] Término previsto: {stop_at.strftime('%H:%M:%S')}")
@@ -723,9 +731,9 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
         # ✅ LOOP DE ALTERNÂNCIA (editar a mesma mensagem)
         mensagem_index = 1  # Começar da segunda mensagem
         
-        while datetime.now() < stop_at:
+        while now_brazil() < stop_at:
             # Verificar se ainda há tempo disponível
-            tempo_restante = (stop_at - datetime.now()).total_seconds()
+            tempo_restante = (stop_at - now_brazil()).total_seconds()
             
             if tempo_restante <= 0:
                 logger.info(f"⏰ [ALTERNATING-TIMER] TEMPO ESGOTADO!")
@@ -794,7 +802,7 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
                 delayed_delete_message(token, chat_id, mensagem_id, tempo_destruicao)
             )
         
-        tempo_total_decorrido = (datetime.now() - tempo_inicio).total_seconds()
+        tempo_total_decorrido = (now_brazil() - tempo_inicio).total_seconds()
         logger.info(f"✅ [ALTERNATING-CONCLUÍDO] Tempo decorrido: {tempo_total_decorrido:.0f}s")
         
     except asyncio.CancelledError:
@@ -848,7 +856,7 @@ async def send_remarketing_job(
             # para permitir múltiplos disparos. Quando for para produção, descomente este bloco.
             # ==============================================================================
             
-            # hoje = datetime.now().date()
+            # hoje = now_brazil().date()
             # ja_enviou = db.query(RemarketingLog).filter(
             #     RemarketingLog.bot_id == bot_id,
             #     RemarketingLog.user_id == str(chat_id), 
@@ -917,7 +925,7 @@ async def send_remarketing_job(
                     user_id=str(chat_id),
                     message_sent=msg_text,
                     status='sent', 
-                    sent_at=datetime.now(),
+                    sent_at=now_brazil(),
                     promo_values=promos,
                     converted=False,
                     error_message=None
@@ -978,7 +986,7 @@ async def send_remarketing_job(
                         message_sent=msg_text,
                         status='error',
                         error_message=str(e_send),
-                        sent_at=datetime.now(),
+                        sent_at=now_brazil(),
                         converted=False
                     )
                     db.add(log_erro)
@@ -1083,7 +1091,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 # ✅ LOG DE DEBUG DOS VALORES SALVOS
                 logger.info(f"🔍 [SCHEDULE-DEBUG] Config salva: {alt_config.log_config_values()}")
                 
-                agora = datetime.now()
+                agora = now_brazil()
                 
                 # 🧠 LÓGICA DE TEMPO CORRIGIDA:
                 if config.is_active:
@@ -1148,7 +1156,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
 # CONFIGURAÇÃO DO SCHEDULER (MOVIDO PARA CÁ)
 # ============================================================
 
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone='America/Sao_Paulo')
 
 # Adicionar jobs
 scheduler.add_job(
@@ -1237,10 +1245,10 @@ async def enviar_mensagens_alternantes():
                 # 🧠 LÓGICA DE TEMPO DO JOB:
                 # Se o lead foi criado há mais tempo que a duração permitida, IGNORA.
                 if remarketing_config and remarketing_config.is_active:
-                     tempo_limite_criacao = datetime.utcnow() - timedelta(hours=24)
+                     tempo_limite_criacao = now_brazil() - timedelta(hours=24)
                 else:
                      # Se remarketing OFF, usa a duração definida (ex: 1 min)
-                     tempo_limite_criacao = datetime.utcnow() - timedelta(minutes=max_duration)
+                     tempo_limite_criacao = now_brazil() - timedelta(minutes=max_duration)
 
                 destruir_ultima = getattr(alt_config, 'last_message_auto_destruct', False)
                 tempo_destruicao = getattr(alt_config, 'last_message_destruct_seconds', 60)
@@ -1278,7 +1286,7 @@ async def enviar_mensagens_alternantes():
                                 bot_id=bot_db.id,
                                 user_id=lead.user_id,
                                 last_message_index=-1,
-                                last_sent_at=datetime.utcnow() - timedelta(days=1)
+                                last_sent_at=now_brazil() - timedelta(days=1)
                             )
                             db.add(state)
                             db.commit()
@@ -1292,7 +1300,7 @@ async def enviar_mensagens_alternantes():
                             continue 
                         
                         # Verifica Intervalo
-                        tempo_desde_ultimo = (datetime.utcnow() - state.last_sent_at).total_seconds()
+                        tempo_desde_ultimo = (now_brazil() - state.last_sent_at).total_seconds()
                         if tempo_desde_ultimo < intervalo_segundos:
                             continue
                         
@@ -1321,7 +1329,7 @@ async def enviar_mensagens_alternantes():
                             
                         # Atualiza
                         state.last_message_index = proximo_index
-                        state.last_sent_at = datetime.utcnow()
+                        state.last_sent_at = now_brazil()
                         db.commit()
                         
                         await asyncio.sleep(0.2)
@@ -1399,7 +1407,7 @@ async def health_check():
         
         health_status = {
             "status": overall_status,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_brazil().isoformat(),
             "checks": {
                 "database": {"status": db_status},
                 "scheduler": {"status": scheduler_status},
@@ -1416,7 +1424,7 @@ async def health_check():
             content={
                 "status": "unhealthy",
                 "error": str(e),
-                "timestamp": datetime.now().isoformat()
+                "timestamp": now_brazil().isoformat()
             },
             status_code=503
         )
@@ -1565,9 +1573,9 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     """Cria token JWT"""
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = now_brazil() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = now_brazil() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
@@ -1723,7 +1731,7 @@ def save_auto_remarketing_config(
             config.auto_destruct_seconds = data.get("auto_destruct_seconds", config.auto_destruct_seconds)
             config.auto_destruct_after_click = data.get("auto_destruct_after_click", config.auto_destruct_after_click)
             config.promo_values = data.get("promo_values", config.promo_values)
-            config.updated_at = datetime.now()
+            config.updated_at = now_brazil()
         else:
             config = RemarketingConfig(
                 bot_id=bot_id,
@@ -1854,7 +1862,7 @@ def save_auto_remarketing_messages(
             config.max_duration_minutes = data.get("max_duration_minutes", config.max_duration_minutes)
             config.last_message_auto_destruct = data.get("last_message_auto_destruct", config.last_message_auto_destruct)
             config.last_message_destruct_seconds = data.get("last_message_destruct_seconds", config.last_message_destruct_seconds)
-            config.updated_at = datetime.now()
+            config.updated_at = now_brazil()
         else:
             # ✅ CRIAR COM TODOS OS CAMPOS (incluindo os novos)
             config = AlternatingMessages(
@@ -1923,7 +1931,7 @@ def get_auto_remarketing_stats(
         
         conversion_rate = (total_converted / total_sent * 100) if total_sent > 0 else 0
         
-        hoje = datetime.now().date()
+        hoje = now_brazil().date()
         today_sent = db.query(RemarketingLog).filter(
             RemarketingLog.bot_id == bot_id,
             func.date(RemarketingLog.sent_at) == hoje
@@ -2118,7 +2126,7 @@ def criar_ou_atualizar_lead(
         Lead.bot_id == bot_id
     ).first()
     
-    agora = datetime.utcnow()
+    agora = now_brazil()
     
     if lead:
         lead.ultimo_contato = agora
@@ -2164,8 +2172,8 @@ def mover_lead_para_pedido(
     
     if lead and pedido:
         pedido.primeiro_contato = lead.primeiro_contato
-        pedido.escolheu_plano_em = datetime.utcnow()
-        pedido.gerou_pix_em = datetime.utcnow()
+        pedido.escolheu_plano_em = now_brazil()
+        pedido.gerou_pix_em = now_brazil()
         pedido.status_funil = 'meio'
         pedido.funil_stage = 'lead_quente'
         
@@ -2225,7 +2233,7 @@ def marcar_como_pago(db: Session, pedido_id: int):
     if not pedido:
         return None
     
-    agora = datetime.utcnow()
+    agora = now_brazil()
     pedido.pagou_em = agora
     pedido.status_funil = 'fundo'
     pedido.funil_stage = 'cliente'
@@ -2281,7 +2289,7 @@ def registrar_remarketing(
     """
     Registra que usuário recebeu remarketing
     """
-    agora = datetime.utcnow()
+    agora = now_brazil()
     
     # Atualiza Lead (se for TOPO)
     lead = db.query(Lead).filter(
@@ -2578,7 +2586,7 @@ def verificar_expiracao_massa():
                     logger.error(f"ID do canal inválido para o bot {bot_data.nome}")
                     continue
                 
-                agora = datetime.utcnow()
+                agora = now_brazil()
                 
                 # Busca usuários vencidos
                 vencidos = db.query(Pedido).filter(
@@ -2653,7 +2661,7 @@ async def processar_webhooks_pendentes():
     """
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = now_brazil()
         
         # Buscar webhooks pendentes que estão prontos para retry
         pendentes = db.query(WebhookRetry).filter(
@@ -2692,7 +2700,7 @@ async def processar_webhooks_pendentes():
                     
                     # Se chegou aqui, sucesso!
                     retry_item.status = 'success'
-                    retry_item.updated_at = datetime.utcnow()
+                    retry_item.updated_at = now_brazil()
                     db.commit()
                     
                     logger.info(f"✅ Webhook {retry_item.id} reprocessado com sucesso")
@@ -2707,7 +2715,7 @@ async def processar_webhooks_pendentes():
                 # Incrementar tentativas
                 retry_item.attempts += 1
                 retry_item.last_error = str(e)
-                retry_item.updated_at = datetime.utcnow()
+                retry_item.updated_at = now_brazil()
                 
                 if retry_item.attempts >= retry_item.max_attempts:
                     # Esgotou tentativas
@@ -2790,7 +2798,7 @@ def registrar_webhook_para_retry(
     db = SessionLocal()
     try:
         # Calcular primeiro retry (1 minuto no futuro)
-        first_retry = datetime.utcnow() + timedelta(minutes=1)
+        first_retry = now_brazil() + timedelta(minutes=1)
         
         # Criar registro de retry
         retry_item = WebhookRetry(
@@ -3415,7 +3423,7 @@ def send_remarketing(
             type='teste' if data.is_test else 'massivo',
             config=config_json,
             status='enviando',
-            data_envio=datetime.utcnow()
+            data_envio=now_brazil()
         )
         db.add(nova_campanha)
         db.commit()
@@ -3916,7 +3924,7 @@ async def health_check():
         
         health_status = {
             "status": overall_status,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_brazil().isoformat(),
             "checks": {
                 "database": {"status": db_status},
                 "scheduler": {"status": scheduler_status},
@@ -3933,7 +3941,7 @@ async def health_check():
             content={
                 "status": "unhealthy",
                 "error": str(e),
-                "timestamp": datetime.now().isoformat()
+                "timestamp": now_brazil().isoformat()
             },
             status_code=503
         )
@@ -3945,7 +3953,7 @@ async def health_check_simple():
     Versão simplificada do health check (mais rápida).
     Apenas retorna 200 se o servidor está vivo.
     """
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    return {"status": "ok", "timestamp": now_brazil().isoformat()}
 
 @app.get("/api/auth/me")
 async def get_current_user_info(current_user = Depends(get_current_user)):
@@ -5079,7 +5087,7 @@ def create_tracking_folder(
         nova_pasta = TrackingFolder(
             nome=dados.nome, 
             plataforma=dados.plataforma,
-            created_at=datetime.utcnow()
+            created_at=now_brazil()
         )
         db.add(nova_pasta)
         db.commit()
@@ -5187,7 +5195,7 @@ def create_tracking_link(
             clicks=0,
             vendas=0,
             faturamento=0.0,
-            created_at=datetime.utcnow()
+            created_at=now_brazil()
         )
         db.add(novo_link)
         db.commit()
@@ -5573,7 +5581,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         # 4. PROCESSAR PAGAMENTO (LÓGICA CRÍTICA)
         try:
             # Calcular data de expiração
-            now = datetime.utcnow()
+            now = now_brazil()
             data_validade = None
             
             plano = None
@@ -5973,7 +5981,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     allowed = False
                     if pedido:
                         if pedido.data_expiracao:
-                            if datetime.utcnow() < pedido.data_expiracao: allowed = True
+                            if now_brazil() < pedido.data_expiracao: allowed = True
                         elif pedido.plano_nome:
                             nm = pedido.plano_nome.lower()
                             if "vital" in nm or "mega" in nm or "eterno" in nm: allowed = True
@@ -5983,7 +5991,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 elif "semanal" in nm: d = 7
                                 elif "trimestral" in nm: d = 90
                                 elif "anual" in nm: d = 365
-                                if pedido.created_at and datetime.utcnow() < (pedido.created_at + timedelta(days=d)): allowed = True
+                                if pedido.created_at and now_brazil() < (pedido.created_at + timedelta(days=d)): allowed = True
                     
                     if not allowed:
                         try:
@@ -6020,7 +6028,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 if pedido:
                     validade = "VITALÍCIO ♾️"
                     if pedido.data_expiracao:
-                        if datetime.utcnow() > pedido.data_expiracao:
+                        if now_brazil() > pedido.data_expiracao:
                             bot_temp.send_message(chat_id, "❌ <b>Assinatura expirada!</b>", parse_mode="HTML")
                             return {"status": "ok"}
                         validade = pedido.data_expiracao.strftime("%d/%m/%Y")
@@ -6401,7 +6409,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             qr_code=qr,
                             status="pending",
                             tem_order_bump=False,
-                            created_at=datetime.utcnow(),
+                            created_at=now_brazil(),
                             tracking_id=track_id_pedido
                         )
                         db.add(novo_pedido)
@@ -6570,7 +6578,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             qr_code=qr,
                             status="pending",
                             tem_order_bump=False,
-                            created_at=datetime.utcnow(),
+                            created_at=now_brazil(),
                             tracking_id=track_id_pedido
                         )
                         db.add(novo_pedido)
@@ -6698,7 +6706,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             qr_code=qr,
                             status="pending",
                             tem_order_bump=False,
-                            created_at=datetime.utcnow(),
+                            created_at=now_brazil(),
                             tracking_id=track_id_pedido
                         )
                         db.add(novo_pedido)
@@ -6804,7 +6812,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         qr_code=qr,
                         status="pending",
                         tem_order_bump=aceitou,
-                        created_at=datetime.utcnow(),
+                        created_at=now_brazil(),
                         tracking_id=track_id_pedido
                     )
                     db.add(novo_pedido)
@@ -6871,7 +6879,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         return {"status": "error"}
                     
                     if hasattr(campanha, 'expiration_at') and campanha.expiration_at:
-                        if datetime.utcnow() > campanha.expiration_at:
+                        if now_brazil() > campanha.expiration_at:
                             bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
                             return {"status": "expired"}
                     
@@ -6931,7 +6939,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             qr_code=qr, 
                             status="pending", 
                             tem_order_bump=False, 
-                            created_at=datetime.utcnow(), 
+                            created_at=now_brazil(), 
                             tracking_id=None 
                         )
                         db.add(novo_pedido)
@@ -7597,7 +7605,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 # Cálculo de Expiração (se houver)
                 if payload.expiration_mode != "none" and payload.expiration_value:
                     val = int(payload.expiration_value)
-                    agora = datetime.utcnow()
+                    agora = now_brazil()
                     if payload.expiration_mode == "minutes": data_expiracao = agora + timedelta(minutes=val)
                     elif payload.expiration_mode == "hours": data_expiracao = agora + timedelta(hours=val)
                     elif payload.expiration_mode == "days": data_expiracao = agora + timedelta(days=val)
@@ -7827,7 +7835,7 @@ async def enviar_remarketing(
             target=payload.target,
             config=json.dumps(config_data),
             status='agendado', 
-            data_envio=datetime.utcnow(),
+            data_envio=now_brazil(),
             total_leads=0,
             sent_success=0,
             blocked_count=0,
@@ -8091,12 +8099,12 @@ def dashboard_stats(
         if start_date:
             start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
         else:
-            start = datetime.utcnow() - timedelta(days=30)
+            start = now_brazil() - timedelta(days=30)
         
         if end_date:
             end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
         else:
-            end = datetime.utcnow()
+            end = now_brazil()
         
         logger.info(f"📊 Dashboard Stats - Período: {start.date()} a {end.date()}")
         
@@ -8196,14 +8204,14 @@ def dashboard_stats(
         # Usuários ativos (assinaturas não expiradas)
         query_active = db.query(Pedido).filter(
             Pedido.status.in_(['approved', 'paid', 'active']),
-            Pedido.data_expiracao > datetime.utcnow()
+            Pedido.data_expiracao > now_brazil()
         )
         if not is_super_with_split or bot_id:
              if bots_ids: query_active = query_active.filter(Pedido.bot_id.in_(bots_ids))
         active_users = query_active.count()
         
         # Vendas de hoje
-        hoje_start = datetime.utcnow().replace(hour=0, minute=0, second=0)
+        hoje_start = now_brazil().replace(hour=0, minute=0, second=0)
         query_hoje = db.query(Pedido).filter(
             Pedido.status.in_(['approved', 'paid', 'active']),
             Pedido.data_aprovacao >= hoje_start
@@ -8219,7 +8227,7 @@ def dashboard_stats(
             sales_today = sum(int(p.valor * 100) if p.valor else 0 for p in vendas_hoje)
         
         # Leads do mês
-        mes_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0)
+        mes_start = now_brazil().replace(day=1, hour=0, minute=0, second=0)
         query_leads_mes = db.query(Lead).filter(Lead.created_at >= mes_start)
         if not is_super_with_split or bot_id:
              if bots_ids: query_leads_mes = query_leads_mes.filter(Lead.bot_id.in_(bots_ids))
@@ -8980,7 +8988,7 @@ def get_superadmin_stats(
         # ============================================
         # 📅 NOVOS USUÁRIOS (30 DIAS)
         # ============================================
-        thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+        thirty_days_ago = now_brazil() - timedelta(days=30)
         new_users_count = db.query(User).filter(
             User.created_at >= thirty_days_ago
         ).count()
@@ -9874,7 +9882,7 @@ def cron_check_expired(db: Session = Depends(get_db)):
     Deve ser chamado por um Cron Job externo (ex: Railway Cron ou EasyCron).
     """
     logger.info("💀 Iniciando verificação de vencidos...")
-    now = datetime.utcnow()
+    now = now_brazil()
     
     # 1. Busca pedidos aprovados que JÁ venceram (data_expiracao < agora)
     vencidos = db.query(Pedido).filter(
@@ -9978,7 +9986,7 @@ def fix_admin_account_emergency(db: Session = Depends(get_db)):
                 is_superuser=True,
                 # role="admin", <--- REMOVIDO DAQUI TAMBÉM
                 pushin_pay_id=MY_PUSHIN_ID,
-                created_at=datetime.utcnow()
+                created_at=now_brazil()
             )
             db.add(new_user)
             db.commit()
@@ -10104,7 +10112,7 @@ def fix_admin_account_emergency(db: Session = Depends(get_db)):
                 is_superuser=True,
                 # role="admin", <--- REMOVIDO DAQUI TAMBÉM
                 pushin_pay_id=MY_PUSHIN_ID,
-                created_at=datetime.utcnow()
+                created_at=now_brazil()
             )
             db.add(new_user)
             db.commit()
@@ -10159,7 +10167,7 @@ def cron_check_expired(db: Session = Depends(get_db)):
     Deve ser chamado por um Cron Job externo (ex: Railway Cron ou EasyCron).
     """
     logger.info("💀 Iniciando verificação de vencidos...")
-    now = datetime.utcnow()
+    now = now_brazil()
     
     # 1. Busca pedidos aprovados que JÁ venceram (data_expiracao < agora)
     vencidos = db.query(Pedido).filter(

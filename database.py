@@ -5,6 +5,14 @@ from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.sql import func
 from datetime import datetime
+from pytz import timezone
+
+# 🔥 CONFIGURAÇÃO DE FUSO HORÁRIO - BRASÍLIA/SÃO PAULO
+BRAZIL_TZ = timezone('America/Sao_Paulo')
+
+def now_brazil():
+    """Retorna datetime atual no horário de Brasília/São Paulo"""
+    return datetime.now(BRAZIL_TZ)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -45,8 +53,8 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     is_superuser = Column(Boolean, default=False)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
     
     # 🆕 NOVOS CAMPOS FINANCEIROS
     pushin_pay_id = Column(String, nullable=True) # ID da conta do membro na Pushin
@@ -66,7 +74,7 @@ class SystemConfig(Base):
     __tablename__ = "system_config"
     key = Column(String, primary_key=True, index=True) 
     value = Column(String)                             
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=now_brazil)
 
 # =========================================================
 # 🤖 BOTS
@@ -89,7 +97,7 @@ class Bot(Base):
     # Token Individual por Bot
     pushin_token = Column(String, nullable=True) 
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
     
     # 🆕 RELACIONAMENTO COM USUÁRIO (OWNER)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # nullable=True para migração
@@ -131,7 +139,7 @@ class BotAdmin(Base):
     bot_id = Column(Integer, ForeignKey("bots.id"))
     telegram_id = Column(String)
     nome = Column(String, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
     bot = relationship("Bot", back_populates="admins")
 
 # =========================================================
@@ -174,7 +182,7 @@ class PlanoConfig(Base):
     dias_duracao = Column(Integer, default=30)
     is_lifetime = Column(Boolean, default=False)  # ← ADICIONAR ESTA LINHA
     key_id = Column(String(100), unique=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
 
     # 👇 ADICIONE ESTA LINHA AQUI 👇
     id_canal_destino = Column(String, nullable=True) 
@@ -204,7 +212,7 @@ class RemarketingCampaign(Base):
     
     # Agendamento
     dia_atual = Column(Integer, default=0)
-    data_inicio = Column(DateTime, default=datetime.utcnow)
+    data_inicio = Column(DateTime, default=now_brazil)
     proxima_execucao = Column(DateTime, nullable=True)
     
     # Oferta Promocional
@@ -216,7 +224,7 @@ class RemarketingCampaign(Base):
     total_leads = Column(Integer, default=0)
     sent_success = Column(Integer, default=0)
     blocked_count = Column(Integer, default=0)
-    data_envio = Column(DateTime, default=datetime.utcnow)
+    data_envio = Column(DateTime, default=now_brazil)
     
     # Relacionamento
     bot = relationship("Bot", back_populates="remarketing_campaigns")
@@ -238,8 +246,8 @@ class WebhookRetry(Base):
     max_attempts = Column(Integer, default=5)
     next_retry = Column(DateTime, nullable=True)
     status = Column(String(20), default='pending')
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
     last_error = Column(Text, nullable=True)
     reference_id = Column(String(100), nullable=True)
     
@@ -308,7 +316,7 @@ class BotFlowStep(Base):
     # Temporizador entre mensagens
     delay_seconds = Column(Integer, default=0)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
     bot = relationship("Bot", back_populates="steps")
 
 # =========================================================
@@ -319,7 +327,7 @@ class TrackingFolder(Base):
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String)      # Ex: "Facebook Ads"
     plataforma = Column(String) # Ex: "facebook", "instagram"
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
     
     links = relationship("TrackingLink", back_populates="folder", cascade="all, delete-orphan")
 
@@ -339,7 +347,7 @@ class TrackingLink(Base):
     vendas = Column(Integer, default=0)
     faturamento = Column(Float, default=0.0)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
     
     folder = relationship("TrackingFolder", back_populates="links")
     bot = relationship("Bot", back_populates="tracking_links")
@@ -372,7 +380,7 @@ class Pedido(Base):
     link_acesso = Column(String, nullable=True)
     mensagem_enviada = Column(Boolean, default=False)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
     
     # Campo para identificar se comprou o Order Bump
     tem_order_bump = Column(Boolean, default=False)
@@ -529,7 +537,7 @@ class AuditLog(Base):
     error_message = Column(Text, nullable=True)
     
     # 🕒 Timestamp
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, default=now_brazil, index=True)
     
     # Relacionamento
     user = relationship("User", back_populates="audit_logs")
@@ -548,7 +556,7 @@ class Notification(Base):
     type = Column(String, default="info")        # info, success, warning, error
     read = Column(Boolean, default=False)        # Se o usuário já leu
     
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
 
     # Relacionamento com Usuário
     user = relationship("User", back_populates="notifications")
@@ -586,8 +594,8 @@ class RemarketingConfig(Base):
     promo_values = Column(JSON, default={})  # {plano_id: valor_promo}
     
     # Auditoria
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
     
     bot = relationship("Bot", back_populates="remarketing_config")
     
@@ -621,8 +629,8 @@ class AlternatingMessages(Base):
     last_message_destruct_seconds = Column(Integer, default=60)
     
     # Auditoria
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
     
     bot = relationship("Bot", back_populates="alternating_messages")
     
@@ -654,7 +662,7 @@ class RemarketingLog(Base):
     user_id = Column(String, nullable=False, index=True)
     
     # Dados do envio
-    sent_at = Column(DateTime, default=datetime.utcnow, index=True)
+    sent_at = Column(DateTime, default=now_brazil, index=True)
     
     # ✅ CORREÇÃO: Apenas UM campo message_sent (tipo TEXT)
     message_sent = Column(Text, nullable=True)
