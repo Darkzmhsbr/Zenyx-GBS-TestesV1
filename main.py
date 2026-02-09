@@ -774,7 +774,21 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
         
         # FIM DO CICLO: Auto-destruir mensagem final se configurado
         if auto_destruct_final and mensagem_id:
-            tempo_destruicao = 60  # 1 minuto padrão
+            # ✅ BUSCAR O TEMPO CORRETO DO BANCO
+            db = SessionLocal()
+            try:
+                alt_config = db.query(AlternatingMessages).filter(
+                    AlternatingMessages.bot_id == bot_id
+                ).first()
+                
+                tempo_destruicao = alt_config.last_message_destruct_seconds if alt_config else 60
+                
+            except Exception as e:
+                logger.error(f"❌ Erro ao buscar tempo de destruição: {e}")
+                tempo_destruicao = 60  # Fallback seguro
+            finally:
+                db.close()
+            
             logger.info(f"🗑️ [ALTERNATING-FIM] Mensagem final (ID: {mensagem_id}) será destruída em {tempo_destruicao}s")
             asyncio.create_task(
                 delayed_delete_message(token, chat_id, mensagem_id, tempo_destruicao)
@@ -792,7 +806,6 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
         with remarketing_lock:
             if chat_id in alternating_tasks:
                 del alternating_tasks[chat_id]
-
 
 # ============================================================
 # 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
