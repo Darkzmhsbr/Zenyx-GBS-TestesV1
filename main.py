@@ -7728,11 +7728,16 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 except Exception as e:
                     logger.warning(f"⚠️ Erro ao atualizar progresso: {e}")
 
-        # --- F. FINALIZAÇÃO (CORREÇÃO DO PREÇO NO BANCO) ---
+        # 🔥 CORRIGIDO: Mantém mesma estrutura que o config_data inicial
         config_completa = {
-            "msg": payload.mensagem, "media": payload.media_url,
-            "offer": payload.incluir_oferta, "plano_id": payload.plano_oferta_id,
-            "custom_price": preco_final, "price_mode": payload.price_mode
+            "mensagem": payload.mensagem,
+            "media_url": payload.media_url,
+            "incluir_oferta": payload.incluir_oferta,
+            "plano_oferta_id": payload.plano_oferta_id,
+            "price_mode": payload.price_mode,
+            "custom_price": preco_final,
+            "expiration_mode": payload.expiration_mode,
+            "expiration_value": payload.expiration_value
         }
         
         update_data = {
