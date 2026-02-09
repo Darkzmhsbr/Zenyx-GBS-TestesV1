@@ -1193,15 +1193,12 @@ async def delayed_delete_message(token: str, chat_id: int, message_id: int, dela
         logger.error(f"⚠️ Erro ao deletar mensagem final ({chat_id}): {e}")
 
 # ========================================
-# 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL)
-# ========================================
-# ========================================
-# 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL - V4)
+# 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL - V5 FINAL)
 # ========================================
 async def enviar_mensagens_alternantes():
     """
     Envia mensagens alternantes. 
-    V4: Suporte a auto-destruição na última mensagem, parada do ciclo e auto-migração.
+    V5: Correção de atributo 'comprou' inexistente e lógica de fim de ciclo.
     """
     db = SessionLocal()
     try:
@@ -1214,7 +1211,7 @@ async def enviar_mensagens_alternantes():
             db.commit()
         except Exception as e_mig:
             db.rollback()
-            logger.warning(f"⚠️ [MIGRATION] Tentativa de migração alternating: {e_mig}")
+            # logger.warning(f"⚠️ [MIGRATION] Tentativa de migração alternating: {e_mig}")
 
         # ---------------------------------------------------------
         # 2. PROCESSAMENTO DOS BOTS
@@ -1240,11 +1237,12 @@ async def enviar_mensagens_alternantes():
                 intervalo_segundos = alt_config.rotation_interval_seconds or 3600
                 tempo_limite = datetime.utcnow() - timedelta(hours=24) # Só pega leads das últimas 24h
                 
-                # Definições da Lógica Final (Safe Get para garantir que não quebre se a coluna demorar a propagar no ORM)
+                # Definições da Lógica Final
                 destruir_ultima = getattr(alt_config, 'last_message_auto_destruct', False)
                 tempo_destruicao = getattr(alt_config, 'last_message_destruct_seconds', 60)
                 
-                # Busca Leads Elegíveis
+                # ✅ CORREÇÃO MESTRE: QUERY SEM 'Lead.comprou'
+                # A lógica "Pedido.id == None" já garante que não houve compra paga.
                 leads_elegiveis = db.query(Lead).outerjoin(
                     Pedido,
                     and_(
@@ -1254,9 +1252,9 @@ async def enviar_mensagens_alternantes():
                     )
                 ).filter(
                     Lead.bot_id == bot_db.id,
-                    Lead.comprou == False,
+                    # Lead.comprou == False,  <-- ❌ REMOVIDO (Causava o erro)
                     Lead.status != "blocked",
-                    Pedido.id == None, 
+                    Pedido.id == None,        # ✅ Isso garante que não comprou
                     Lead.created_at > tempo_limite
                 ).all()
                 
@@ -1289,21 +1287,19 @@ async def enviar_mensagens_alternantes():
                         total_msgs = len(mensagens)
 
                         # 🛑 TRAVA DE FIM DE CICLO:
-                        # Se já enviamos a última mensagem (index == total - 1) E a destruição está ativa,
-                        # paramos aqui. O lead não recebe mais nada.
                         if destruir_ultima and state.last_message_index >= (total_msgs - 1):
-                            continue 
+                            continue # Já enviou a última e era para destruir -> FIM.
                         
                         # Verifica Intervalo de Tempo
                         tempo_desde_ultimo = (datetime.utcnow() - state.last_sent_at).total_seconds()
                         if tempo_desde_ultimo < intervalo_segundos:
                             continue
                         
-                        # Define qual mensagem enviar (Ciclo ou Fim)
+                        # Define qual mensagem enviar
                         proximo_index = (state.last_message_index + 1) % total_msgs
                         mensagem_atual = mensagens[proximo_index]
                         
-                        # Extrai texto (suporte a string ou dict)
+                        # Extrai texto
                         texto_envio = mensagem_atual if isinstance(mensagem_atual, str) else mensagem_atual.get('content', '')
                         
                         if not texto_envio or not texto_envio.strip(): continue
@@ -1316,7 +1312,6 @@ async def enviar_mensagens_alternantes():
                         
                         if eh_ultima and destruir_ultima:
                             logger.info(f"💣 [ALTERNATING] Última mensagem enviada para {lead.user_id}. Destruição em {tempo_destruicao}s.")
-                            # Agenda a destruição sem travar o loop
                             asyncio.create_task(delayed_delete_message(
                                 bot_db.token, 
                                 lead.user_id, 
@@ -1329,12 +1324,9 @@ async def enviar_mensagens_alternantes():
                         state.last_sent_at = datetime.utcnow()
                         db.commit()
                         
-                        # Pequeno delay para evitar rate limit do Telegram
                         await asyncio.sleep(0.2)
                         
                     except Exception as e_lead:
-                        # Log discreto para erro individual de lead (ex: bloqueado)
-                        # logger.error(f"Erro lead {lead.user_id}: {e_lead}")
                         continue
                         
             except Exception as e_bot:
