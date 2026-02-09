@@ -1174,43 +1174,77 @@ logger.info("✅ [SCHEDULER] Job de vencimentos agendado (12h)")
 logger.info("✅ [SCHEDULER] Job de retry de webhooks agendado (1 min)")
 logger.info("✅ [SCHEDULER] Job de cleanup de remarketing agendado (1h)")
 
+# ========================================
+# 🔧 AUXILIAR: DELETE ATRASADO (MENSAGEM FINAL)
+# ========================================
+async def delayed_delete_message(token: str, chat_id: int, message_id: int, delay: int):
+    """
+    Aguarda X segundos e apaga a mensagem especificada.
+    Usado para a auto-destruição da última mensagem alternante.
+    """
+    try:
+        if delay > 0:
+            await asyncio.sleep(delay)
+            
+        bot_del = TeleBot(token, threaded=False)
+        bot_del.delete_message(chat_id, message_id)
+        logger.info(f"🗑️ [ALTERNATING] Mensagem final destruída para {chat_id}")
+    except Exception as e:
+        logger.error(f"⚠️ Erro ao deletar mensagem final ({chat_id}): {e}")
 
 # ========================================
-# 🔄 JOB: MENSAGENS ALTERNANTES
-# ========================================
-# ========================================
 # 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL)
 # ========================================
 # ========================================
-# 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL)
+# 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL - V4)
 # ========================================
 async def enviar_mensagens_alternantes():
     """
-    Envia mensagens alternantes. Versão corrigida V3 (Sem filtro is_active no Bot).
+    Envia mensagens alternantes. 
+    V4: Suporte a auto-destruição na última mensagem, parada do ciclo e auto-migração.
     """
     db = SessionLocal()
     try:
-        # ✅ CORREÇÃO: Removemos .filter(BotModel.is_active == True)
+        # ---------------------------------------------------------
+        # 1. AUTO-MIGRAÇÃO (Garante que as colunas existam)
+        # ---------------------------------------------------------
+        try:
+            db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS last_message_auto_destruct BOOLEAN DEFAULT FALSE"))
+            db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS last_message_destruct_seconds INTEGER DEFAULT 60"))
+            db.commit()
+        except Exception as e_mig:
+            db.rollback()
+            logger.warning(f"⚠️ [MIGRATION] Tentativa de migração alternating: {e_mig}")
+
+        # ---------------------------------------------------------
+        # 2. PROCESSAMENTO DOS BOTS
+        # ---------------------------------------------------------
         bots = db.query(BotModel).all()
         
         for bot_db in bots:
             try:
-                # Verifica se tem token válido antes de prosseguir
+                # Verifica token básico
                 if not bot_db.token: continue
 
-                # Busca configuração na tabela correta
+                # Busca configuração
                 alt_config = db.query(AlternatingMessages).filter(
                     AlternatingMessages.bot_id == bot_db.id,
                     AlternatingMessages.is_active == True
                 ).first()
                 
+                # Se não tiver config ou não tiver mensagens cadastradas, pula
                 if not alt_config or not alt_config.messages:
                     continue
                 
+                # Definições de tempo
                 intervalo_segundos = alt_config.rotation_interval_seconds or 3600
-                tempo_limite = datetime.utcnow() - timedelta(hours=24)
+                tempo_limite = datetime.utcnow() - timedelta(hours=24) # Só pega leads das últimas 24h
                 
-                # Query leads elegíveis
+                # Definições da Lógica Final (Safe Get para garantir que não quebre se a coluna demorar a propagar no ORM)
+                destruir_ultima = getattr(alt_config, 'last_message_auto_destruct', False)
+                tempo_destruicao = getattr(alt_config, 'last_message_destruct_seconds', 60)
+                
+                # Busca Leads Elegíveis
                 leads_elegiveis = db.query(Lead).outerjoin(
                     Pedido,
                     and_(
@@ -1228,12 +1262,13 @@ async def enviar_mensagens_alternantes():
                 
                 if not leads_elegiveis: continue
                 
-                # Inicializa bot
+                # Prepara instância do TeleBot
                 bot_temp = TeleBot(bot_db.telegram_token, threaded=False)
                 bot_temp.parse_mode = "HTML"
                 
                 for lead in leads_elegiveis:
                     try:
+                        # Busca ou Cria o Estado do Lead
                         state = db.query(AlternatingMessageState).filter(
                             AlternatingMessageState.bot_id == bot_db.id,
                             AlternatingMessageState.user_id == lead.user_id
@@ -1244,36 +1279,66 @@ async def enviar_mensagens_alternantes():
                                 bot_id=bot_db.id,
                                 user_id=lead.user_id,
                                 last_message_index=-1,
-                                last_sent_at=datetime.utcnow() - timedelta(days=1)
+                                last_sent_at=datetime.utcnow() - timedelta(days=1) # Força envio imediato se for novo
                             )
                             db.add(state)
                             db.commit()
                             db.refresh(state)
                         
+                        mensagens = alt_config.messages
+                        total_msgs = len(mensagens)
+
+                        # 🛑 TRAVA DE FIM DE CICLO:
+                        # Se já enviamos a última mensagem (index == total - 1) E a destruição está ativa,
+                        # paramos aqui. O lead não recebe mais nada.
+                        if destruir_ultima and state.last_message_index >= (total_msgs - 1):
+                            continue 
+                        
+                        # Verifica Intervalo de Tempo
                         tempo_desde_ultimo = (datetime.utcnow() - state.last_sent_at).total_seconds()
                         if tempo_desde_ultimo < intervalo_segundos:
                             continue
                         
-                        mensagens = alt_config.messages
-                        proximo_index = (state.last_message_index + 1) % len(mensagens)
+                        # Define qual mensagem enviar (Ciclo ou Fim)
+                        proximo_index = (state.last_message_index + 1) % total_msgs
                         mensagem_atual = mensagens[proximo_index]
                         
+                        # Extrai texto (suporte a string ou dict)
                         texto_envio = mensagem_atual if isinstance(mensagem_atual, str) else mensagem_atual.get('content', '')
                         
                         if not texto_envio or not texto_envio.strip(): continue
                         
-                        bot_temp.send_message(lead.user_id, texto_envio)
+                        # 📤 ENVIA A MENSAGEM
+                        sent_msg = bot_temp.send_message(lead.user_id, texto_envio)
+                        
+                        # Lógica Pós-Envio: É a última?
+                        eh_ultima = (proximo_index == total_msgs - 1)
+                        
+                        if eh_ultima and destruir_ultima:
+                            logger.info(f"💣 [ALTERNATING] Última mensagem enviada para {lead.user_id}. Destruição em {tempo_destruicao}s.")
+                            # Agenda a destruição sem travar o loop
+                            asyncio.create_task(delayed_delete_message(
+                                bot_db.token, 
+                                lead.user_id, 
+                                sent_msg.message_id, 
+                                tempo_destruicao
+                            ))
                             
+                        # Atualiza estado no banco
                         state.last_message_index = proximo_index
                         state.last_sent_at = datetime.utcnow()
                         db.commit()
                         
+                        # Pequeno delay para evitar rate limit do Telegram
                         await asyncio.sleep(0.2)
                         
                     except Exception as e_lead:
+                        # Log discreto para erro individual de lead (ex: bloqueado)
+                        # logger.error(f"Erro lead {lead.user_id}: {e_lead}")
                         continue
                         
             except Exception as e_bot:
+                logger.error(f"Erro ao processar bot {bot_db.id}: {e_bot}")
                 continue
                 
     except Exception as e:
