@@ -3528,6 +3528,16 @@ def send_remarketing(
         
         campaign_id = str(uuid.uuid4())
         
+        # 🔥 CORREÇÃO: Normaliza custom_price (vírgula → ponto, 2 casas decimais)
+        normalized_price = None
+        if data.price_mode == 'custom' and data.custom_price is not None:
+            try:
+                val_n = float(str(data.custom_price).replace(',', '.'))
+                if val_n > 0:
+                    normalized_price = round(val_n, 2)
+            except (ValueError, TypeError):
+                normalized_price = None
+        
         # Prepara config JSON para o banco
         config_json = json.dumps({
             "mensagem": data.mensagem,
@@ -3535,8 +3545,25 @@ def send_remarketing(
             "oferta": data.incluir_oferta,
             "plano_id": data.plano_oferta_id,
             "price_mode": data.price_mode,
-            "custom_price": data.custom_price
+            "custom_price": normalized_price if normalized_price else data.custom_price
         })
+
+        # 🔥 CORREÇÃO: Calcula promo_price já na criação
+        promo_price_calc = None
+        if data.incluir_oferta and data.plano_oferta_id:
+            try:
+                pid_str = str(data.plano_oferta_id)
+                plano_t = db.query(PlanoConfig).filter(
+                    (PlanoConfig.key_id == pid_str) | 
+                    (PlanoConfig.id == int(pid_str) if pid_str.isdigit() else False)
+                ).first()
+                if plano_t:
+                    if normalized_price and normalized_price > 0:
+                        promo_price_calc = normalized_price
+                    else:
+                        promo_price_calc = float(plano_t.preco_atual)
+            except Exception:
+                pass
 
         nova_campanha = RemarketingCampaign(
             bot_id=bot_id,
@@ -3545,7 +3572,8 @@ def send_remarketing(
             type='teste' if data.is_test else 'massivo',
             config=config_json,
             status='enviando',
-            data_envio=now_brazil()
+            data_envio=now_brazil(),
+            promo_price=promo_price_calc  # 🔥 JÁ SALVA PROMO_PRICE
         )
         db.add(nova_campanha)
         db.commit()
@@ -7149,9 +7177,30 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 
                     # Define Preço (Custom ou Original)
                     preco_final = float(plano.preco_atual)
-                    if hasattr(campanha, 'promo_price') and campanha.promo_price:
-                        if campanha.promo_price > 0:
-                            preco_final = float(campanha.promo_price)
+                    
+                    # 🔥 CORREÇÃO: Verifica promo_price corretamente (None != 0, float(0) é falsy)
+                    if hasattr(campanha, 'promo_price') and campanha.promo_price is not None:
+                        try:
+                            promo_val = float(campanha.promo_price)
+                            if promo_val > 0:
+                                preco_final = round(promo_val, 2)
+                        except (ValueError, TypeError):
+                            pass  # Mantém preco_final = preco_atual
+                    
+                    # 🔥 CORREÇÃO EXTRA: Se promo_price falhou, tenta buscar do config JSON
+                    if preco_final == float(plano.preco_atual) and campanha.config:
+                        try:
+                            cfg = json.loads(campanha.config) if isinstance(campanha.config, str) else campanha.config
+                            if isinstance(cfg, str): cfg = json.loads(cfg)
+                            cfg_price_mode = cfg.get('price_mode', 'original')
+                            cfg_custom_price = cfg.get('custom_price')
+                            if cfg_price_mode == 'custom' and cfg_custom_price is not None:
+                                val_cfg = float(str(cfg_custom_price).replace(',', '.'))
+                                if val_cfg > 0:
+                                    preco_final = round(val_cfg, 2)
+                                    logger.info(f"💰 [PROMO] Preço recuperado do config JSON: R${preco_final}")
+                        except Exception as e_cfg:
+                            logger.warning(f"⚠️ Erro ao ler config para preço: {e_cfg}")
                     
                     desconto_percentual = 0
                     if plano.preco_atual > preco_final:
@@ -7854,11 +7903,14 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 if payload.price_mode == 'custom' and payload.custom_price is not None:
                      try:
                         val_custom = float(str(payload.custom_price).replace(',', '.'))
-                        preco_final = val_custom if val_custom > 0 else plano_db.preco_atual
-                     except:
-                        preco_final = plano_db.preco_atual
+                        preco_final = round(val_custom, 2) if val_custom > 0 else float(plano_db.preco_atual)
+                     except (ValueError, TypeError):
+                        preco_final = float(plano_db.preco_atual)
                 else:
-                    preco_final = plano_db.preco_atual
+                    preco_final = float(plano_db.preco_atual)
+                
+                # 🔥 CORREÇÃO: Garante sempre 2 casas decimais
+                preco_final = round(preco_final, 2)
                 
                 # Cálculo de Expiração (se houver)
                 if payload.expiration_mode != "none" and payload.expiration_value:
@@ -7995,13 +8047,14 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                     logger.warning(f"⚠️ Erro ao atualizar progresso: {e}")
 
         # 🔥 CORRIGIDO: Mantém mesma estrutura que o config_data inicial
+        # 🔥 CORREÇÃO: Salva custom_price com round(2) para evitar "9,9" ao reutilizar
         config_completa = {
             "mensagem": payload.mensagem,
             "media_url": payload.media_url,
             "incluir_oferta": payload.incluir_oferta,
             "plano_oferta_id": payload.plano_oferta_id,
             "price_mode": payload.price_mode,
-            "custom_price": preco_final,
+            "custom_price": round(preco_final, 2) if preco_final > 0 else None,
             "expiration_mode": payload.expiration_mode,
             "expiration_value": payload.expiration_value
         }
@@ -8016,8 +8069,8 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         
         if plano_db:
             update_data["plano_id"] = plano_db.id
-            # 🔥 CORREÇÃO 2: Salva o preço na coluna 'promo_price' para o handler usar
-            update_data["promo_price"] = preco_final
+            # 🔥 CORREÇÃO 2: Salva o preço na coluna 'promo_price' para o handler usar (com round)
+            update_data["promo_price"] = round(preco_final, 2) if preco_final > 0 else None
         
         db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update(update_data)
         db.commit()
@@ -8074,6 +8127,16 @@ async def enviar_remarketing(
         # =========================================================
         uuid_campanha = str(uuid.uuid4())
         
+        # 🔥 CORREÇÃO: Normaliza custom_price ANTES de salvar (vírgula → ponto, 2 casas)
+        normalized_custom_price = None
+        if getattr(payload, 'price_mode', 'original') == 'custom' and getattr(payload, 'custom_price', None) is not None:
+            try:
+                val_norm = float(str(payload.custom_price).replace(',', '.'))
+                if val_norm > 0:
+                    normalized_custom_price = round(val_norm, 2)
+            except (ValueError, TypeError):
+                normalized_custom_price = None
+        
         # 🔥 CORRIGIDO: Cria JSON de config com TODOS os campos necessários
         config_data = {
             "mensagem": payload.mensagem,
@@ -8081,10 +8144,27 @@ async def enviar_remarketing(
             "incluir_oferta": getattr(payload, 'incluir_oferta', False),  # ✅ CAMPO ADICIONADO
             "plano_oferta_id": getattr(payload, 'plano_oferta_id', None),
             "price_mode": getattr(payload, 'price_mode', 'original'),
-            "custom_price": getattr(payload, 'custom_price', None),
+            "custom_price": normalized_custom_price if normalized_custom_price else getattr(payload, 'custom_price', None),
             "expiration_mode": getattr(payload, 'expiration_mode', 'none'),
             "expiration_value": getattr(payload, 'expiration_value', 0)
         }
+
+        # 🔥 CORREÇÃO: Já calcula promo_price na criação para o handler promo_ usar imediatamente
+        promo_price_inicial = None
+        if getattr(payload, 'incluir_oferta', False) and getattr(payload, 'plano_oferta_id', None):
+            try:
+                plano_oferta_id_str = str(payload.plano_oferta_id)
+                plano_temp = db.query(PlanoConfig).filter(
+                    (PlanoConfig.key_id == plano_oferta_id_str) | 
+                    (PlanoConfig.id == int(plano_oferta_id_str) if plano_oferta_id_str.isdigit() else False)
+                ).first()
+                if plano_temp:
+                    if normalized_custom_price and normalized_custom_price > 0:
+                        promo_price_inicial = normalized_custom_price
+                    else:
+                        promo_price_inicial = float(plano_temp.preco_atual)
+            except Exception as e_price:
+                logger.warning(f"⚠️ Erro ao calcular promo_price inicial: {e_price}")
 
         nova_campanha = RemarketingCampaign(
             bot_id=payload.bot_id,
@@ -8098,7 +8178,7 @@ async def enviar_remarketing(
             sent_success=0,
             blocked_count=0,
             plano_id=getattr(payload, 'plano_oferta_id', None),
-            promo_price=None
+            promo_price=promo_price_inicial  # 🔥 JÁ SALVA O PREÇO CORRETO AQUI
         )
         db.add(nova_campanha)
         db.commit()
