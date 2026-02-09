@@ -7664,9 +7664,12 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                  ids_exp = {str(x.telegram_id).strip() for x in q_exp if x.telegram_id}
                  lista_final_ids = list(ids_exp - ids_pagantes)
 
-        # Atualiza contagem
+        # Atualiza contagem INICIAL e marca como "enviando"
         logger.info(f"📊 Filtro '{target}' resultou em {len(lista_final_ids)} leads.")
-        db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update({"total_leads": len(lista_final_ids)})
+        db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update({
+            "total_leads": len(lista_final_ids),
+            "status": "enviando"  # 🔥 NOVO: Marca como "enviando"
+        })
         db.commit()
 
         # --- D. MONTAGEM DA MENSAGEM (CORREÇÃO DO BOTÃO) ---
@@ -7680,11 +7683,12 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
             cb_data = f"promo_{uuid_campanha}" 
             markup.add(types.InlineKeyboardButton(btn_text, callback_data=cb_data))
 
-        # --- E. ENVIO ---
+        # --- E. ENVIO COM ATUALIZAÇÃO EM TEMPO REAL ---
         sent_count = 0
         blocked_count = 0
+        batch_size = 10  # Atualiza DB a cada 10 envios
 
-        for uid in lista_final_ids:
+        for idx, uid in enumerate(lista_final_ids):
             if not uid or len(uid) < 5: continue
             try:
                 midia_ok = False
@@ -7710,6 +7714,19 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                 err = str(e).lower()
                 if "blocked" in err or "kicked" in err or "deactivated" in err or "not found" in err:
                     blocked_count += 1
+            
+            # 🔥 NOVO: Atualiza progresso no banco a cada batch_size envios
+            if (idx + 1) % batch_size == 0 or (idx + 1) == len(lista_final_ids):
+                try:
+                    db.query(RemarketingCampaign).filter(
+                        RemarketingCampaign.id == campaign_db_id
+                    ).update({
+                        "sent_success": sent_count,
+                        "blocked_count": blocked_count
+                    })
+                    db.commit()
+                except Exception as e:
+                    logger.warning(f"⚠️ Erro ao atualizar progresso: {e}")
 
         # --- F. FINALIZAÇÃO (CORREÇÃO DO PREÇO NO BANCO) ---
         config_completa = {
@@ -7719,7 +7736,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         }
         
         update_data = {
-            "status": "concluido", 
+            "status": "concluido",  # 🔥 Marca como concluído
             "sent_success": sent_count,
             "blocked_count": blocked_count, 
             "config": json.dumps(config_completa),
@@ -8003,6 +8020,47 @@ def delete_remarketing_history(history_id: int, db: Session = Depends(get_db)):
     db.commit()
     
     return {"status": "ok", "message": "Campanha deletada com sucesso"}
+
+# ============================================================
+# ROTA 3: PROGRESSO DA CAMPANHA EM TEMPO REAL (NOVA!)
+# ============================================================
+@app.get("/api/admin/remarketing/progress/{campaign_id}")
+def get_campaign_progress(campaign_id: int, db: Session = Depends(get_db)):
+    """
+    Retorna o progresso em tempo real de uma campanha de remarketing.
+    Usado pelo widget flutuante no frontend para atualização ao vivo.
+    """
+    try:
+        campanha = db.query(RemarketingCampaign).filter(
+            RemarketingCampaign.id == campaign_id
+        ).first()
+        
+        if not campanha:
+            raise HTTPException(status_code=404, detail="Campanha não encontrada")
+        
+        # Calcula porcentagem de progresso
+        total = campanha.total_leads or 0
+        enviados = (campanha.sent_success or 0) + (campanha.blocked_count or 0)
+        porcentagem = int((enviados / total * 100)) if total > 0 else 0
+        
+        return {
+            "campaign_id": campanha.id,
+            "status": campanha.status,  # 'agendado', 'enviando', 'concluido', 'erro'
+            "total_leads": total,
+            "sent_success": campanha.sent_success or 0,
+            "blocked_count": campanha.blocked_count or 0,
+            "processed": enviados,  # Total processado (sucesso + bloqueados)
+            "percentage": porcentagem,
+            "is_complete": campanha.status in ['concluido', 'erro'],
+            "data_envio": campanha.data_envio.isoformat() if campanha.data_envio else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao buscar progresso da campanha: {e}")
+        raise HTTPException(500, detail=str(e))
+
 # =========================================================
 # 📊 ROTA DE DASHBOARD V2 (COM FILTRO DE DATA E SUPORTE ADMIN)
 # =========================================================
