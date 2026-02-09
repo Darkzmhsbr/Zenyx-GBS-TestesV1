@@ -1035,17 +1035,16 @@ async def cleanup_orphan_jobs():
 
 def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_message_id: int, user_info: dict):
     try:
-        # ✅ LOGS DE DEBUG NO INÍCIO:
+        # ✅ LOGS DE DEBUG:
         logger.info(f"🔔 [SCHEDULE] Iniciando agendamento - Bot: {bot_id}, Chat: {chat_id}")
         
         db = SessionLocal()
         try:
-            # Busca config SEM filtrar por 'is_active' para permitir Alternating separado
+            # Busca config
             config = db.query(RemarketingConfig).filter(
                 RemarketingConfig.bot_id == bot_id
             ).first()
             
-            # Objeto dummy se não existir config, para não quebrar
             if not config:
                 class DummyConfig:
                     is_active = False
@@ -1077,7 +1076,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             }
 
             # ==================================================================
-            # 1. Agenda Mensagens Alternantes (INTELIGENTE 🧠)
+            # 1. Agenda Mensagens Alternantes
             # ==================================================================
             alt_config = db.query(AlternatingMessages).filter(
                 AlternatingMessages.bot_id == bot_id, 
@@ -1087,20 +1086,16 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             if alt_config and alt_config.messages:
                 logger.info(f"✅ [SCHEDULE] Mensagens alternantes ativadas - {len(alt_config.messages)} mensagens")
                 
-                # 🧠 LÓGICA DE TEMPO: 
-                # Se Remarketing ATIVO -> Para antes do remarketing
-                # Se Remarketing INATIVO -> Usa o tempo definido na própria rotação (ou 60 min padrão)
-                
                 agora = datetime.now()
                 
+                # 🧠 LÓGICA DE TEMPO:
                 if config.is_active:
-                    # Lógica padrão: Parar X segundos antes do disparo
+                    # Se remarketing ATIVO: Para X segundos antes do disparo
                     delay_base_minutes = config.delay_minutes
                     stop_at = agora + timedelta(minutes=delay_base_minutes) - timedelta(seconds=alt_config.stop_before_remarketing_seconds)
                     logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Ativo. Parar em: {stop_at.strftime('%H:%M:%S')}")
                 else:
-                    # Nova Lógica: Tempo independente
-                    # Tenta pegar o campo novo, se não existir usa 60 minutos
+                    # Se remarketing INATIVO: Usa a duração definida na alternância (ou 60 min)
                     duracao_rotacao = getattr(alt_config, 'max_duration_minutes', 60)
                     stop_at = agora + timedelta(minutes=duracao_rotacao)
                     logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Inativo. Rotação por {duracao_rotacao} min. Parar em: {stop_at.strftime('%H:%M:%S')}")
@@ -1124,7 +1119,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 logger.info(f"ℹ️ [SCHEDULE] Mensagens alternantes desativadas")
 
             # ==================================================================
-            # 2. Agenda Remarketing Automático (SOMENTE SE ATIVO)
+            # 2. Agenda Remarketing Automático
             # ==================================================================
             if config.is_active:
                 logger.info(f"⏰ [SCHEDULE] Agendando remarketing para daqui a {config.delay_minutes} minutos")
@@ -1202,41 +1197,29 @@ async def delayed_delete_message(token: str, chat_id: int, message_id: int, dela
         logger.error(f"⚠️ Erro ao deletar mensagem final ({chat_id}): {e}")
 
 # ========================================
-# 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL - V5 FINAL)
-# ========================================
-# ========================================
-# 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL - V6)
+# 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL - V7 FINAL)
 # ========================================
 async def enviar_mensagens_alternantes():
     """
     Envia mensagens alternantes. 
-    V6: Adiciona coluna max_duration_minutes e lógica de tempo independente.
+    V7: Correção do nome do token (bot_db.token) e lógica de tempo.
     """
     db = SessionLocal()
     try:
-        # ---------------------------------------------------------
-        # 1. AUTO-MIGRAÇÃO (Colunas V4 + Nova Coluna V6)
-        # ---------------------------------------------------------
+        # Auto-Migração
         try:
-            # Colunas da V4 (Destruição final)
             db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS last_message_auto_destruct BOOLEAN DEFAULT FALSE"))
             db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS last_message_destruct_seconds INTEGER DEFAULT 60"))
-            
-            # ✅ NOVA COLUNA V6 (Tempo de rotação independente)
             db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS max_duration_minutes INTEGER DEFAULT 60"))
-            
             db.commit()
-        except Exception as e_mig:
+        except Exception:
             db.rollback()
-            # logger.warning(f"⚠️ [MIGRATION] Tentativa de migração alternating: {e_mig}")
 
-        # ---------------------------------------------------------
-        # 2. PROCESSAMENTO DOS BOTS
-        # ---------------------------------------------------------
         bots = db.query(BotModel).all()
         
         for bot_db in bots:
             try:
+                # ✅ CORREÇÃO CRÍTICA: O nome correto no model é 'token', não 'telegram_token'
                 if not bot_db.token: continue
 
                 # Busca configs
@@ -1249,27 +1232,21 @@ async def enviar_mensagens_alternantes():
                 if not alt_config or not alt_config.messages:
                     continue
                 
-                # Definições de tempo
                 intervalo_segundos = alt_config.rotation_interval_seconds or 3600
-                
-                # Lógica de Tempo Limite para o JOB (Backup do Scheduler)
-                # Se remarketing ativo, limite é 24h (o scheduler cuida do tempo exato).
-                # Se remarketing inativo, o limite é a duração configurada.
                 max_duration = getattr(alt_config, 'max_duration_minutes', 60)
                 
+                # 🧠 LÓGICA DE TEMPO DO JOB:
+                # Se o lead foi criado há mais tempo que a duração permitida, IGNORA.
                 if remarketing_config and remarketing_config.is_active:
-                     # Modo Seguro: Olha leads de até 24h atrás
                      tempo_limite_criacao = datetime.utcnow() - timedelta(hours=24)
                 else:
-                     # Modo Independente: Olha leads dentro da janela de duração definida
-                     # Ex: Se duração é 10 min, só pega leads criados nos últimos 10 min
+                     # Se remarketing OFF, usa a duração definida (ex: 1 min)
                      tempo_limite_criacao = datetime.utcnow() - timedelta(minutes=max_duration)
 
-                # Definições da Lógica Final
                 destruir_ultima = getattr(alt_config, 'last_message_auto_destruct', False)
                 tempo_destruicao = getattr(alt_config, 'last_message_destruct_seconds', 60)
                 
-                # Query leads elegíveis
+                # Query leads
                 leads_elegiveis = db.query(Lead).outerjoin(
                     Pedido,
                     and_(
@@ -1281,12 +1258,13 @@ async def enviar_mensagens_alternantes():
                     Lead.bot_id == bot_db.id,
                     Lead.status != "blocked",
                     Pedido.id == None,
-                    Lead.created_at > tempo_limite_criacao # ✅ Filtra pela janela de tempo correta
+                    Lead.created_at > tempo_limite_criacao # ✅ Isso garante que pare após o tempo definido
                 ).all()
                 
                 if not leads_elegiveis: continue
                 
-                bot_temp = TeleBot(bot_db.telegram_token, threaded=False)
+                # ✅ CORREÇÃO: Usando bot_db.token
+                bot_temp = TeleBot(bot_db.token, threaded=False)
                 bot_temp.parse_mode = "HTML"
                 
                 for lead in leads_elegiveis:
@@ -1310,7 +1288,7 @@ async def enviar_mensagens_alternantes():
                         mensagens = alt_config.messages
                         total_msgs = len(mensagens)
 
-                        # 🛑 TRAVA DE FIM DE CICLO
+                        # 🛑 TRAVA DE FIM DE CICLO (Se chegou na última e deve destruir)
                         if destruir_ultima and state.last_message_index >= (total_msgs - 1):
                             continue 
                         
@@ -1319,7 +1297,7 @@ async def enviar_mensagens_alternantes():
                         if tempo_desde_ultimo < intervalo_segundos:
                             continue
                         
-                        # Define próxima mensagem
+                        # Define mensagem
                         proximo_index = (state.last_message_index + 1) % total_msgs
                         mensagem_atual = mensagens[proximo_index]
                         
@@ -1336,20 +1314,20 @@ async def enviar_mensagens_alternantes():
                         if eh_ultima and destruir_ultima:
                             logger.info(f"💣 [ALTERNATING] Última mensagem enviada para {lead.user_id}. Destruição em {tempo_destruicao}s.")
                             asyncio.create_task(delayed_delete_message(
-                                bot_db.token, 
+                                bot_db.token, # ✅ Token correto aqui também
                                 lead.user_id, 
                                 sent_msg.message_id, 
                                 tempo_destruicao
                             ))
                             
-                        # Atualiza estado
+                        # Atualiza
                         state.last_message_index = proximo_index
                         state.last_sent_at = datetime.utcnow()
                         db.commit()
                         
                         await asyncio.sleep(0.2)
                         
-                    except Exception as e_lead:
+                    except Exception:
                         continue
                         
             except Exception as e_bot:
@@ -1360,7 +1338,7 @@ async def enviar_mensagens_alternantes():
         logger.error(f"❌ Erro crítico no job alternating: {str(e)}")
     finally:
         db.close()
-
+        
 # Agenda o job (mantido)
 scheduler.add_job(
     enviar_mensagens_alternantes,
