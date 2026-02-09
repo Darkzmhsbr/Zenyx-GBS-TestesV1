@@ -66,7 +66,9 @@ from database import (
     # ✅ NOVOS IMPORTS PARA REMARKETING AUTOMÁTICO
     RemarketingConfig,
     AlternatingMessages,  # ✅ NOME CORRETO
-    RemarketingLog        # ✅ NOME CORRETO
+    RemarketingLog,       # ✅ NOME CORRETO
+    # ✅ NOVO IMPORT PARA CANAL FREE
+    CanalFreeConfig
 )
 
 import update_db 
@@ -91,6 +93,21 @@ def agendar_destruicao_msg(bot, chat_id, message_id, delay_seconds=5):
 
     # Inicia o timer em paralelo
     threading.Thread(target=tarefa_destruir, daemon=True).start()
+
+# =========================================================
+# 🆓 FUNÇÃO: APROVAR ENTRADA NO CANAL FREE
+# =========================================================
+def aprovar_entrada_canal_free(bot_token: str, canal_id: str, user_id: int):
+    """
+    Aprova entrada do usuário no canal após o delay configurado.
+    Executado pelo scheduler.
+    """
+    try:
+        bot = telebot.TeleBot(bot_token)
+        bot.approve_chat_join_request(int(canal_id), user_id)
+        logger.info(f"✅ [CANAL FREE] Usuário {user_id} aprovado no canal {canal_id}")
+    except Exception as e:
+        logger.error(f"❌ [CANAL FREE] Erro ao aprovar usuário {user_id}: {e}")
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
@@ -6065,6 +6082,122 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         bot_temp = telebot.TeleBot(token, threaded=False)
         message = update.message if update.message else None
         
+        # ========================================
+        # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
+        # ========================================
+        if update.chat_join_request:
+            try:
+                join_request = update.chat_join_request
+                canal_id = str(join_request.chat.id)
+                user_id = join_request.from_user.id
+                user_name = join_request.from_user.first_name
+                username = join_request.from_user.username
+                
+                logger.info(f"🆓 [CANAL FREE] Solicitação de entrada - User: {user_name} ({user_id}), Canal: {canal_id}")
+                
+                # Buscar configuração do Canal Free
+                config = db.query(CanalFreeConfig).filter(
+                    CanalFreeConfig.bot_id == bot_db.id,
+                    CanalFreeConfig.canal_id == canal_id,
+                    CanalFreeConfig.is_active == True
+                ).first()
+                
+                if not config:
+                    logger.warning(f"⚠️ [CANAL FREE] Canal {canal_id} não configurado para bot {bot_db.id}")
+                    return {"status": "ok", "message": "Canal não configurado"}
+                
+                # Enviar mensagem de boas-vindas
+                try:
+                    markup = None
+                    
+                    # Montar botões se configurados
+                    if config.buttons and len(config.buttons) > 0:
+                        markup = types.InlineKeyboardMarkup()
+                        for btn in config.buttons:
+                            if btn.get('text') and btn.get('url'):
+                                markup.add(types.InlineKeyboardButton(
+                                    text=btn['text'],
+                                    url=btn['url']
+                                ))
+                    
+                    # Enviar mensagem com ou sem mídia
+                    if config.media_url:
+                        if config.media_type == 'video':
+                            bot_temp.send_video(
+                                user_id,
+                                config.media_url,
+                                caption=config.message_text,
+                                reply_markup=markup,
+                                parse_mode="HTML"
+                            )
+                        else:  # photo ou padrão
+                            bot_temp.send_photo(
+                                user_id,
+                                config.media_url,
+                                caption=config.message_text,
+                                reply_markup=markup,
+                                parse_mode="HTML"
+                            )
+                    else:
+                        bot_temp.send_message(
+                            user_id,
+                            config.message_text,
+                            reply_markup=markup,
+                            parse_mode="HTML"
+                        )
+                    
+                    logger.info(f"✅ [CANAL FREE] Mensagem enviada para {user_name}")
+                    
+                except Exception as e_msg:
+                    logger.error(f"❌ [CANAL FREE] Erro ao enviar mensagem: {e_msg}")
+                
+                # Salvar lead se não existir
+                try:
+                    lead_existente = db.query(Lead).filter(
+                        Lead.user_id == str(user_id),
+                        Lead.bot_id == bot_db.id
+                    ).first()
+                    
+                    if not lead_existente:
+                        lead = Lead(
+                            user_id=str(user_id),
+                            nome=user_name,
+                            username=username,
+                            bot_id=bot_db.id,
+                            origem='canal_free'
+                        )
+                        db.add(lead)
+                        db.commit()
+                        logger.info(f"✅ [CANAL FREE] Lead salvo: {user_name}")
+                    
+                except Exception as e_lead:
+                    logger.error(f"❌ [CANAL FREE] Erro ao salvar lead: {e_lead}")
+                    db.rollback()
+                
+                # Agendar aprovação automática
+                try:
+                    run_date = now_brazil() + timedelta(seconds=config.delay_seconds)
+                    
+                    scheduler.add_job(
+                        aprovar_entrada_canal_free,
+                        'date',
+                        run_date=run_date,
+                        args=[token, canal_id, user_id],
+                        id=f"approve_free_{canal_id}_{user_id}",
+                        replace_existing=True
+                    )
+                    
+                    logger.info(f"⏰ [CANAL FREE] Aprovação agendada para {config.delay_seconds}s - User: {user_name}")
+                    
+                except Exception as e_schedule:
+                    logger.error(f"❌ [CANAL FREE] Erro ao agendar aprovação: {e_schedule}")
+                
+                return {"status": "ok", "message": "Canal Free processado"}
+                
+            except Exception as e_free:
+                logger.error(f"❌ [CANAL FREE] Erro geral: {e_free}")
+                return {"status": "error", "message": str(e_free)}
+        
         # ----------------------------------------
         # 🚪 1. O PORTEIRO (GATEKEEPER)
         # ----------------------------------------
@@ -8179,6 +8312,191 @@ def get_campaign_progress(campaign_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Erro ao buscar progresso da campanha: {e}")
         raise HTTPException(500, detail=str(e))
+
+# =========================================================
+# 🆓 CANAL FREE - ENDPOINTS DA API
+# =========================================================
+
+@app.get("/api/admin/canal-free/{bot_id}")
+def get_canal_free_config(
+    bot_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Retorna configuração do Canal Free para o bot"""
+    try:
+        # Verificar permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        # Buscar configuração
+        config = db.query(CanalFreeConfig).filter(
+            CanalFreeConfig.bot_id == bot_id
+        ).first()
+        
+        if not config:
+            # Retornar config padrão se não existir
+            return {
+                "bot_id": bot_id,
+                "canal_id": None,
+                "canal_name": None,
+                "is_active": False,
+                "message_text": "Olá! Em breve você será aceito no canal. Enquanto isso, que tal conhecer nosso canal VIP?",
+                "media_url": None,
+                "media_type": None,
+                "buttons": [],
+                "delay_seconds": 60
+            }
+        
+        return {
+            "id": config.id,
+            "bot_id": config.bot_id,
+            "canal_id": config.canal_id,
+            "canal_name": config.canal_name,
+            "is_active": config.is_active,
+            "message_text": config.message_text,
+            "media_url": config.media_url,
+            "media_type": config.media_type,
+            "buttons": config.buttons or [],
+            "delay_seconds": config.delay_seconds,
+            "created_at": config.created_at.isoformat() if config.created_at else None,
+            "updated_at": config.updated_at.isoformat() if config.updated_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao buscar config Canal Free: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/canal-free/{bot_id}")
+def save_canal_free_config(
+    bot_id: int,
+    data: dict,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Salva/atualiza configuração do Canal Free"""
+    try:
+        # Verificar permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        # Validações
+        message_text = data.get("message_text", "").strip()
+        if not message_text:
+            raise HTTPException(status_code=400, detail="Mensagem de boas-vindas é obrigatória")
+        
+        delay_seconds = data.get("delay_seconds", 60)
+        if delay_seconds < 1 or delay_seconds > 86400:  # 1s a 24h
+            raise HTTPException(status_code=400, detail="Delay deve estar entre 1 e 86400 segundos")
+        
+        # Buscar configuração existente
+        config = db.query(CanalFreeConfig).filter(
+            CanalFreeConfig.bot_id == bot_id
+        ).first()
+        
+        if config:
+            # Atualizar existente
+            config.canal_id = data.get("canal_id")
+            config.canal_name = data.get("canal_name")
+            config.is_active = data.get("is_active", False)
+            config.message_text = message_text
+            config.media_url = data.get("media_url")
+            config.media_type = data.get("media_type")
+            config.buttons = data.get("buttons", [])
+            config.delay_seconds = delay_seconds
+            config.updated_at = now_brazil()
+        else:
+            # Criar nova
+            config = CanalFreeConfig(
+                bot_id=bot_id,
+                canal_id=data.get("canal_id"),
+                canal_name=data.get("canal_name"),
+                is_active=data.get("is_active", False),
+                message_text=message_text,
+                media_url=data.get("media_url"),
+                media_type=data.get("media_type"),
+                buttons=data.get("buttons", []),
+                delay_seconds=delay_seconds
+            )
+            db.add(config)
+        
+        db.commit()
+        db.refresh(config)
+        
+        logger.info(f"✅ Canal Free configurado - Bot: {bot_id}")
+        
+        return {
+            "id": config.id,
+            "bot_id": config.bot_id,
+            "canal_id": config.canal_id,
+            "canal_name": config.canal_name,
+            "is_active": config.is_active,
+            "message_text": config.message_text,
+            "media_url": config.media_url,
+            "media_type": config.media_type,
+            "buttons": config.buttons,
+            "delay_seconds": config.delay_seconds,
+            "updated_at": config.updated_at.isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro ao salvar Canal Free: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/canal-free/{bot_id}/canais-disponiveis")
+def get_canais_disponiveis(
+    bot_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Lista canais onde o bot é admin e pode aprovar solicitações.
+    Usa a API do Telegram para buscar chats onde o bot é administrador.
+    """
+    try:
+        # Verificar permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        # Tentar buscar canais (isso requer que o bot tenha sido adicionado aos canais)
+        # Como não temos acesso direto via API, retornamos instruções
+        
+        return {
+            "message": "Para configurar, adicione o bot como administrador no canal com todas as permissões",
+            "instructions": [
+                "1. Crie um canal privado no Telegram",
+                "2. Adicione o bot como administrador",
+                "3. Conceda todas as permissões ao bot",
+                "4. Crie um link de convite com 'Pedir aprovação de admins'",
+                "5. Copie o ID do canal e configure abaixo"
+            ],
+            "canais": []
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao buscar canais: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # =========================================================
 # 📊 ROTA DE DASHBOARD V2 (COM FILTRO DE DATA E SUPORTE ADMIN)

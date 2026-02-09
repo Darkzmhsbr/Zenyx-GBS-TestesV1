@@ -686,3 +686,44 @@ class RemarketingLog(Base):
     
     def __repr__(self):
         return f"<RemarketingLog(bot_id={self.bot_id}, user_id={self.user_id}, status={self.status})>"
+# =========================================================
+# 🆓 CANAL FREE (APROVAÇÃO AUTOMÁTICA)
+# =========================================================
+class CanalFreeConfig(Base):
+    """
+    Configuração do Canal Free - Aprovação automática de solicitações de entrada.
+    Envia mensagem personalizada antes de aprovar.
+    """
+    __tablename__ = "canal_free_config"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey('bots.id', ondelete='CASCADE'), nullable=False, unique=True, index=True)
+    
+    # Identificação do Canal
+    canal_id = Column(String, nullable=True)  # ID do canal/grupo Telegram
+    canal_name = Column(String, nullable=True)  # Nome do canal (para exibição)
+    
+    # Status
+    is_active = Column(Boolean, default=True, index=True)
+    
+    # Mensagem de Boas-Vindas
+    message_text = Column(Text, nullable=False)
+    media_url = Column(String(500), nullable=True)
+    media_type = Column(String(10), nullable=True)  # 'photo', 'video', None
+    
+    # Botões Personalizados (JSON Array)
+    buttons = Column(JSON, default=[])
+    # Formato: [{"text": "Ver Canal VIP", "url": "https://t.me/..."}]
+    
+    # Timing - Delay antes de aprovar (em segundos)
+    delay_seconds = Column(Integer, default=60)
+    
+    # Auditoria
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
+    
+    # Relacionamento
+    bot = relationship("Bot", backref="canal_free", uselist=False)
+    
+    def __repr__(self):
+        return f"<CanalFreeConfig(bot_id={self.bot_id}, canal={self.canal_name}, active={self.is_active})>"
