@@ -1802,7 +1802,11 @@ def get_auto_remarketing_messages(
                 "messages": [],
                 "rotation_interval_seconds": 15,
                 "stop_before_remarketing_seconds": 60,
-                "auto_destruct_final": False
+                "auto_destruct_final": False,
+                # 🔥 NOVOS CAMPOS COM VALORES PADRÃO
+                "max_duration_minutes": 60,
+                "last_message_auto_destruct": False,
+                "last_message_destruct_seconds": 60
             }
         
         return {
@@ -1813,6 +1817,10 @@ def get_auto_remarketing_messages(
             "rotation_interval_seconds": config.rotation_interval_seconds,
             "stop_before_remarketing_seconds": config.stop_before_remarketing_seconds,
             "auto_destruct_final": config.auto_destruct_final,
+            # 🔥 RETORNAR NOVOS CAMPOS (CORREÇÃO DO BUG)
+            "max_duration_minutes": config.max_duration_minutes,
+            "last_message_auto_destruct": config.last_message_auto_destruct,
+            "last_message_destruct_seconds": config.last_message_destruct_seconds,
             "created_at": config.created_at.isoformat() if config.created_at else None,
             "updated_at": config.updated_at.isoformat() if config.updated_at else None
         }
