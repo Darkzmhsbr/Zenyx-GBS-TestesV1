@@ -6193,9 +6193,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     logger.info("✅ Menu enviado com sucesso!")
 
-                    # 🔥 AUTO-DESTRUIÇÃO (SE CONFIGURADO)
-                    if sent_msg_start and flow and flow.autodestruir_1:
-                        agendar_destruicao_msg(bot_temp, chat_id, sent_msg_start.message_id, 5)
+                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão (via callback linha 6240-6242)
+                    # Motivo: Timer automático deletava mensagem ANTES do usuário clicar, parando o fluxo
+                    # A destruição agora acontece corretamente quando o usuário clica no botão
+                    # if sent_msg_start and flow and flow.autodestruir_1:
+                    #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg_start.message_id, 5)
 
                 except Exception as e_envio:
                     logger.error(f"❌ ERRO AO ENVIAR MENSAGEM START: {e_envio}")
@@ -6235,13 +6237,13 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 
                 # CASO 1: O usuário clicou no botão da MENSAGEM DE BOAS VINDAS (indo para o passo 1)
                 if current_step == 1:
-                    # Como a mensagem de boas-vindas não é um "Passo" no banco, assumimos que
-                    # se tem botão levando ao passo 1, ela deve ser limpa para dar foco.
+                    # A mensagem de boas-vindas agora SÓ é deletada quando o usuário clica (sem timer paralelo)
+                    # Isso resolve o bug onde a mensagem sumia antes do usuário clicar, parando o fluxo
                     try: 
                         bot_temp.delete_message(chat_id, msg_anterior_id)
                         logger.info(f"🗑️ Mensagem de Boas-Vindas deletada IMEDIATAMENTE após clique.")
                     except Exception as e: 
-                        # Pode falhar se o timer paralelo deletou milissegundos antes, ignoramos.
+                        # Falha silenciosa caso a mensagem já tenha sido deletada manualmente
                         pass
 
                 # CASO 2: O usuário clicou em um PASSO DO FLUXO (indo para 2, 3...)
@@ -6282,13 +6284,12 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         # Fallback caso falhe HTML ou Mídia
                         sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk)
 
-                    # --- TIMER DE SEGURANÇA (BACKUP) ---
-                    # Agenda destruição para caso o usuário NÃO CLIQUE no botão e abandone o chat.
-                    # Se ele clicar, a "Guilhotina" acima deleta antes do timer, e o timer só falha silenciosamente depois.
-                    if sent_msg and target_step.autodestruir:
-                        # Se tiver delay configurado, usa ele. Se não, dá 20 segundos de leitura "segura".
-                        tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 20
-                        agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
+                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão (via callback linha 6256-6260)
+                    # Motivo: Timer automático deletava mensagem ANTES do usuário clicar, parando o fluxo
+                    # A destruição agora acontece corretamente quando o usuário clica no botão do passo anterior
+                    # if sent_msg and target_step.autodestruir:
+                    #     tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 20
+                    #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
 
                     # Lógica de Navegação Automática (Recursividade para passos SEM botão)
                     if not target_step.mostrar_botao:
