@@ -693,124 +693,104 @@ async def shutdown_event():
 # 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
 # ============================================================
 
-async def start_alternating_messages_job(
-    bot_token: str,
-    chat_id: int,
-    message_id: int,  # Este parâmetro não será usado, mas mantém compatibilidade
-    messages: list,
-    interval_seconds: int,
-    stop_at: datetime,
-    auto_destruct: bool,
-    bot_id: int
-):
+async def start_alternating_messages_job(token: str, chat_id: int, payment_message_id: int, messages: list, interval_seconds: int, stop_at: datetime, auto_destruct_final: bool, bot_id: int):
     """
-    Envia mensagens alternantes para o usuário.
-    CORRIGIDO: Agora EDITA a mensagem existente para não "autodestruir".
+    Envia mensagens alternantes até o horário de parada (stop_at).
+    V8: Com controle rigoroso de tempo e auto-destruição correta da última mensagem.
     """
     try:
-        bot = TeleBot(bot_token, threaded=False)
-        index = 0
-        last_message_id = None
+        bot_alt = TeleBot(token, threaded=False)
+        bot_alt.parse_mode = "HTML"
         
-        logger.info(f"✅ [ALTERNATING] Iniciado - User: {chat_id}, Msgs: {len(messages)}")
+        tempo_inicio = datetime.now()
+        logger.info(f"✅ [ALTERNATING] Iniciado - Chat: {chat_id}, Msgs: {len(messages)}")
+        logger.info(f"🕐 [ALTERNATING-TIMER] Início: {tempo_inicio.strftime('%H:%M:%S')}")
+        logger.info(f"🕐 [ALTERNATING-TIMER] Término previsto: {stop_at.strftime('%H:%M:%S')}")
+        logger.info(f"⏱️ [ALTERNATING-DEBUG] Intervalo entre msgs: {interval_seconds}s")
+        logger.info(f"🗑️ [ALTERNATING-DEBUG] Auto-destruir última: {auto_destruct_final}")
         
-        # Envia a primeira mensagem imediatamente para ter o ID
-        try:
-            current_message = messages[0]
-            msg = bot.send_message(
-                chat_id=chat_id,
-                text=current_message,
-                parse_mode='HTML'
-            )
-            last_message_id = msg.message_id
-            index += 1
-            # Aguarda o primeiro intervalo antes de começar a alternar
-            await asyncio.sleep(interval_seconds)
-            
-        except Exception as e_start:
-             logger.error(f"❌ [ALTERNATING] Erro ao enviar primeira msg: {e_start}")
-             return
-
+        ciclo_count = 0
+        ultima_mensagem_id = None
+        
         while datetime.now() < stop_at:
-            try:
-                current_message = messages[index % len(messages)]
+            # Verificar se ainda há tempo disponível
+            tempo_restante = (stop_at - datetime.now()).total_seconds()
+            
+            if tempo_restante <= 0:
+                logger.info(f"⏰ [ALTERNATING-TIMER] TEMPO ESGOTADO!")
+                break
+            
+            ciclo_count += 1
+            logger.info(f"🔄 [ALTERNATING-CICLO-{ciclo_count}] Tempo restante: {tempo_restante:.0f}s")
+            
+            # Enviar cada mensagem do ciclo
+            for idx, msg in enumerate(messages, 1):
+                # Verificar tempo antes de enviar cada mensagem
+                tempo_restante = (stop_at - datetime.now()).total_seconds()
                 
-                # ✅ MESTRE CÓDIGO FÁCIL: Tenta EDITAR a mensagem em vez de apagar/enviar
-                if last_message_id:
-                    try:
-                        bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=last_message_id,
-                            text=current_message,
-                            parse_mode='HTML'
-                        )
-                        logger.debug(f"✏️ Mensagem {last_message_id} editada para índice {index}")
-                    except ApiTelegramException as e_edit:
-                        error_msg = str(e_edit).lower()
-                        
-                        # Se a mensagem não mudar (texto igual), o Telegram dá erro, ignoramos
-                        if "message is not modified" in error_msg:
-                            pass
-                        # Se a mensagem foi apagada ou não encontrada, enviamos uma nova
-                        elif "message to edit not found" in error_msg or "message can't be edited" in error_msg:
-                            logger.warning(f"⚠️ Mensagem perdida, enviando nova...")
-                            msg = bot.send_message(
-                                chat_id=chat_id,
-                                text=current_message,
-                                parse_mode='HTML'
-                            )
-                            last_message_id = msg.message_id
-                        elif "bot was blocked" in error_msg:
-                            logger.warning(f"⚠️ [ALTERNATING] Usuário {chat_id} bloqueou o bot")
-                            break
-                        else:
-                            logger.error(f"⚠️ Erro ao editar: {e_edit}")
-                else:
-                    # Se não tem ID anterior, envia nova
-                    msg = bot.send_message(
-                        chat_id=chat_id,
-                        text=current_message,
-                        parse_mode='HTML'
-                    )
-                    last_message_id = msg.message_id
-
-                index += 1
-                
-                # Calcula tempo restante
-                remaining = (stop_at - datetime.now()).total_seconds()
-                sleep_time = min(interval_seconds, remaining)
-                
-                if sleep_time <= 0:
-                    logger.info(f"⏰ [ALTERNATING] Tempo esgotado para {chat_id}")
+                if tempo_restante <= 0:
+                    logger.info(f"⏰ [ALTERNATING-TIMER] Tempo esgotado durante envio da msg {idx}")
                     break
                 
-                await asyncio.sleep(sleep_time)
+                try:
+                    texto = msg if isinstance(msg, str) else msg.get('content', '')
+                    
+                    if not texto or not texto.strip():
+                        logger.warning(f"⚠️ [ALTERNATING] Mensagem {idx} vazia, pulando...")
+                        continue
+                    
+                    sent_msg = bot_alt.send_message(chat_id, texto)
+                    ultima_mensagem_id = sent_msg.message_id
+                    
+                    logger.info(f"📤 [ALTERNATING] Msg {idx}/{len(messages)} enviada (ID: {ultima_mensagem_id})")
+                    
+                except Exception as e:
+                    logger.error(f"❌ [ALTERNATING] Erro ao enviar msg {idx}: {e}")
                 
-            except Exception as e:
-                logger.error(f"❌ [ALTERNATING] Erro geral no loop: {e}")
-                await asyncio.sleep(interval_seconds)
-        
-        # Auto-destruição da última mensagem (apenas no final do ciclo se configurado)
-        if auto_destruct and last_message_id:
-            try:
-                await asyncio.sleep(1)
-                bot.delete_message(chat_id=chat_id, message_id=last_message_id)
-                logger.info(f"🗑️ [ALTERNATING] Última mensagem autodestruída (Fim do Ciclo)")
-            except Exception as e_auto:
-                logger.error(f"⚠️ [ALTERNATING] Erro na autodestruição: {e_auto}")
-        
-        logger.info(f"✅ [ALTERNATING] Finalizado para {chat_id}")
+                # Aguardar intervalo entre mensagens (se não for a última do ciclo)
+                if idx < len(messages):
+                    # Verificar se ainda há tempo para aguardar
+                    tempo_restante = (stop_at - datetime.now()).total_seconds()
+                    
+                    if tempo_restante <= interval_seconds:
+                        logger.info(f"⏰ [ALTERNATING-TIMER] Não há tempo suficiente para próximo intervalo")
+                        break
+                    
+                    logger.info(f"⏳ [ALTERNATING] Aguardando {interval_seconds}s até próxima msg...")
+                    await asyncio.sleep(interval_seconds)
             
+            # Verificar se ainda há tempo para outro ciclo completo
+            tempo_restante = (stop_at - datetime.now()).total_seconds()
+            tempo_necessario_proximo_ciclo = len(messages) * interval_seconds
+            
+            if tempo_restante < tempo_necessario_proximo_ciclo:
+                logger.info(f"⏰ [ALTERNATING-TIMER] Tempo insuficiente para outro ciclo completo")
+                logger.info(f"   Restante: {tempo_restante:.0f}s | Necessário: {tempo_necessario_proximo_ciclo}s")
+                break
+            
+            logger.info(f"♻️ [ALTERNATING] Reiniciando ciclo... (Tempo restante: {tempo_restante:.0f}s)")
+            await asyncio.sleep(interval_seconds)
+        
+        # FIM DO CICLO: Auto-destruir ÚLTIMA mensagem se configurado
+        if auto_destruct_final and ultima_mensagem_id:
+            tempo_destruicao = 60  # 1 minuto padrão
+            logger.info(f"🗑️ [ALTERNATING-FIM] Última mensagem (ID: {ultima_mensagem_id}) será destruída em {tempo_destruicao}s")
+            asyncio.create_task(
+                delayed_delete_message(token, chat_id, ultima_mensagem_id, tempo_destruicao)
+            )
+        
+        tempo_total_decorrido = (datetime.now() - tempo_inicio).total_seconds()
+        logger.info(f"✅ [ALTERNATING-CONCLUÍDO] Total de ciclos: {ciclo_count}, Tempo decorrido: {tempo_total_decorrido:.0f}s")
+        
     except asyncio.CancelledError:
-        logger.info(f"⏹️ [ALTERNATING] Cancelado para {chat_id}")
-        pass
+        logger.info(f"🛑 [ALTERNATING] Task cancelada - Chat: {chat_id}")
     except Exception as e:
-        logger.error(f"❌ [ALTERNATING] Erro crítico: {e}")
+        logger.error(f"❌ [ALTERNATING] Erro fatal: {e}", exc_info=True)
     finally:
+        # Limpar task do dicionário
         with remarketing_lock:
             if chat_id in alternating_tasks:
                 del alternating_tasks[chat_id]
-                logger.debug(f"🧹 [ALTERNATING] Task removida para {chat_id}")
 
 
 # ============================================================
@@ -1086,18 +1066,23 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             if alt_config and alt_config.messages:
                 logger.info(f"✅ [SCHEDULE] Mensagens alternantes ativadas - {len(alt_config.messages)} mensagens")
                 
+                # LOG DE DEBUG DOS VALORES SALVOS
+                logger.info(f"🔍 [SCHEDULE-DEBUG] Config salva: {alt_config.log_config_values()}")
+                
                 agora = datetime.now()
                 
-                # 🧠 LÓGICA DE TEMPO:
+                # 🧠 LÓGICA DE TEMPO CORRIGIDA:
                 if config.is_active:
                     # Se remarketing ATIVO: Para X segundos antes do disparo
                     delay_base_minutes = config.delay_minutes
-                    stop_at = agora + timedelta(minutes=delay_base_minutes) - timedelta(seconds=alt_config.stop_before_remarketing_seconds)
+                    tempo_total_segundos = (delay_base_minutes * 60) - alt_config.stop_before_remarketing_seconds
+                    stop_at = agora + timedelta(seconds=tempo_total_segundos)
                     logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Ativo. Parar em: {stop_at.strftime('%H:%M:%S')}")
                 else:
                     # Se remarketing INATIVO: Usa a duração definida na alternância (ou 60 min)
                     duracao_rotacao = getattr(alt_config, 'max_duration_minutes', 60)
-                    stop_at = agora + timedelta(minutes=duracao_rotacao)
+                    tempo_total_segundos = duracao_rotacao * 60
+                    stop_at = agora + timedelta(seconds=tempo_total_segundos)
                     logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Inativo. Rotação por {duracao_rotacao} min. Parar em: {stop_at.strftime('%H:%M:%S')}")
                 
                 loop = asyncio.get_event_loop()
@@ -1192,9 +1177,9 @@ async def delayed_delete_message(token: str, chat_id: int, message_id: int, dela
             
         bot_del = TeleBot(token, threaded=False)
         bot_del.delete_message(chat_id, message_id)
-        logger.info(f"🗑️ [ALTERNATING] Mensagem final destruída para {chat_id}")
+        logger.info(f"💣 Mensagem {message_id} destruída com sucesso.")
     except Exception as e:
-        logger.error(f"⚠️ Erro ao deletar mensagem final ({chat_id}): {e}")
+        logger.error(f"❌ Erro ao destruir mensagem {message_id}: {e}")
 
 # ========================================
 # 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL - V7 FINAL)
@@ -1338,7 +1323,7 @@ async def enviar_mensagens_alternantes():
         logger.error(f"❌ Erro crítico no job alternating: {str(e)}")
     finally:
         db.close()
-        
+
 # Agenda o job (mantido)
 scheduler.add_job(
     enviar_mensagens_alternantes,

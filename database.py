@@ -623,6 +623,17 @@ class AlternatingMessages(Base):
     
     def __repr__(self):
         return f"<AlternatingMessages(bot_id={self.bot_id}, active={self.is_active}, msgs={len(self.messages)})>"
+    
+    def log_config_values(self):
+        """Log de debug para verificar valores salvos"""
+        return {
+            "is_active": self.is_active,
+            "messages_count": len(self.messages) if self.messages else 0,
+            "rotation_interval_seconds": self.rotation_interval_seconds,
+            "stop_before_remarketing_seconds": self.stop_before_remarketing_seconds,
+            "auto_destruct_final": self.auto_destruct_final,
+            "max_duration_minutes": getattr(self, 'max_duration_minutes', 60)
+        }
 
 
 class RemarketingLog(Base):
