@@ -1831,20 +1831,30 @@ def save_auto_remarketing_messages(
         ).first()
         
         if config:
+            # ✅ ATUALIZAR TODOS OS CAMPOS (incluindo os novos)
             config.is_active = data.get("is_active", config.is_active)
             config.messages = messages
             config.rotation_interval_seconds = data.get("rotation_interval_seconds", config.rotation_interval_seconds)
             config.stop_before_remarketing_seconds = data.get("stop_before_remarketing_seconds", config.stop_before_remarketing_seconds)
             config.auto_destruct_final = data.get("auto_destruct_final", config.auto_destruct_final)
+            # ✅ NOVOS CAMPOS
+            config.max_duration_minutes = data.get("max_duration_minutes", config.max_duration_minutes)
+            config.last_message_auto_destruct = data.get("last_message_auto_destruct", config.last_message_auto_destruct)
+            config.last_message_destruct_seconds = data.get("last_message_destruct_seconds", config.last_message_destruct_seconds)
             config.updated_at = datetime.now()
         else:
+            # ✅ CRIAR COM TODOS OS CAMPOS (incluindo os novos)
             config = AlternatingMessages(
                 bot_id=bot_id,
                 is_active=data.get("is_active", False),
                 messages=messages,
                 rotation_interval_seconds=data.get("rotation_interval_seconds", 15),
                 stop_before_remarketing_seconds=data.get("stop_before_remarketing_seconds", 60),
-                auto_destruct_final=data.get("auto_destruct_final", False)
+                auto_destruct_final=data.get("auto_destruct_final", False),
+                # ✅ NOVOS CAMPOS
+                max_duration_minutes=data.get("max_duration_minutes", 60),
+                last_message_auto_destruct=data.get("last_message_auto_destruct", False),
+                last_message_destruct_seconds=data.get("last_message_destruct_seconds", 60)
             )
             db.add(config)
         
@@ -1861,6 +1871,10 @@ def save_auto_remarketing_messages(
             "rotation_interval_seconds": config.rotation_interval_seconds,
             "stop_before_remarketing_seconds": config.stop_before_remarketing_seconds,
             "auto_destruct_final": config.auto_destruct_final,
+            # ✅ RETORNAR NOVOS CAMPOS
+            "max_duration_minutes": config.max_duration_minutes,
+            "last_message_auto_destruct": config.last_message_auto_destruct,
+            "last_message_destruct_seconds": config.last_message_destruct_seconds,
             "updated_at": config.updated_at.isoformat()
         }
         
@@ -1870,7 +1884,6 @@ def save_auto_remarketing_messages(
         db.rollback()
         logger.error(f"❌ Erro: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.get("/api/admin/auto-remarketing/{bot_id}/stats")
 def get_auto_remarketing_stats(
