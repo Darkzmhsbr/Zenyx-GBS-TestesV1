@@ -10222,3 +10222,101 @@ def nuke_duplicate_leads(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         return {"status": "erro", "msg": str(e)}
+
+# ============================================================
+# 🔧 ROTA DE MIGRAÇÃO - ADICIONAR COLUNAS FALTANTES
+# ============================================================
+@app.get("/api/admin/migrate-button-fields")
+async def migrate_button_fields(db: Session = Depends(get_db)):
+    """
+    🔥 Migração Manual: Adiciona as novas colunas do sistema de botões personalizados
+    Acesse: https://seu-dominio.railway.app/api/admin/migrate-button-fields
+    """
+    try:
+        from sqlalchemy import text
+        
+        resultados = []
+        
+        # 1. Adicionar coluna button_mode
+        try:
+            db.execute(text("""
+                ALTER TABLE bot_flows 
+                ADD COLUMN button_mode VARCHAR(20) DEFAULT 'next_step';
+            """))
+            db.commit()
+            resultados.append("✅ Coluna 'button_mode' criada com sucesso!")
+        except Exception as e:
+            db.rollback()
+            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                resultados.append("ℹ️ Coluna 'button_mode' já existe")
+            else:
+                resultados.append(f"❌ Erro ao criar 'button_mode': {str(e)}")
+        
+        # 2. Adicionar coluna buttons_config_2
+        try:
+            db.execute(text("""
+                ALTER TABLE bot_flows 
+                ADD COLUMN buttons_config_2 JSON DEFAULT '[]'::json;
+            """))
+            db.commit()
+            resultados.append("✅ Coluna 'buttons_config_2' criada com sucesso!")
+        except Exception as e:
+            db.rollback()
+            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                resultados.append("ℹ️ Coluna 'buttons_config_2' já existe")
+            else:
+                resultados.append(f"❌ Erro ao criar 'buttons_config_2': {str(e)}")
+        
+        # 3. Verificar se buttons_config existe (deveria já existir)
+        try:
+            db.execute(text("SELECT buttons_config FROM bot_flows LIMIT 1;"))
+            resultados.append("✅ Coluna 'buttons_config' já existe")
+        except Exception as e:
+            # Se não existir, criar
+            try:
+                db.execute(text("""
+                    ALTER TABLE bot_flows 
+                    ADD COLUMN buttons_config JSON DEFAULT '[]'::json;
+                """))
+                db.commit()
+                resultados.append("✅ Coluna 'buttons_config' criada com sucesso!")
+            except Exception as e2:
+                db.rollback()
+                resultados.append(f"❌ Erro ao criar 'buttons_config': {str(e2)}")
+        
+        # 4. Atualizar valores NULL para defaults
+        try:
+            db.execute(text("""
+                UPDATE bot_flows 
+                SET button_mode = 'next_step' 
+                WHERE button_mode IS NULL;
+            """))
+            db.execute(text("""
+                UPDATE bot_flows 
+                SET buttons_config = '[]'::json 
+                WHERE buttons_config IS NULL;
+            """))
+            db.execute(text("""
+                UPDATE bot_flows 
+                SET buttons_config_2 = '[]'::json 
+                WHERE buttons_config_2 IS NULL;
+            """))
+            db.commit()
+            resultados.append("✅ Valores NULL atualizados para defaults")
+        except Exception as e:
+            db.rollback()
+            resultados.append(f"⚠️ Aviso ao atualizar NULLs: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "Migração concluída!",
+            "resultados": resultados
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"Erro geral na migração: {str(e)}",
+            "detalhes": str(e)
+        }
