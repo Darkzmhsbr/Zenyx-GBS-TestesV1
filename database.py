@@ -615,6 +615,11 @@ class AlternatingMessages(Base):
     stop_before_remarketing_seconds = Column(Integer, default=60)
     auto_destruct_final = Column(Boolean, default=False)
     
+    # ✅ NOVOS CAMPOS
+    max_duration_minutes = Column(Integer, default=60)
+    last_message_auto_destruct = Column(Boolean, default=False)
+    last_message_destruct_seconds = Column(Integer, default=60)
+    
     # Auditoria
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -632,7 +637,9 @@ class AlternatingMessages(Base):
             "rotation_interval_seconds": self.rotation_interval_seconds,
             "stop_before_remarketing_seconds": self.stop_before_remarketing_seconds,
             "auto_destruct_final": self.auto_destruct_final,
-            "max_duration_minutes": getattr(self, 'max_duration_minutes', 60)
+            "max_duration_minutes": self.max_duration_minutes,
+            "last_message_auto_destruct": self.last_message_auto_destruct,
+            "last_message_destruct_seconds": self.last_message_destruct_seconds
         }
 
 
