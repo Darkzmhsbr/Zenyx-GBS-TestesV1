@@ -6085,12 +6085,15 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         # ========================================
         # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
         # ========================================
+        # ========================================
+        # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
+        # ========================================
         if update.chat_join_request:
             try:
                 join_request = update.chat_join_request
                 canal_id = str(join_request.chat.id)
                 user_id = join_request.from_user.id
-                user_name = join_request.from_user.first_name
+                user_name = join_request.from_user.first_name if join_request.from_user.first_name else ""
                 username = join_request.from_user.username
                 
                 logger.info(f"🆓 [CANAL FREE] Solicitação de entrada - User: {user_name} ({user_id}), Canal: {canal_id}")
@@ -6106,6 +6109,22 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     logger.warning(f"⚠️ [CANAL FREE] Canal {canal_id} não configurado para bot {bot_db.id}")
                     return {"status": "ok", "message": "Canal não configurado"}
                 
+                # -----------------------------------------------------------
+                # 🔥 CORREÇÃO: SUBSTITUIÇÃO DE VARIÁVEIS NA MENSAGEM
+                # -----------------------------------------------------------
+                final_message = config.message_text or ""
+                
+                # 1. Substitui {first_name}
+                final_message = final_message.replace("{first_name}", user_name)
+                
+                # 2. Substitui {username} (adiciona @ se existir, senão fica vazio)
+                str_user = f"@{username}" if username else ""
+                final_message = final_message.replace("{username}", str_user)
+                
+                # 3. Substitui {id}
+                final_message = final_message.replace("{id}", str(user_id))
+                # -----------------------------------------------------------
+
                 # Enviar mensagem de boas-vindas
                 try:
                     markup = None
@@ -6120,13 +6139,13 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                     url=btn['url']
                                 ))
                     
-                    # Enviar mensagem com ou sem mídia
+                    # Enviar mensagem com ou sem mídia (USANDO final_message)
                     if config.media_url:
                         if config.media_type == 'video':
                             bot_temp.send_video(
                                 user_id,
                                 config.media_url,
-                                caption=config.message_text,
+                                caption=final_message, # ✅ Texto processado
                                 reply_markup=markup,
                                 parse_mode="HTML"
                             )
@@ -6134,14 +6153,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             bot_temp.send_photo(
                                 user_id,
                                 config.media_url,
-                                caption=config.message_text,
+                                caption=final_message, # ✅ Texto processado
                                 reply_markup=markup,
                                 parse_mode="HTML"
                             )
                     else:
                         bot_temp.send_message(
                             user_id,
-                            config.message_text,
+                            final_message, # ✅ Texto processado
                             reply_markup=markup,
                             parse_mode="HTML"
                         )
