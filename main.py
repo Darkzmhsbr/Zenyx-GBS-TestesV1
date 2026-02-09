@@ -695,8 +695,9 @@ async def shutdown_event():
 
 async def start_alternating_messages_job(token: str, chat_id: int, payment_message_id: int, messages: list, interval_seconds: int, stop_at: datetime, auto_destruct_final: bool, bot_id: int):
     """
-    Envia mensagens alternantes até o horário de parada (stop_at).
-    V8: Com controle rigoroso de tempo e auto-destruição correta da última mensagem.
+    ✅ V8 CORRIGIDO: Envia mensagens alternantes de forma ALTERNADA (uma por vez)
+    - Envia 1 mensagem → aguarda intervalo → envia OUTRA mensagem (não a mesma)
+    - Para quando o tempo total (stop_at) for atingido
     """
     try:
         bot_alt = TeleBot(token, threaded=False)
@@ -709,7 +710,8 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
         logger.info(f"⏱️ [ALTERNATING-DEBUG] Intervalo entre msgs: {interval_seconds}s")
         logger.info(f"🗑️ [ALTERNATING-DEBUG] Auto-destruir última: {auto_destruct_final}")
         
-        ciclo_count = 0
+        mensagem_index = 0
+        total_mensagens = len(messages)
         ultima_mensagem_id = None
         
         while datetime.now() < stop_at:
@@ -720,55 +722,36 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
                 logger.info(f"⏰ [ALTERNATING-TIMER] TEMPO ESGOTADO!")
                 break
             
-            ciclo_count += 1
-            logger.info(f"🔄 [ALTERNATING-CICLO-{ciclo_count}] Tempo restante: {tempo_restante:.0f}s")
+            # ✅ PEGAR A MENSAGEM ATUAL DO CICLO
+            mensagem_atual = messages[mensagem_index]
+            texto = mensagem_atual if isinstance(mensagem_atual, str) else mensagem_atual.get('content', '')
             
-            # Enviar cada mensagem do ciclo
-            for idx, msg in enumerate(messages, 1):
-                # Verificar tempo antes de enviar cada mensagem
-                tempo_restante = (stop_at - datetime.now()).total_seconds()
-                
-                if tempo_restante <= 0:
-                    logger.info(f"⏰ [ALTERNATING-TIMER] Tempo esgotado durante envio da msg {idx}")
-                    break
-                
-                try:
-                    texto = msg if isinstance(msg, str) else msg.get('content', '')
-                    
-                    if not texto or not texto.strip():
-                        logger.warning(f"⚠️ [ALTERNATING] Mensagem {idx} vazia, pulando...")
-                        continue
-                    
-                    sent_msg = bot_alt.send_message(chat_id, texto)
-                    ultima_mensagem_id = sent_msg.message_id
-                    
-                    logger.info(f"📤 [ALTERNATING] Msg {idx}/{len(messages)} enviada (ID: {ultima_mensagem_id})")
-                    
-                except Exception as e:
-                    logger.error(f"❌ [ALTERNATING] Erro ao enviar msg {idx}: {e}")
-                
-                # Aguardar intervalo entre mensagens (se não for a última do ciclo)
-                if idx < len(messages):
-                    # Verificar se ainda há tempo para aguardar
-                    tempo_restante = (stop_at - datetime.now()).total_seconds()
-                    
-                    if tempo_restante <= interval_seconds:
-                        logger.info(f"⏰ [ALTERNATING-TIMER] Não há tempo suficiente para próximo intervalo")
-                        break
-                    
-                    logger.info(f"⏳ [ALTERNATING] Aguardando {interval_seconds}s até próxima msg...")
-                    await asyncio.sleep(interval_seconds)
+            if not texto or not texto.strip():
+                logger.warning(f"⚠️ [ALTERNATING] Mensagem {mensagem_index + 1} vazia, pulando...")
+                mensagem_index = (mensagem_index + 1) % total_mensagens
+                continue
             
-            # Verificar se ainda há tempo para outro ciclo completo
+            try:
+                # ✅ ENVIAR A MENSAGEM
+                sent_msg = bot_alt.send_message(chat_id, texto)
+                ultima_mensagem_id = sent_msg.message_id
+                
+                logger.info(f"📤 [ALTERNATING] Msg {mensagem_index + 1}/{total_mensagens} enviada (ID: {ultima_mensagem_id}) | Tempo restante: {tempo_restante:.0f}s")
+                
+            except Exception as e:
+                logger.error(f"❌ [ALTERNATING] Erro ao enviar msg {mensagem_index + 1}: {e}")
+            
+            # ✅ AVANÇAR PARA A PRÓXIMA MENSAGEM NO CICLO
+            mensagem_index = (mensagem_index + 1) % total_mensagens
+            
+            # Aguardar intervalo antes da próxima mensagem (se ainda houver tempo)
             tempo_restante = (stop_at - datetime.now()).total_seconds()
-            tempo_necessario_proximo_ciclo = len(messages) * interval_seconds
             
-            if tempo_restante < tempo_necessario_proximo_ciclo:
-                logger.info(f"⏰ [ALTERNATING-TIMER] Tempo insuficiente para outro ciclo completo")
-                logger.info(f"   Restante: {tempo_restante:.0f}s | Necessário: {tempo_necessario_proximo_ciclo}s")
+            if tempo_restante <= interval_seconds:
+                logger.info(f"⏰ [ALTERNATING-TIMER] Tempo insuficiente para próximo intervalo")
                 break
             
-            logger.info(f"♻️ [ALTERNATING] Reiniciando ciclo... (Tempo restante: {tempo_restante:.0f}s)")
+            logger.info(f"⏳ [ALTERNATING] Aguardando {interval_seconds}s até próxima msg...")
             await asyncio.sleep(interval_seconds)
         
         # FIM DO CICLO: Auto-destruir ÚLTIMA mensagem se configurado
@@ -780,7 +763,7 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
             )
         
         tempo_total_decorrido = (datetime.now() - tempo_inicio).total_seconds()
-        logger.info(f"✅ [ALTERNATING-CONCLUÍDO] Total de ciclos: {ciclo_count}, Tempo decorrido: {tempo_total_decorrido:.0f}s")
+        logger.info(f"✅ [ALTERNATING-CONCLUÍDO] Tempo decorrido: {tempo_total_decorrido:.0f}s")
         
     except asyncio.CancelledError:
         logger.info(f"🛑 [ALTERNATING] Task cancelada - Chat: {chat_id}")
@@ -1066,7 +1049,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             if alt_config and alt_config.messages:
                 logger.info(f"✅ [SCHEDULE] Mensagens alternantes ativadas - {len(alt_config.messages)} mensagens")
                 
-                # LOG DE DEBUG DOS VALORES SALVOS
+                # ✅ LOG DE DEBUG DOS VALORES SALVOS
                 logger.info(f"🔍 [SCHEDULE-DEBUG] Config salva: {alt_config.log_config_values()}")
                 
                 agora = datetime.now()
@@ -1075,24 +1058,23 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 if config.is_active:
                     # Se remarketing ATIVO: Para X segundos antes do disparo
                     delay_base_minutes = config.delay_minutes
-                    tempo_total_segundos = (delay_base_minutes * 60) - alt_config.stop_before_remarketing_seconds
-                    stop_at = agora + timedelta(seconds=tempo_total_segundos)
+                    stop_at = agora + timedelta(minutes=delay_base_minutes) - timedelta(seconds=alt_config.stop_before_remarketing_seconds)
                     logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Ativo. Parar em: {stop_at.strftime('%H:%M:%S')}")
                 else:
-                    # ✅ CORREÇÃO CRÍTICA: Buscar DIRETAMENTE do banco sem getattr
-                    # Verificar se o campo existe na tabela
-                    if hasattr(alt_config, 'max_duration_minutes') and alt_config.max_duration_minutes is not None:
+                    # ✅ CORREÇÃO CRÍTICA: Buscar max_duration_minutes do banco
+                    # Verificar se o campo existe na instância
+                    try:
+                        # Tentar acessar o atributo diretamente
                         duracao_rotacao = alt_config.max_duration_minutes
-                    else:
-                        # Se não existir no banco, buscar do JSON da coluna (se aplicável)
-                        duracao_rotacao = 60  # Fallback seguro
+                        if duracao_rotacao is None:
+                            duracao_rotacao = 60  # Fallback se for NULL
+                        logger.info(f"🔍 [SCHEDULE-DEBUG-CRITICO] max_duration_minutes do banco: {duracao_rotacao}")
+                    except AttributeError:
+                        # Se o atributo não existir, a coluna não foi criada ainda
+                        duracao_rotacao = 60
+                        logger.warning(f"⚠️ [SCHEDULE-DEBUG-CRITICO] Coluna 'max_duration_minutes' NÃO EXISTE no banco! Usando fallback: 60 min")
                     
-                    # ✅ LOG CRÍTICO DE DEBUG
-                    logger.info(f"🔍 [SCHEDULE-DEBUG-CRITICO] max_duration_minutes do banco: {alt_config.max_duration_minutes if hasattr(alt_config, 'max_duration_minutes') else 'CAMPO NÃO EXISTE'}")
-                    logger.info(f"🔍 [SCHEDULE-DEBUG-CRITICO] Duração calculada: {duracao_rotacao} minutos")
-                    
-                    tempo_total_segundos = duracao_rotacao * 60
-                    stop_at = agora + timedelta(seconds=tempo_total_segundos)
+                    stop_at = agora + timedelta(minutes=duracao_rotacao)
                     logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Inativo. Rotação por {duracao_rotacao} min. Parar em: {stop_at.strftime('%H:%M:%S')}")
                 
                 loop = asyncio.get_event_loop()
@@ -10386,5 +10368,122 @@ async def migrate_button_fields(db: Session = Depends(get_db)):
         return {
             "status": "error",
             "message": f"Erro geral na migração: {str(e)}",
+            "detalhes": str(e)
+        }
+
+# ============================================================
+# 🔧 ROTA DE MIGRAÇÃO - ADICIONAR COLUNA max_duration_minutes
+# ============================================================
+@app.get("/migrate-alternating-duration")
+async def migrate_alternating_duration(db: Session = Depends(get_db)):
+    """
+    🔥 Migração Manual: Adiciona a coluna max_duration_minutes na tabela alternating_messages
+    Acesse: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-alternating-duration
+    """
+    try:
+        from sqlalchemy import text
+        
+        resultados = []
+        
+        # 1. Adicionar coluna max_duration_minutes
+        try:
+            db.execute(text("""
+                ALTER TABLE alternating_messages 
+                ADD COLUMN max_duration_minutes INTEGER DEFAULT 60;
+            """))
+            db.commit()
+            resultados.append("✅ Coluna 'max_duration_minutes' criada com sucesso!")
+        except Exception as e:
+            db.rollback()
+            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                resultados.append("ℹ️ Coluna 'max_duration_minutes' já existe")
+            else:
+                resultados.append(f"❌ Erro ao criar 'max_duration_minutes': {str(e)}")
+        
+        # 2. Adicionar coluna last_message_auto_destruct (se não existir)
+        try:
+            db.execute(text("""
+                ALTER TABLE alternating_messages 
+                ADD COLUMN last_message_auto_destruct BOOLEAN DEFAULT FALSE;
+            """))
+            db.commit()
+            resultados.append("✅ Coluna 'last_message_auto_destruct' criada com sucesso!")
+        except Exception as e:
+            db.rollback()
+            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                resultados.append("ℹ️ Coluna 'last_message_auto_destruct' já existe")
+            else:
+                resultados.append(f"❌ Erro ao criar 'last_message_auto_destruct': {str(e)}")
+        
+        # 3. Adicionar coluna last_message_destruct_seconds (se não existir)
+        try:
+            db.execute(text("""
+                ALTER TABLE alternating_messages 
+                ADD COLUMN last_message_destruct_seconds INTEGER DEFAULT 60;
+            """))
+            db.commit()
+            resultados.append("✅ Coluna 'last_message_destruct_seconds' criada com sucesso!")
+        except Exception as e:
+            db.rollback()
+            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                resultados.append("ℹ️ Coluna 'last_message_destruct_seconds' já existe")
+            else:
+                resultados.append(f"❌ Erro ao criar 'last_message_destruct_seconds': {str(e)}")
+        
+        # 4. Atualizar valores NULL para defaults
+        try:
+            db.execute(text("""
+                UPDATE alternating_messages 
+                SET max_duration_minutes = 60 
+                WHERE max_duration_minutes IS NULL;
+            """))
+            db.execute(text("""
+                UPDATE alternating_messages 
+                SET last_message_auto_destruct = FALSE 
+                WHERE last_message_auto_destruct IS NULL;
+            """))
+            db.execute(text("""
+                UPDATE alternating_messages 
+                SET last_message_destruct_seconds = 60 
+                WHERE last_message_destruct_seconds IS NULL;
+            """))
+            db.commit()
+            resultados.append("✅ Valores NULL atualizados para defaults")
+        except Exception as e:
+            db.rollback()
+            resultados.append(f"⚠️ Aviso ao atualizar NULLs: {str(e)}")
+        
+        # 5. Verificar estrutura final
+        try:
+            resultado = db.execute(text("""
+                SELECT column_name, data_type, column_default 
+                FROM information_schema.columns 
+                WHERE table_name = 'alternating_messages' 
+                AND column_name IN ('max_duration_minutes', 'last_message_auto_destruct', 'last_message_destruct_seconds')
+                ORDER BY column_name;
+            """))
+            colunas = resultado.fetchall()
+            
+            if colunas:
+                resultados.append("📊 Estrutura final verificada:")
+                for col in colunas:
+                    resultados.append(f"   - {col[0]}: {col[1]} (default: {col[2]})")
+            else:
+                resultados.append("⚠️ Não foi possível verificar a estrutura final")
+                
+        except Exception as e:
+            resultados.append(f"⚠️ Erro ao verificar estrutura: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "✅ Migração concluída!",
+            "resultados": resultados
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"❌ Erro geral na migração: {str(e)}",
             "detalhes": str(e)
         }
