@@ -10226,11 +10226,11 @@ def nuke_duplicate_leads(db: Session = Depends(get_db)):
 # ============================================================
 # 🔧 ROTA DE MIGRAÇÃO - ADICIONAR COLUNAS FALTANTES
 # ============================================================
-@app.get("/api/admin/migrate-button-fields")
+@app.get("/migrate-button-fields")
 async def migrate_button_fields(db: Session = Depends(get_db)):
     """
     🔥 Migração Manual: Adiciona as novas colunas do sistema de botões personalizados
-    Acesse: https://seu-dominio.railway.app/api/admin/migrate-button-fields
+    Acesse: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-button-fields
     """
     try:
         from sqlalchemy import text
