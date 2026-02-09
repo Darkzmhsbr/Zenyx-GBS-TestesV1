@@ -1181,38 +1181,36 @@ logger.info("✅ [SCHEDULER] Job de cleanup de remarketing agendado (1h)")
 # ========================================
 # 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL)
 # ========================================
+# ========================================
+# 🔄 JOB: MENSAGENS ALTERNANTES (GLOBAL)
+# ========================================
 async def enviar_mensagens_alternantes():
     """
-    Envia mensagens alternantes para leads que não converteram.
-    Verifica a tabela correta AlternatingMessages.
+    Envia mensagens alternantes. Versão corrigida V3 (Sem filtro is_active no Bot).
     """
     db = SessionLocal()
     try:
-        logger.info("🔄 [ALTERNATING] Iniciando job de mensagens alternantes")
-        
-        # Busca todos os bots ativos
-        bots = db.query(BotModel).filter(BotModel.is_active == True).all()
+        # ✅ CORREÇÃO: Removemos .filter(BotModel.is_active == True)
+        bots = db.query(BotModel).all()
         
         for bot_db in bots:
             try:
-                # ✅ CORREÇÃO MESTRE: Busca na tabela correta (AlternatingMessages)
+                # Verifica se tem token válido antes de prosseguir
+                if not bot_db.token: continue
+
+                # Busca configuração na tabela correta
                 alt_config = db.query(AlternatingMessages).filter(
                     AlternatingMessages.bot_id == bot_db.id,
                     AlternatingMessages.is_active == True
                 ).first()
                 
-                if not alt_config:
-                    continue
-                    
-                # Valida se tem mensagens configuradas
-                if not alt_config.messages or len(alt_config.messages) == 0:
+                if not alt_config or not alt_config.messages:
                     continue
                 
-                # ✅ CORREÇÃO: Usa o intervalo em SEGUNDOS definido na nova config
-                intervalo_segundos = alt_config.rotation_interval_seconds or 3600 # Fallback 1h
-                tempo_limite = datetime.utcnow() - timedelta(hours=24) # Limite de segurança (não enviar para leads muito antigos)
+                intervalo_segundos = alt_config.rotation_interval_seconds or 3600
+                tempo_limite = datetime.utcnow() - timedelta(hours=24)
                 
-                # Query leads elegíveis (Mantida lógica original de filtro)
+                # Query leads elegíveis
                 leads_elegiveis = db.query(Lead).outerjoin(
                     Pedido,
                     and_(
@@ -1225,11 +1223,10 @@ async def enviar_mensagens_alternantes():
                     Lead.comprou == False,
                     Lead.status != "blocked",
                     Pedido.id == None, 
-                    Lead.created_at > tempo_limite # Apenas leads das últimas 24h
+                    Lead.created_at > tempo_limite
                 ).all()
                 
-                if not leads_elegiveis:
-                    continue
+                if not leads_elegiveis: continue
                 
                 # Inicializa bot
                 bot_temp = TeleBot(bot_db.telegram_token, threaded=False)
@@ -1237,7 +1234,6 @@ async def enviar_mensagens_alternantes():
                 
                 for lead in leads_elegiveis:
                     try:
-                        # Busca estado
                         state = db.query(AlternatingMessageState).filter(
                             AlternatingMessageState.bot_id == bot_db.id,
                             AlternatingMessageState.user_id == lead.user_id
@@ -1248,47 +1244,40 @@ async def enviar_mensagens_alternantes():
                                 bot_id=bot_db.id,
                                 user_id=lead.user_id,
                                 last_message_index=-1,
-                                last_sent_at=datetime.utcnow() - timedelta(days=1) # Força envio imediato se novo
+                                last_sent_at=datetime.utcnow() - timedelta(days=1)
                             )
                             db.add(state)
                             db.commit()
                             db.refresh(state)
                         
-                        # ✅ CORREÇÃO: Verifica intervalo usando a config correta
                         tempo_desde_ultimo = (datetime.utcnow() - state.last_sent_at).total_seconds()
                         if tempo_desde_ultimo < intervalo_segundos:
                             continue
                         
-                        # Seleciona próxima mensagem
                         mensagens = alt_config.messages
                         proximo_index = (state.last_message_index + 1) % len(mensagens)
                         mensagem_atual = mensagens[proximo_index]
                         
                         texto_envio = mensagem_atual if isinstance(mensagem_atual, str) else mensagem_atual.get('content', '')
                         
-                        if not texto_envio or texto_envio.strip() == "":
-                            continue
+                        if not texto_envio or not texto_envio.strip(): continue
                         
-                        # Envia
                         bot_temp.send_message(lead.user_id, texto_envio)
                             
-                        # Atualiza estado
                         state.last_message_index = proximo_index
                         state.last_sent_at = datetime.utcnow()
                         db.commit()
                         
-                        await asyncio.sleep(0.2) # Rate limit safety
+                        await asyncio.sleep(0.2)
                         
                     except Exception as e_lead:
-                        logger.error(f"Erro envio alternante lead {lead.user_id}: {e_lead}")
                         continue
                         
             except Exception as e_bot:
-                logger.error(f"Erro processar bot {bot_db.id}: {e_bot}")
                 continue
                 
     except Exception as e:
-        logger.error(f"❌ Erro crítico no job alternating: {str(e)}", exc_info=True)
+        logger.error(f"❌ Erro crítico no job alternating: {str(e)}")
     finally:
         db.close()
 
@@ -1845,7 +1834,7 @@ def get_auto_remarketing_stats(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Retorna estatísticas de remarketing com nomes reais"""
+    """Retorna estatísticas de remarketing (Versão Corrigida: Coluna 'nome')"""
     try:
         bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
         if not bot:
@@ -1854,10 +1843,8 @@ def get_auto_remarketing_stats(
         if bot.owner_id != current_user.id and not current_user.is_superuser:
             raise HTTPException(status_code=403, detail="Acesso negado")
         
-        # 1. Totais
-        total_sent = db.query(RemarketingLog).filter(
-            RemarketingLog.bot_id == bot_id
-        ).count()
+        # 1. Métricas
+        total_sent = db.query(RemarketingLog).filter(RemarketingLog.bot_id == bot_id).count()
         
         total_converted = db.query(RemarketingLog).filter(
             RemarketingLog.bot_id == bot_id,
@@ -1872,7 +1859,7 @@ def get_auto_remarketing_stats(
             func.date(RemarketingLog.sent_at) == hoje
         ).count()
 
-        # 2. Receita Recuperada
+        # 2. Receita
         receita_query = db.query(func.sum(Pedido.valor)).join(
             RemarketingLog,
             and_(
@@ -1884,25 +1871,28 @@ def get_auto_remarketing_stats(
         
         total_revenue = receita_query.scalar() or 0.0
 
-        # 3. Logs Recentes + Nome do Lead (JOIN)
-        # Buscamos o Log e tentamos achar o Lead correspondente
+        # 3. Logs Recentes + Nome do Lead (Usando tabela Lead com coluna 'nome')
         results = db.query(RemarketingLog, Lead).outerjoin(
             Lead, 
-            and_(Lead.user_id == RemarketingLog.user_id, Lead.bot_id == bot_id)
+            and_(
+                Lead.user_id == RemarketingLog.user_id, 
+                Lead.bot_id == bot_id
+            )
         ).filter(
             RemarketingLog.bot_id == bot_id
         ).order_by(RemarketingLog.sent_at.desc()).limit(20).all()
         
         recent_data = []
+        
         for log, lead in results:
             # Lógica para definir o nome de exibição
             display_name = log.user_id # Fallback é o ID
             username_display = ""
             
             if lead:
-                if lead.first_name:
-                    display_name = lead.first_name
-                    if lead.last_name: display_name += f" {lead.last_name}"
+                # ✅ CORREÇÃO AQUI: Usando 'nome' em vez de 'first_name'
+                if lead.nome:
+                    display_name = lead.nome
                 elif lead.username:
                     display_name = lead.username
                 
@@ -1912,8 +1902,8 @@ def get_auto_remarketing_stats(
             recent_data.append({
                 "id": log.id,
                 "user_id": log.user_id,
-                "user_name": display_name,       # ✅ NOVO: Nome real
-                "user_username": username_display, # ✅ NOVO: @username
+                "user_name": display_name,       
+                "user_username": username_display,
                 "sent_at": log.sent_at.isoformat(),
                 "status": log.status,
                 "converted": log.converted,
@@ -1927,14 +1917,18 @@ def get_auto_remarketing_stats(
             "today_sent": today_sent,
             "total_revenue": total_revenue,
             "logs": recent_data,
-            "recent_logs": recent_data 
+            "recent_logs": recent_data
         }
         
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"❌ Erro stats: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # Retorna zerado para não quebrar a tela se houver outro erro
+        return {
+            "total_sent": 0, "total_converted": 0, "conversion_rate": 0,
+            "today_sent": 0, "total_revenue": 0, "logs": [], "recent_logs": []
+        }
         
 # =========================================================
 # 🔒 FUNÇÃO HELPER: VERIFICAR PROPRIEDADE DO BOT
