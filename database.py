@@ -266,14 +266,25 @@ class BotFlow(Base):
     btn_text_1 = Column(String, default="📋 Ver Planos")
     autodestruir_1 = Column(Boolean, default=False)
     mostrar_planos_1 = Column(Boolean, default=True)
+
+    # 🔥 [NOVO] Configuração Avançada de Botões (JSON)
+    # Ex: [{"type": "plan", "plan_id": 1}, {"type": "link", "text": "Canal Free", "url": "..."}]
+    buttons_config = Column(JSON, nullable=True)
+    
+    # 🔥 [NOVO] Modo de botão da mensagem 1
+    # Valores: "next_step" (botão próximo passo) ou "custom" (botões personalizados)
+    button_mode = Column(String, default="next_step")
     
     # --- MENSAGEM 2 (SEGUNDO PASSO) ---
     msg_2_texto = Column(Text, nullable=True)
     msg_2_media = Column(String, nullable=True)
     mostrar_planos_2 = Column(Boolean, default=False)
 
+    # 🔥 [NOVO] Configuração Avançada de Botões (JSON) - MENSAGEM 2 (OFERTA FINAL)
+    buttons_config_2 = Column(JSON, nullable=True)
+
     # --- MENSAGEM PIX (PERSONALIZADA) ---
-    msg_pix = Column(Text, nullable=True)  # 🔥 NOVO CAMPO ADICIONADO
+    msg_pix = Column(Text, nullable=True)
 
 # =========================================================
 # 🧩 TABELA DE PASSOS INTERMEDIÁRIOS
@@ -286,6 +297,9 @@ class BotFlowStep(Base):
     msg_texto = Column(Text, nullable=True)
     msg_media = Column(String, nullable=True)
     btn_texto = Column(String, default="Próximo ▶️")
+
+    # 🔥 [NOVO] Configuração Avançada de Botões para Passos Extras
+    buttons_config = Column(JSON, nullable=True)
     
     # Controles de comportamento
     autodestruir = Column(Boolean, default=False)

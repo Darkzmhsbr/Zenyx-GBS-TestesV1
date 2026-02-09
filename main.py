@@ -3113,19 +3113,25 @@ class PlanoUpdate(BaseModel):
     class Config:
         arbitrary_types_allowed = True
 class FlowUpdate(BaseModel):
-    msg_boas_vindas: str
+    msg_boas_vindas: Optional[str] = None
     media_url: Optional[str] = None
-    btn_text_1: str
-    autodestruir_1: bool
+    btn_text_1: Optional[str] = None
+    autodestruir_1: Optional[bool] = False
     msg_2_texto: Optional[str] = None
     msg_2_media: Optional[str] = None
-    mostrar_planos_2: bool
-    mostrar_planos_1: Optional[bool] = False # 🔥 NOVO CAMPO
-
-    # 🔥 NOVOS CAMPOS (ESSENCIAIS PARA O MINI APP)
+    mostrar_planos_2: Optional[bool] = True
+    mostrar_planos_1: Optional[bool] = False
     start_mode: Optional[str] = "padrao"
     miniapp_url: Optional[str] = None
     miniapp_btn_text: Optional[str] = None
+    msg_pix: Optional[str] = None
+    
+    # 🔥 NOVOS CAMPOS PARA BOTÕES PERSONALIZADOS
+    button_mode: Optional[str] = "next_step"  # "next_step" ou "custom"
+    buttons_config: Optional[List[dict]] = None  # Botões da mensagem 1
+    buttons_config_2: Optional[List[dict]] = None  # Botões da mensagem final
+    
+    steps: Optional[List[dict]] = None  # Passos extras
 
 class FlowStepCreate(BaseModel):
     msg_texto: str
@@ -4732,10 +4738,6 @@ def atualizar_plano(
     logger.info(f"✏️ Plano atualizado (rota legada): {plano.nome_exibicao} (Owner: {current_user.username})")
     
     return {"status": "success", "msg": "Plano atualizado"}
-
-# =========================================================
-# 💬 FLUXO DO BOT (V2)
-# =========================================================
 # =========================================================
 # 💬 FLUXO DO BOT (V2)
 # =========================================================
@@ -4743,12 +4745,11 @@ def atualizar_plano(
 def obter_fluxo(
     bot_id: int, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+    current_user = Depends(get_current_user)
 ):
     # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
     verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
-    # ... RESTO DO CÓDIGO PERMANECE IGUAL
     fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
     
     if not fluxo:
@@ -4765,10 +4766,32 @@ def obter_fluxo(
             "start_mode": "padrao",
             "miniapp_url": "",
             "miniapp_btn_text": "ABRIR LOJA",
-            "msg_pix": ""  # 🔥 NOVO CAMPO: Retorna vazio se não tiver para o frontend tratar
+            "msg_pix": "",
+            "button_mode": "next_step",  # 🔥 NOVO
+            "buttons_config": [],  # 🔥 NOVO
+            "buttons_config_2": []  # 🔥 NOVO
         }
     
-    return fluxo
+    # 🔥 SERIALIZA MANUALMENTE PARA GARANTIR QUE buttons_config SEJA INCLUÍDO
+    return {
+        "id": fluxo.id,
+        "bot_id": fluxo.bot_id,
+        "msg_boas_vindas": fluxo.msg_boas_vindas,
+        "media_url": fluxo.media_url,
+        "btn_text_1": fluxo.btn_text_1,
+        "autodestruir_1": fluxo.autodestruir_1,
+        "msg_2_texto": fluxo.msg_2_texto,
+        "msg_2_media": fluxo.msg_2_media,
+        "mostrar_planos_2": fluxo.mostrar_planos_2,
+        "mostrar_planos_1": fluxo.mostrar_planos_1,
+        "start_mode": fluxo.start_mode,
+        "miniapp_url": fluxo.miniapp_url,
+        "miniapp_btn_text": fluxo.miniapp_btn_text,
+        "msg_pix": fluxo.msg_pix,
+        "button_mode": fluxo.button_mode if hasattr(fluxo, 'button_mode') else "next_step",  # 🔥 NOVO
+        "buttons_config": fluxo.buttons_config if fluxo.buttons_config else [],  # 🔥 NOVO
+        "buttons_config_2": fluxo.buttons_config_2 if fluxo.buttons_config_2 else []  # 🔥 NOVO
+    }
 
 class FlowUpdate(BaseModel):
     msg_boas_vindas: Optional[str] = None
@@ -4782,20 +4805,25 @@ class FlowUpdate(BaseModel):
     start_mode: Optional[str] = "padrao"
     miniapp_url: Optional[str] = None
     miniapp_btn_text: Optional[str] = None
-    msg_pix: Optional[str] = None  # 🔥 NOVO CAMPO PARA O PIX
-    steps: Optional[List[dict]] = None # 🔥 IMPORTANTE: Aceitar os passos extras
+    msg_pix: Optional[str] = None
+    
+    # 🔥 NOVOS CAMPOS PARA BOTÕES PERSONALIZADOS
+    button_mode: Optional[str] = "next_step"  # "next_step" ou "custom"
+    buttons_config: Optional[List[dict]] = None  # Botões da mensagem 1
+    buttons_config_2: Optional[List[dict]] = None  # Botões da mensagem final
+    
+    steps: Optional[List[dict]] = None  # Passos extras
 
 @app.post("/api/admin/bots/{bot_id}/flow")
 def salvar_fluxo(
     bot_id: int, 
     flow: FlowUpdate, 
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)  # 🔒 ADICIONA AUTH
+    current_user = Depends(get_current_user)
 ):
     # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
     verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
-    # ... RESTO DO CÓDIGO PERMANECE EXATAMENTE IGUAL
     fluxo_db = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
     
     if not fluxo_db:
@@ -4820,7 +4848,17 @@ def salvar_fluxo(
     # 🔥 ATUALIZA MENSAGEM DO PIX
     if flow.msg_pix is not None: fluxo_db.msg_pix = flow.msg_pix
 
-    # 🔥 ATUALIZA PASSOS EXTRAS (STEPS) - Fundamental para o ChatFlow funcionar completo
+    # 🔥 ATUALIZA MODO DE BOTÃO E CONFIGURAÇÕES
+    if flow.button_mode is not None: 
+        fluxo_db.button_mode = flow.button_mode
+    
+    if flow.buttons_config is not None: 
+        fluxo_db.buttons_config = flow.buttons_config
+    
+    if flow.buttons_config_2 is not None: 
+        fluxo_db.buttons_config_2 = flow.buttons_config_2
+
+    # 🔥 ATUALIZA PASSOS EXTRAS (STEPS)
     if flow.steps is not None:
         # Remove passos antigos
         db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).delete()
@@ -4836,7 +4874,8 @@ def salvar_fluxo(
                 btn_texto=s.get('btn_texto'),
                 autodestruir=s.get('autodestruir', False),
                 mostrar_botao=s.get('mostrar_botao', True),
-                delay_seconds=s.get('delay_seconds', 0)
+                delay_seconds=s.get('delay_seconds', 0),
+                buttons_config=s.get('buttons_config')  # 🔥 NOVO
             )
             novos_passos.append(novo)
         
@@ -5665,39 +5704,76 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         return {"status": "error"}
 
 # =========================================================
-# 🧠 FUNÇÕES AUXILIARES DE FLUXO (RECURSIVIDADE)
+# 📤 FUNÇÃO AUXILIAR: ENVIAR OFERTA FINAL (MENSAGEM 2)
 # =========================================================
-
 def enviar_oferta_final(bot_temp, chat_id, fluxo, bot_id, db):
-    """Envia a oferta final (Planos) com HTML"""
+    """
+    Envia a oferta final (Mensagem 2 / Planos) com suporte a:
+    - buttons_config_2 (botões personalizados)
+    - Formatação de preços correta
+    - Fallback para lógica antiga
+    """
     mk = types.InlineKeyboardMarkup()
-    if fluxo and fluxo.mostrar_planos_2:
-        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
-        for p in planos:
-            mk.add(types.InlineKeyboardButton(
-                f"{p.nome_exibicao} - R$ {p.preco_atual:.2f}", 
-                callback_data=f"checkout_{p.id}"
-            ))
     
-    texto = fluxo.msg_2_texto if (fluxo and fluxo.msg_2_texto) else "Confira nossos planos:"
+    # 🔥 VERIFICA SE TEM BOTÕES PERSONALIZADOS NA MENSAGEM FINAL
+    if fluxo and fluxo.buttons_config_2 and len(fluxo.buttons_config_2) > 0:
+        # 🔥 MODO: BOTÕES PERSONALIZADOS (buttons_config_2)
+        for btn in fluxo.buttons_config_2:
+            btn_type = btn.get('type')
+            
+            if btn_type == 'plan':
+                # 🔥 BOTÃO DE PLANO COM PREÇO FORMATADO
+                plan_id = btn.get('plan_id')
+                plano = db.query(PlanoConfig).filter(PlanoConfig.id == plan_id).first()
+                if plano:
+                    # 🔥 FORMATO: "NOME DO PLANO - por R$XX,XX"
+                    preco_formatado = f"R${plano.preco_atual:.2f}".replace(".", ",")
+                    texto_botao = f"{plano.nome_exibicao} - por {preco_formatado}"
+                    mk.add(types.InlineKeyboardButton(
+                        texto_botao,
+                        callback_data=f"checkout_{plano.id}"
+                    ))
+            
+            elif btn_type == 'link':
+                # 🔥 BOTÃO DE LINK (URL)
+                mk.add(types.InlineKeyboardButton(
+                    btn.get('text', 'Link'),
+                    url=btn.get('url')
+                ))
+    
+    else:
+        # 🔥 FALLBACK: Lógica antiga (mostrar todos os planos)
+        if fluxo and fluxo.mostrar_planos_2:
+            planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
+            for p in planos:
+                preco_formatado = f"R${p.preco_atual:.2f}".replace(".", ",")
+                texto_botao = f"{p.nome_exibicao} - por {preco_formatado}"
+                mk.add(types.InlineKeyboardButton(
+                    texto_botao,
+                    callback_data=f"checkout_{p.id}"
+                ))
+    
+    # Texto e mídia da mensagem final
+    texto = fluxo.msg_2_texto if (fluxo and fluxo.msg_2_texto) else "Escolha seu plano:"
     media = fluxo.msg_2_media if fluxo else None
     
+    # 🔥 ENVIO COM TRATAMENTO DE ERRO
     try:
         if media:
             if media.lower().endswith(('.mp4', '.mov', '.avi')): 
-                # 🔥 parse_mode="HTML"
                 bot_temp.send_video(chat_id, media, caption=texto, reply_markup=mk, parse_mode="HTML")
             else: 
-                # 🔥 parse_mode="HTML"
                 bot_temp.send_photo(chat_id, media, caption=texto, reply_markup=mk, parse_mode="HTML")
         else:
-            # 🔥 parse_mode="HTML"
             bot_temp.send_message(chat_id, texto, reply_markup=mk, parse_mode="HTML")
             
     except Exception as e:
-        logger.error(f"Erro ao enviar oferta final: {e}")
+        logger.error(f"❌ Erro ao enviar oferta final: {e}")
         # Fallback sem HTML
-        bot_temp.send_message(chat_id, texto, reply_markup=mk)
+        try:
+            bot_temp.send_message(chat_id, texto, reply_markup=mk)
+        except Exception as e2:
+            logger.error(f"❌ Erro no fallback da oferta final: {e2}")
 
 def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
     """
@@ -5965,15 +6041,51 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 
                 # SE FOR PADRÃO
                 else:
-                    if flow and flow.mostrar_planos_1:
-                        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
-                        for pl in planos: 
-                            preco_txt = f"R$ {pl.preco_atual:.2f}".replace('.', ',')
-                            mk.add(types.InlineKeyboardButton(f" {pl.nome_exibicao} - {preco_txt}", callback_data=f"checkout_{pl.id}"))
-                    else: 
-                        mk.add(types.InlineKeyboardButton(flow.btn_text_1 if flow else "Ver Conteúdo", callback_data="step_1"))
+                    # 🔥 VERIFICA O MODO DE BOTÃO DA MENSAGEM 1
+                    button_mode = getattr(flow, 'button_mode', 'next_step') if flow else 'next_step'
+                    
+                    if button_mode == "custom" and flow and flow.buttons_config and len(flow.buttons_config) > 0:
+                        # 🔥 MODO: BOTÕES PERSONALIZADOS (NOVA LÓGICA)
+                        for btn in flow.buttons_config:
+                            btn_type = btn.get('type')
+                            
+                            if btn_type == 'plan':
+                                # 🔥 BOTÃO DE PLANO COM PREÇO FORMATADO
+                                plan_id = btn.get('plan_id')
+                                plano = db.query(PlanoConfig).filter(PlanoConfig.id == plan_id).first()
+                                if plano:
+                                    # 🔥 FORMATO: "NOME DO PLANO - por R$XX,XX"
+                                    preco_formatado = f"R${plano.preco_atual:.2f}".replace(".", ",")
+                                    texto_botao = f"{plano.nome_exibicao} - por {preco_formatado}"
+                                    mk.add(types.InlineKeyboardButton(
+                                        texto_botao, 
+                                        callback_data=f"checkout_{plano.id}"
+                                    ))
+                            
+                            elif btn_type == 'link':
+                                # 🔥 BOTÃO DE LINK (URL)
+                                mk.add(types.InlineKeyboardButton(
+                                    btn.get('text', 'Link'), 
+                                    url=btn.get('url')
+                                ))
+                    
+                    else:
+                        # 🔥 MODO: BOTÃO "PRÓXIMO PASSO" (LÓGICA TRADICIONAL)
+                        if flow and flow.mostrar_planos_1:
+                            # Mostra planos já na primeira mensagem
+                            planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
+                            for pl in planos: 
+                                preco_formatado = f"R${pl.preco_atual:.2f}".replace(".", ",")
+                                texto_botao = f"{pl.nome_exibicao} - por {preco_formatado}"
+                                mk.add(types.InlineKeyboardButton(texto_botao, callback_data=f"checkout_{pl.id}"))
+                        else:
+                            # Mostra apenas botão de próximo passo
+                            mk.add(types.InlineKeyboardButton(
+                                flow.btn_text_1 if flow else "Ver Conteúdo", 
+                                callback_data="step_1"
+                            ))
 
-                # 🔥 BLOCO DE ENVIO COM LOG E CORREÇÃO DE AUTO-DESTRUIÇÃO
+                # 🔥 BLOCO DE ENVIO COM LOG
                 try:
                     logger.info(f"📤 Tentando enviar menu para {chat_id}...")
                     sent_msg_start = None
@@ -5988,12 +6100,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     logger.info("✅ Menu enviado com sucesso!")
 
-                    # 🔥 CORREÇÃO: Verifica se deve auto-destruir a mensagem de START
-                    # (Como não tem campo específico no banco para start, deixei comentado a chamada.
-                    # Se quiser ativar, basta descomentar a linha abaixo)
-                    if sent_msg_start:
-                        # agendar_destruicao_msg(bot_temp, chat_id, sent_msg_start.message_id, 60) 
-                        pass
+                    # 🔥 AUTO-DESTRUIÇÃO (SE CONFIGURADO)
+                    if sent_msg_start and flow and flow.autodestruir_1:
+                        agendar_destruicao_msg(bot_temp, chat_id, sent_msg_start.message_id, 5)
 
                 except Exception as e_envio:
                     logger.error(f"❌ ERRO AO ENVIAR MENSAGEM START: {e_envio}")
@@ -8252,66 +8361,6 @@ def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
             
     except Exception as e:
         logger.error(f"❌ [BOT {bot_db.id}] Erro crítico passo automático: {e}")
-
-# =========================================================
-# 📤 FUNÇÃO AUXILIAR: ENVIAR OFERTA FINAL (CORRIGIDA)
-# =========================================================
-def enviar_oferta_final(tb, cid, fluxo, bot_id, db):
-    """Envia a oferta final (Planos) com formatação HTML correta"""
-    mk = types.InlineKeyboardMarkup()
-    
-    # Busca os planos apenas se a configuração mandar mostrar
-    if fluxo and fluxo.mostrar_planos_2:
-        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
-        for p in planos:
-            mk.add(types.InlineKeyboardButton(
-                f"{p.nome_exibicao} - R$ {p.preco_atual:.2f}", 
-                callback_data=f"checkout_{p.id}"
-            ))
-    
-    # Texto e Mídia (Fallback se não houver configuração)
-    txt = fluxo.msg_2_texto if (fluxo and fluxo.msg_2_texto) else "Escolha seu plano:"
-    med = fluxo.msg_2_media if fluxo else None
-    
-    try:
-        if med:
-            # Verifica se é vídeo
-            if med.lower().endswith(('.mp4', '.mov', '.avi')): 
-                tb.send_video(
-                    cid, 
-                    med, 
-                    caption=txt, 
-                    reply_markup=mk, 
-                    parse_mode="HTML"  # 🔥 CORREÇÃO: Ativa formatação no vídeo
-                )
-            # Senão, assume que é foto
-            else: 
-                tb.send_photo(
-                    cid, 
-                    med, 
-                    caption=txt, 
-                    reply_markup=mk, 
-                    parse_mode="HTML"  # 🔥 CORREÇÃO: Ativa formatação na foto
-                )
-        else:
-            # Apenas Texto
-            tb.send_message(
-                cid, 
-                txt, 
-                reply_markup=mk, 
-                parse_mode="HTML",      # 🔥 CORREÇÃO: Ativa formatação no texto
-                disable_web_page_preview=True
-            )
-            
-    except Exception as e:
-        # Log de erro para ajudar no debug
-        logger.error(f"Erro ao enviar oferta final (HTML falhou?): {e}")
-        
-        # Fallback de segurança: Tenta enviar SEM HTML se der erro na formatação
-        try:
-            tb.send_message(cid, txt, reply_markup=mk)
-        except:
-            pass
 # =========================================================
 # 👤 ENDPOINT ESPECÍFICO PARA STATS DO PERFIL (🆕)
 # =========================================================
