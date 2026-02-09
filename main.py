@@ -11,6 +11,8 @@ from telebot import types
 import json
 import uuid
 from sqlalchemy.exc import IntegrityError
+import traceback  # 🔥 NOVO: Para logging detalhado de erros
+import asyncio  # 🔥 Garantir que asyncio está importado
 
 from sqlalchemy import func, desc, text, and_, or_
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
@@ -34,7 +36,6 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 # --- SCHEDULER ---
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-import asyncio
 from threading import Lock
 
 # =========================================================
@@ -2998,63 +2999,159 @@ async def gerar_pix_pushinpay(
         logger.error(f"❌ Erro ao configurar split: {e}. Gerando PIX SEM split.")
     
     # ======================================================================
-    # 🔥 ETAPA 4: Envia requisição para PushinPay
+    # 🔥 ETAPA 4: Envia requisição para PushinPay COM RETRY
     # ======================================================================
-    try:
-        # 🔥 LOG DEBUG 4
-        logger.info(f"📤 [DEBUG] Enviando para PushinPay:")
-        logger.info(f"  Token usado: {token[:10]}...")
-        logger.info(f"  Payload split_rules: {payload.get('split_rules', [])}")
-        
-        logger.info(f"📤 Gerando PIX de R$ {valor_float:.2f}. Webhook: https://{seus_dominio}/webhook/pix")
-        
-        response = await http_client.post(url, json=payload, headers=headers, timeout=10)
-        
-        if response.status_code in [200, 201]:
-            pix_response = response.json()
+    max_retries = 3
+    retry_count = 0
+    last_error = None
+    
+    while retry_count < max_retries:
+        try:
+            # 🔥 LOG DEBUG 4
+            if retry_count > 0:
+                logger.warning(f"🔄 Tentativa {retry_count + 1}/{max_retries} de gerar PIX...")
+            else:
+                logger.info(f"📤 [DEBUG] Enviando para PushinPay:")
+                logger.info(f"  Token usado: {token[:10]}...")
+                logger.info(f"  Payload split_rules: {payload.get('split_rules', [])}")
             
-            # 🔥 LOG DEBUG 5
-            logger.info(f"✅ [DEBUG] Resposta PushinPay ({response.status_code}):")
-            logger.info(f"  Split retornado: {pix_response.get('split_rules', [])}")
-            if not pix_response.get('split_rules'):
-                logger.warning(f"⚠️ [DEBUG] API NÃO RETORNOU SPLIT!")
+            logger.info(f"📤 Gerando PIX de R$ {valor_float:.2f}. Webhook: https://{seus_dominio}/webhook/pix")
             
-            logger.info(f"✅ PIX gerado com sucesso! ID: {pix_response.get('id')}")
+            # 🔥 TIMEOUT AUMENTADO: De 10s para 30s
+            response = await http_client.post(url, json=payload, headers=headers, timeout=30)
             
-            # ======================================================================
-            # 🔥 ETAPA 5: Agendamento de Remarketing (se solicitado)
-            # ======================================================================
-            if agendar_remarketing and user_telegram_id:
+            if response.status_code in [200, 201]:
                 try:
-                    chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
+                    pix_response = response.json()
                     
-                    if chat_id_int:
-                        # Cancela agendamentos anteriores
-                        cancelar_remarketing(chat_id_int)
-                        
-                        # Agenda novo ciclo
-                        schedule_remarketing_and_alternating(
-                            bot_id=bot_id,
-                            chat_id=chat_id_int,
-                            payment_message_id=0,
-                            user_info={
-                                'first_name': user_first_name or "Cliente",
-                                'plano': plano_nome or "Plano",
-                                'valor': valor_float
-                            }
-                        )
-                        logger.info(f"📧 [REMARKETING] Ciclo iniciado para {user_first_name}")
-                except Exception as e:
-                    logger.error(f"❌ Erro ao agendar remarketing: {e}")
+                    # 🔥 VALIDAÇÕES ESSENCIAIS
+                    if not pix_response:
+                        raise ValueError("Resposta vazia da API PushinPay")
+                    
+                    if not pix_response.get('id'):
+                        raise ValueError("Resposta sem ID do PIX")
+                    
+                    # 🔥 LOG DEBUG 5
+                    logger.info(f"✅ [DEBUG] Resposta PushinPay ({response.status_code}):")
+                    logger.info(f"  PIX ID: {pix_response.get('id')}")
+                    logger.info(f"  Split retornado: {pix_response.get('split_rules', [])}")
+                    if not pix_response.get('split_rules'):
+                        logger.warning(f"⚠️ [DEBUG] API NÃO RETORNOU SPLIT!")
+                    
+                    logger.info(f"✅ PIX gerado com sucesso! ID: {pix_response.get('id')}")
+                    
+                    # ======================================================================
+                    # 🔥 ETAPA 5: Agendamento de Remarketing (se solicitado)
+                    # ======================================================================
+                    if agendar_remarketing and user_telegram_id:
+                        try:
+                            chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
+                            
+                            if chat_id_int:
+                                # Cancela agendamentos anteriores
+                                cancelar_remarketing(chat_id_int)
+                                
+                                # Agenda novo ciclo
+                                schedule_remarketing_and_alternating(
+                                    bot_id=bot_id,
+                                    chat_id=chat_id_int,
+                                    payment_message_id=0,
+                                    user_info={
+                                        'first_name': user_first_name or "Cliente",
+                                        'plano': plano_nome or "Plano",
+                                        'valor': valor_float
+                                    }
+                                )
+                                logger.info(f"📧 [REMARKETING] Ciclo iniciado para {user_first_name}")
+                        except Exception as e:
+                            logger.error(f"❌ Erro ao agendar remarketing: {e}")
+                    
+                    return pix_response
+                    
+                except (ValueError, KeyError, json.JSONDecodeError) as validation_error:
+                    logger.error(f"❌ Resposta inválida da API PushinPay: {validation_error}")
+                    logger.error(f"   Resposta recebida: {response.text[:500]}")
+                    return None
+                    
+            elif response.status_code == 429:
+                # Rate Limit - Espera mais tempo antes de retry
+                wait_time = 5 * (retry_count + 1)  # 5s, 10s, 15s
+                logger.warning(f"⚠️ Rate Limit (429). Aguardando {wait_time}s antes de retry...")
+                await asyncio.sleep(wait_time)
+                retry_count += 1
+                continue
+                
+            elif response.status_code in [401, 403]:
+                # Erro de autenticação - Não adianta retry
+                logger.error(f"❌ Erro de autenticação ({response.status_code}): Token inválido ou sem permissão")
+                logger.error(f"   Resposta: {response.text}")
+                return None
+                
+            else:
+                logger.error(f"❌ Erro PushinPay ({response.status_code}): {response.text}")
+                
+                # Para outros erros, tenta retry
+                if retry_count < max_retries - 1:
+                    wait_time = 2 ** retry_count  # Exponential backoff: 1s, 2s, 4s
+                    logger.warning(f"⚠️ Tentando novamente em {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                else:
+                    return None
+                    
+        except httpx.TimeoutException as timeout_err:
+            last_error = timeout_err
+            logger.error(f"⏱️ Timeout na requisição para PushinPay (tentativa {retry_count + 1}/{max_retries})")
             
-            return pix_response
-        else:
-            logger.error(f"❌ Erro PushinPay ({response.status_code}): {response.text}")
-            return None
+            if retry_count < max_retries - 1:
+                wait_time = 2 ** retry_count
+                logger.warning(f"⚠️ Retry em {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                retry_count += 1
+                continue
+            else:
+                logger.error(f"❌ Todas as {max_retries} tentativas falharam por timeout!")
+                logger.error(f"   Erro detalhado: {type(timeout_err).__name__} - {str(timeout_err)}")
+                return None
+                
+        except httpx.ConnectError as conn_err:
+            last_error = conn_err
+            logger.error(f"🔌 Erro de conexão com PushinPay (tentativa {retry_count + 1}/{max_retries})")
             
-    except Exception as e:
-        logger.error(f"❌ Erro ao gerar PIX: {e}")
-        return None
+            if retry_count < max_retries - 1:
+                wait_time = 3 ** retry_count  # 1s, 3s, 9s
+                logger.warning(f"⚠️ Retry em {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                retry_count += 1
+                continue
+            else:
+                logger.error(f"❌ Todas as {max_retries} tentativas falharam por erro de conexão!")
+                logger.error(f"   Erro detalhado: {type(conn_err).__name__} - {str(conn_err)}")
+                return None
+                
+        except Exception as e:
+            last_error = e
+            logger.error(f"❌ Erro inesperado ao gerar PIX (tentativa {retry_count + 1}/{max_retries})")
+            logger.error(f"   Tipo: {type(e).__name__}")
+            logger.error(f"   Mensagem: {str(e)}")
+            logger.error(f"   Traceback: {traceback.format_exc()}")
+            
+            if retry_count < max_retries - 1:
+                wait_time = 2 ** retry_count
+                logger.warning(f"⚠️ Retry em {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                retry_count += 1
+                continue
+            else:
+                logger.error(f"❌ Todas as {max_retries} tentativas falharam!")
+                return None
+    
+    # Se chegou aqui, esgotou todas as tentativas
+    logger.error(f"❌ Falha definitiva ao gerar PIX após {max_retries} tentativas")
+    if last_error:
+        logger.error(f"   Último erro: {type(last_error).__name__} - {str(last_error)}")
+    return None
 
 
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
