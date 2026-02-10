@@ -6523,7 +6523,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             nome=user_name,
                             username=username,
                             bot_id=bot_db.id,
-                            origem='canal_free'
+                            status='topo',
+                            funil_stage='lead_frio'
                         )
                         db.add(lead)
                         db.commit()
