@@ -5578,9 +5578,14 @@ def get_tracking_link_metrics(
         upsell_fat = 0.0
         downsell_vendas = 0
         downsell_fat = 0.0
+        remarketing_vendas = 0
+        remarketing_fat = 0.0
+        disparo_auto_vendas = 0
+        disparo_auto_fat = 0.0
         
         for p in pedidos:
             nome_lower = str(p.plano_nome or "").lower()
+            origem = str(p.origem or "").lower()
             valor = float(p.valor or 0)
             
             if "upsell:" in nome_lower:
@@ -5589,12 +5594,18 @@ def get_tracking_link_metrics(
             elif "downsell:" in nome_lower:
                 downsell_vendas += 1
                 downsell_fat += valor
+            elif origem == 'remarketing' or "(oferta)" in nome_lower:
+                remarketing_vendas += 1
+                remarketing_fat += valor
+            elif origem == 'disparo_auto' or "(oferta automática)" in nome_lower:
+                disparo_auto_vendas += 1
+                disparo_auto_fat += valor
             else:
                 normais_vendas += 1
                 normais_fat += valor
         
-        total_vendas = normais_vendas + upsell_vendas + downsell_vendas
-        total_fat = normais_fat + upsell_fat + downsell_fat
+        total_vendas = normais_vendas + upsell_vendas + downsell_vendas + remarketing_vendas + disparo_auto_vendas
+        total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat
         leads_count = link.leads if hasattr(link, 'leads') else link.clicks
         conversao = round((total_vendas / leads_count * 100), 2) if leads_count > 0 else 0.0
         
@@ -5610,7 +5621,9 @@ def get_tracking_link_metrics(
             "breakdown": {
                 "normais": {"vendas": normais_vendas, "faturamento": round(normais_fat, 2)},
                 "upsell": {"vendas": upsell_vendas, "faturamento": round(upsell_fat, 2)},
-                "downsell": {"vendas": downsell_vendas, "faturamento": round(downsell_fat, 2)}
+                "downsell": {"vendas": downsell_vendas, "faturamento": round(downsell_fat, 2)},
+                "remarketing": {"vendas": remarketing_vendas, "faturamento": round(remarketing_fat, 2)},
+                "disparo_auto": {"vendas": disparo_auto_vendas, "faturamento": round(disparo_auto_fat, 2)}
             }
         }
         
@@ -5727,9 +5740,14 @@ def get_tracking_ranking(
             upsell_v = 0
             downsell_fat = 0.0
             downsell_v = 0
+            remarketing_fat = 0.0
+            remarketing_v = 0
+            disparo_auto_fat = 0.0
+            disparo_auto_v = 0
             
             for p in pedidos:
                 nome_lower = str(p.plano_nome or "").lower()
+                origem = str(p.origem or "").lower()
                 valor = float(p.valor or 0)
                 
                 if "upsell:" in nome_lower:
@@ -5738,12 +5756,18 @@ def get_tracking_ranking(
                 elif "downsell:" in nome_lower:
                     downsell_v += 1
                     downsell_fat += valor
+                elif origem == 'remarketing' or "(oferta)" in nome_lower:
+                    remarketing_v += 1
+                    remarketing_fat += valor
+                elif origem == 'disparo_auto' or "(oferta automática)" in nome_lower:
+                    disparo_auto_v += 1
+                    disparo_auto_fat += valor
                 else:
                     normais_v += 1
                     normais_fat += valor
             
-            total_vendas = normais_v + upsell_v + downsell_v
-            total_fat = normais_fat + upsell_fat + downsell_fat
+            total_vendas = normais_v + upsell_v + downsell_v + remarketing_v + disparo_auto_v
+            total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat
             leads_count = link.leads if hasattr(link, 'leads') else link.clicks
             conversao = round((total_vendas / leads_count * 100), 2) if leads_count and leads_count > 0 else 0.0
             
@@ -5759,7 +5783,9 @@ def get_tracking_ranking(
                 "breakdown": {
                     "normais": {"vendas": normais_v, "faturamento": round(normais_fat, 2)},
                     "upsell": {"vendas": upsell_v, "faturamento": round(upsell_fat, 2)},
-                    "downsell": {"vendas": downsell_v, "faturamento": round(downsell_fat, 2)}
+                    "downsell": {"vendas": downsell_v, "faturamento": round(downsell_fat, 2)},
+                    "remarketing": {"vendas": remarketing_v, "faturamento": round(remarketing_fat, 2)},
+                    "disparo_auto": {"vendas": disparo_auto_v, "faturamento": round(disparo_auto_fat, 2)}
                 }
             })
         
@@ -7467,7 +7493,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             status="pending",
                             tem_order_bump=False,
                             created_at=now_brazil(),
-                            tracking_id=track_id_pedido
+                            tracking_id=track_id_pedido,
+                            origem='disparo_auto'
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -7836,6 +7863,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
                         txid = str(pix.get('id') or mytx).lower()
                         
+                        # 🔥 Extrai tracking_link_id da campanha para metrificar
+                        _track_id_rmkt = None
+                        try:
+                            _cfg = json.loads(campanha.config) if isinstance(campanha.config, str) else (campanha.config or {})
+                            if isinstance(_cfg, str): _cfg = json.loads(_cfg)
+                            _track_id_rmkt = _cfg.get("tracking_link_id")
+                        except: pass
+                        
                         novo_pedido = Pedido(
                             bot_id=bot_db.id, 
                             telegram_id=str(chat_id), 
@@ -7849,7 +7884,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             status="pending", 
                             tem_order_bump=False, 
                             created_at=now_brazil(), 
-                            tracking_id=None 
+                            tracking_id=_track_id_rmkt,
+                            origem='remarketing'
                         )
                         db.add(novo_pedido)
                         
@@ -8986,6 +9022,56 @@ async def enviar_remarketing(
         db.add(nova_campanha)
         db.commit()
         db.refresh(nova_campanha)
+        
+        # 🔥 AUTO-TRACKING: Cria TrackingLink automático para metrificar esta campanha
+        tracking_link_id = None
+        try:
+            # Busca ou cria pasta "Remarketing" automaticamente
+            pasta_rmkt = db.query(TrackingFolder).filter(
+                func.lower(TrackingFolder.nome) == "remarketing"
+            ).first()
+            
+            if not pasta_rmkt:
+                pasta_rmkt = TrackingFolder(
+                    nome="Remarketing",
+                    plataforma="telegram",
+                    created_at=now_brazil()
+                )
+                db.add(pasta_rmkt)
+                db.commit()
+                db.refresh(pasta_rmkt)
+            
+            # Cria link de tracking vinculado à campanha
+            data_label = now_brazil().strftime("%d%b_%H%M").lower()
+            tipo_label = "teste" if payload.is_test else payload.target
+            codigo_track = f"rmkt_{data_label}_{tipo_label}"[:50]
+            
+            novo_track = TrackingLink(
+                folder_id=pasta_rmkt.id,
+                bot_id=payload.bot_id,
+                nome=f"Campanha {data_label} ({tipo_label})",
+                codigo=codigo_track,
+                origem="remarketing",
+                clicks=0,
+                leads=0,
+                vendas=0,
+                faturamento=0.0,
+                created_at=now_brazil()
+            )
+            db.add(novo_track)
+            db.commit()
+            db.refresh(novo_track)
+            tracking_link_id = novo_track.id
+            
+            # Salva o tracking_link_id na campanha config para referência
+            config_data["tracking_link_id"] = tracking_link_id
+            nova_campanha.config = json.dumps(config_data)
+            db.commit()
+            
+            logger.info(f"📊 [AUTO-TRACKING] TrackingLink #{tracking_link_id} criado para campanha {uuid_campanha}")
+        except Exception as e_track:
+            logger.warning(f"⚠️ Erro ao criar auto-tracking (não fatal): {e_track}")
+            db.rollback()
         
         logger.info(f"✅ Campanha {nova_campanha.id} registrada no banco")
         
