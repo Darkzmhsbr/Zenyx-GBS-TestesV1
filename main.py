@@ -68,7 +68,10 @@ from database import (
     AlternatingMessages,  # ✅ NOME CORRETO
     RemarketingLog,       # ✅ NOME CORRETO
     # ✅ NOVO IMPORT PARA CANAL FREE
-    CanalFreeConfig
+    CanalFreeConfig,
+    # ✅ NOVOS IMPORTS PARA UPSELL/DOWNSELL
+    UpsellConfig,
+    DownsellConfig
 )
 
 import update_db 
@@ -2527,6 +2530,46 @@ def registrar_remarketing(
                         UPDATE remarketing_logs SET user_id = CAST(user_telegram_id AS VARCHAR) WHERE user_id IS NULL;
                     END IF;
                 END $$;
+                """,
+
+                # ============================================================
+                # 🚀 [CORREÇÃO 13] TABELAS UPSELL E DOWNSELL
+                # ============================================================
+                """
+                CREATE TABLE IF NOT EXISTS upsell_config (
+                    id SERIAL PRIMARY KEY,
+                    bot_id INTEGER UNIQUE REFERENCES bots(id),
+                    ativo BOOLEAN DEFAULT FALSE,
+                    nome_produto VARCHAR,
+                    preco FLOAT,
+                    link_acesso VARCHAR,
+                    delay_minutos INTEGER DEFAULT 2,
+                    msg_texto TEXT DEFAULT '🔥 Oferta exclusiva para você!',
+                    msg_media VARCHAR,
+                    btn_aceitar VARCHAR DEFAULT '✅ QUERO ESSA OFERTA!',
+                    btn_recusar VARCHAR DEFAULT '❌ NÃO, OBRIGADO',
+                    autodestruir BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc'),
+                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc')
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS downsell_config (
+                    id SERIAL PRIMARY KEY,
+                    bot_id INTEGER UNIQUE REFERENCES bots(id),
+                    ativo BOOLEAN DEFAULT FALSE,
+                    nome_produto VARCHAR,
+                    preco FLOAT,
+                    link_acesso VARCHAR,
+                    delay_minutos INTEGER DEFAULT 10,
+                    msg_texto TEXT DEFAULT '🎁 Última chance! Oferta especial só para você!',
+                    msg_media VARCHAR,
+                    btn_aceitar VARCHAR DEFAULT '✅ QUERO ESSA OFERTA!',
+                    btn_recusar VARCHAR DEFAULT '❌ NÃO, OBRIGADO',
+                    autodestruir BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc'),
+                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc')
+                );
                 """
             ]
             
@@ -3373,6 +3416,31 @@ class OrderBumpCreate(BaseModel):
     msg_media: Optional[str] = None
     btn_aceitar: Optional[str] = "✅ SIM, ADICIONAR"
     btn_recusar: Optional[str] = "❌ NÃO, OBRIGADO"
+
+# 🚀 UPSELL/DOWNSELL MODELS
+class UpsellCreate(BaseModel):
+    ativo: bool = False
+    nome_produto: str = ""
+    preco: float = 0.0
+    link_acesso: str = ""
+    delay_minutos: int = 2
+    msg_texto: Optional[str] = "🔥 Oferta exclusiva para você!"
+    msg_media: Optional[str] = None
+    btn_aceitar: Optional[str] = "✅ QUERO ESSA OFERTA!"
+    btn_recusar: Optional[str] = "❌ NÃO, OBRIGADO"
+    autodestruir: Optional[bool] = False
+
+class DownsellCreate(BaseModel):
+    ativo: bool = False
+    nome_produto: str = ""
+    preco: float = 0.0
+    link_acesso: str = ""
+    delay_minutos: int = 10
+    msg_texto: Optional[str] = "🎁 Última chance! Oferta especial só para você!"
+    msg_media: Optional[str] = None
+    btn_aceitar: Optional[str] = "✅ QUERO ESSA OFERTA!"
+    btn_recusar: Optional[str] = "❌ NÃO, OBRIGADO"
+    autodestruir: Optional[bool] = False
 
 class IntegrationUpdate(BaseModel):
     token: str
@@ -4908,6 +4976,92 @@ def save_order_bump(
     return {"status": "ok"}
 
 # =========================================================
+# 🚀 ROTAS UPSELL
+# =========================================================
+@app.get("/api/admin/bots/{bot_id}/upsell")
+def get_upsell(bot_id: int, db: Session = Depends(get_db)):
+    config = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
+    if not config:
+        return {
+            "ativo": False, "nome_produto": "", "preco": 0.0, "link_acesso": "",
+            "delay_minutos": 2, "msg_texto": "🔥 Oferta exclusiva para você!", "msg_media": "",
+            "btn_aceitar": "✅ QUERO ESSA OFERTA!", "btn_recusar": "❌ NÃO, OBRIGADO",
+            "autodestruir": False
+        }
+    return config
+
+@app.post("/api/admin/bots/{bot_id}/upsell")
+def save_upsell(
+    bot_id: int,
+    dados: UpsellCreate,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    config = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
+    if not config:
+        config = UpsellConfig(bot_id=bot_id)
+        db.add(config)
+    
+    config.ativo = dados.ativo
+    config.nome_produto = dados.nome_produto
+    config.preco = dados.preco
+    config.link_acesso = dados.link_acesso
+    config.delay_minutos = dados.delay_minutos
+    config.msg_texto = dados.msg_texto
+    config.msg_media = dados.msg_media
+    config.btn_aceitar = dados.btn_aceitar
+    config.btn_recusar = dados.btn_recusar
+    config.autodestruir = dados.autodestruir
+    
+    db.commit()
+    return {"status": "ok"}
+
+# =========================================================
+# 📉 ROTAS DOWNSELL
+# =========================================================
+@app.get("/api/admin/bots/{bot_id}/downsell")
+def get_downsell(bot_id: int, db: Session = Depends(get_db)):
+    config = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
+    if not config:
+        return {
+            "ativo": False, "nome_produto": "", "preco": 0.0, "link_acesso": "",
+            "delay_minutos": 10, "msg_texto": "🎁 Última chance! Oferta especial só para você!", "msg_media": "",
+            "btn_aceitar": "✅ QUERO ESSA OFERTA!", "btn_recusar": "❌ NÃO, OBRIGADO",
+            "autodestruir": False
+        }
+    return config
+
+@app.post("/api/admin/bots/{bot_id}/downsell")
+def save_downsell(
+    bot_id: int,
+    dados: DownsellCreate,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    config = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
+    if not config:
+        config = DownsellConfig(bot_id=bot_id)
+        db.add(config)
+    
+    config.ativo = dados.ativo
+    config.nome_produto = dados.nome_produto
+    config.preco = dados.preco
+    config.link_acesso = dados.link_acesso
+    config.delay_minutos = dados.delay_minutos
+    config.msg_texto = dados.msg_texto
+    config.msg_media = dados.msg_media
+    config.btn_aceitar = dados.btn_aceitar
+    config.btn_recusar = dados.btn_recusar
+    config.autodestruir = dados.autodestruir
+    
+    db.commit()
+    return {"status": "ok"}
+
+# =========================================================
 # 🗑️ ROTA DELETAR PLANO (COM DESVINCULAÇÃO SEGURA)
 # =========================================================
 @app.delete("/api/admin/plans/{pid}")
@@ -5683,6 +5837,78 @@ def test_channel_connection(data: ChannelTestRequest, current_user: User = Depen
 # 💳 WEBHOOK PIX (PUSHIN PAY) - V5.0 COM RETRY
 # =========================================================
 @app.post("/api/webhooks/pushinpay")
+# =========================================================
+# 🚀📉 FUNÇÃO AUXILIAR: ENVIAR OFERTA UPSELL/DOWNSELL
+# =========================================================
+async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: int, offer_type: str = "upsell"):
+    """
+    Envia oferta de Upsell ou Downsell para o usuário após delay configurado.
+    Chamada via asyncio.create_task com asyncio.sleep para o delay.
+    """
+    try:
+        db_local = SessionLocal()
+        
+        if offer_type == "upsell":
+            config = db_local.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
+        else:
+            config = db_local.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
+        
+        if not config or not config.ativo:
+            logger.info(f"ℹ️ {offer_type.upper()} não ativo para bot {bot_id}")
+            db_local.close()
+            return
+        
+        # Aguarda o delay configurado
+        delay_seconds = (config.delay_minutos or 2) * 60
+        logger.info(f"⏰ Aguardando {config.delay_minutos} min para enviar {offer_type.upper()} para {chat_id}")
+        await asyncio.sleep(delay_seconds)
+        
+        tb = telebot.TeleBot(bot_token, threaded=False)
+        
+        # Monta botões
+        mk = types.InlineKeyboardMarkup()
+        mk.row(
+            types.InlineKeyboardButton(
+                f"{config.btn_aceitar} (R$ {config.preco:.2f})", 
+                callback_data=f"{offer_type}_accept_{bot_id}"
+            )
+        )
+        mk.row(
+            types.InlineKeyboardButton(
+                config.btn_recusar, 
+                callback_data=f"{offer_type}_decline_{bot_id}"
+            )
+        )
+        
+        # Envia mensagem
+        msg_texto = config.msg_texto or f"{'🚀' if offer_type == 'upsell' else '🎁'} Oferta especial!"
+        
+        try:
+            if config.msg_media:
+                media_url = config.msg_media.strip()
+                if media_url.lower().endswith(('.mp4', '.mov')):
+                    tb.send_video(chat_id, media_url, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
+                else:
+                    tb.send_photo(chat_id, media_url, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
+            else:
+                tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
+            
+            logger.info(f"✅ {offer_type.upper()} enviado para {chat_id} (bot {bot_id})")
+        except Exception as e_send:
+            logger.error(f"❌ Falha ao enviar {offer_type}: {e_send}")
+            # Fallback sem mídia
+            try:
+                tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
+            except:
+                pass
+        
+        db_local.close()
+        
+    except asyncio.CancelledError:
+        logger.info(f"🚫 {offer_type.upper()} cancelado para {chat_id}")
+    except Exception as e:
+        logger.error(f"❌ Erro enviar_oferta_upsell_downsell ({offer_type}): {e}", exc_info=True)
+
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     """
@@ -5908,6 +6134,82 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                         
                         pedido.mensagem_enviada = True
                         db.commit()
+                        
+                        # =========================================================
+                        # 🚀📉 AGENDAR UPSELL/DOWNSELL APÓS PAGAMENTO DO PLANO
+                        # =========================================================
+                        try:
+                            plano_nome_lower = str(pedido.plano_nome or "").lower()
+                            
+                            # Só agenda se for compra de plano PRINCIPAL (não upsell/downsell/order bump)
+                            if "upsell:" not in plano_nome_lower and "downsell:" not in plano_nome_lower:
+                                # AGENDAR UPSELL
+                                upsell_cfg = db.query(UpsellConfig).filter(
+                                    UpsellConfig.bot_id == bot_data.id,
+                                    UpsellConfig.ativo == True
+                                ).first()
+                                
+                                if upsell_cfg:
+                                    logger.info(f"🚀 Agendando UPSELL para {target_id} em {upsell_cfg.delay_minutos} min")
+                                    asyncio.create_task(
+                                        enviar_oferta_upsell_downsell(
+                                            bot_token=bot_data.token,
+                                            chat_id=int(target_id),
+                                            bot_id=bot_data.id,
+                                            offer_type="upsell"
+                                        )
+                                    )
+                            
+                            # Se for pagamento de UPSELL → agenda DOWNSELL
+                            elif "upsell:" in plano_nome_lower:
+                                # Entrega acesso do upsell
+                                upsell_cfg = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_data.id).first()
+                                if upsell_cfg and upsell_cfg.link_acesso:
+                                    try:
+                                        msg_upsell_entrega = (
+                                            f"🎉 <b>UPSELL LIBERADO!</b>\n\n"
+                                            f"📦 <b>{upsell_cfg.nome_produto}</b>\n"
+                                            f"🔗 Acesse: {upsell_cfg.link_acesso}"
+                                        )
+                                        tb.send_message(int(target_id), msg_upsell_entrega, parse_mode="HTML")
+                                        logger.info(f"✅ Upsell entregue para {target_id}")
+                                    except Exception as e_up:
+                                        logger.error(f"❌ Erro entrega upsell: {e_up}")
+                                
+                                # Agora agenda o DOWNSELL
+                                downsell_cfg = db.query(DownsellConfig).filter(
+                                    DownsellConfig.bot_id == bot_data.id,
+                                    DownsellConfig.ativo == True
+                                ).first()
+                                
+                                if downsell_cfg:
+                                    logger.info(f"📉 Agendando DOWNSELL para {target_id} em {downsell_cfg.delay_minutos} min")
+                                    asyncio.create_task(
+                                        enviar_oferta_upsell_downsell(
+                                            bot_token=bot_data.token,
+                                            chat_id=int(target_id),
+                                            bot_id=bot_data.id,
+                                            offer_type="downsell"
+                                        )
+                                    )
+                            
+                            # Se for pagamento de DOWNSELL → entrega acesso
+                            elif "downsell:" in plano_nome_lower:
+                                downsell_cfg = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_data.id).first()
+                                if downsell_cfg and downsell_cfg.link_acesso:
+                                    try:
+                                        msg_down_entrega = (
+                                            f"🎉 <b>ACESSO LIBERADO!</b>\n\n"
+                                            f"📦 <b>{downsell_cfg.nome_produto}</b>\n"
+                                            f"🔗 Acesse: {downsell_cfg.link_acesso}"
+                                        )
+                                        tb.send_message(int(target_id), msg_down_entrega, parse_mode="HTML")
+                                        logger.info(f"✅ Downsell entregue para {target_id}")
+                                    except Exception as e_down:
+                                        logger.error(f"❌ Erro entrega downsell: {e_down}")
+                                        
+                        except Exception as e_upsell_schedule:
+                            logger.error(f"⚠️ Erro ao agendar upsell/downsell: {e_upsell_schedule}")
                         
             except Exception as e_tg:
                 logger.error(f"❌ Erro Telegram/Entrega Geral: {e_tg}")
@@ -7377,6 +7679,203 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     logger.error(f"❌ Erro GERAL no handler promo_: {e}", exc_info=True)
                     try: bot_temp.send_message(chat_id, "❌ Ocorreu um erro ao processar sua solicitação.")
                     except: pass
+
+            # --- 🚀 UPSELL: ACEITAR ---
+            elif data.startswith("upsell_accept_"):
+                try:
+                    bot_id_str = data.replace("upsell_accept_", "").strip()
+                    upsell_cfg = db.query(UpsellConfig).filter(UpsellConfig.bot_id == int(bot_id_str)).first()
+                    
+                    if not upsell_cfg or not upsell_cfg.ativo:
+                        bot_temp.send_message(chat_id, "❌ Esta oferta não está mais disponível.")
+                        return {"status": "ok"}
+                    
+                    # Auto-destruir a mensagem da oferta se configurado
+                    if upsell_cfg.autodestruir:
+                        try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
+                        except: pass
+                    
+                    msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando pagamento da oferta...", parse_mode="HTML")
+                    
+                    mytx = str(uuid.uuid4())
+                    preco_upsell = round(float(upsell_cfg.preco), 2)
+                    
+                    try:
+                        pix = await gerar_pix_pushinpay(
+                            valor_float=preco_upsell,
+                            transaction_id=mytx,
+                            bot_id=bot_db.id,
+                            db=db,
+                            user_telegram_id=str(chat_id),
+                            user_first_name=first_name,
+                            plano_nome=f"UPSELL: {upsell_cfg.nome_produto}",
+                            agendar_remarketing=False
+                        )
+                    except Exception as e_pix:
+                        logger.error(f"❌ Erro PIX upsell: {e_pix}", exc_info=True)
+                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except: pass
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar pagamento. Tente novamente.")
+                        return {"status": "error"}
+                    
+                    if pix:
+                        qr = pix.get('qr_code_text') or pix.get('qr_code')
+                        txid = str(pix.get('id') or mytx).lower()
+                        
+                        novo_pedido = Pedido(
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=f"UPSELL: {upsell_cfg.nome_produto}",
+                            plano_id=None,
+                            valor=preco_upsell,
+                            transaction_id=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=now_brazil(),
+                            status_funil='fundo',
+                            origem='upsell'
+                        )
+                        db.add(novo_pedido)
+                        db.commit()
+                        
+                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except: pass
+                        
+                        markup_pix = types.InlineKeyboardMarkup()
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
+                        
+                        msg_pix_txt = (
+                            f"🚀 <b>OFERTA UPSELL</b>\n\n"
+                            f"📦 {upsell_cfg.nome_produto}\n"
+                            f"💰 Valor: <b>R$ {preco_upsell:.2f}</b>\n\n"
+                            f"📋 <b>PIX Copia e Cola:</b>\n<code>{qr}</code>\n\n"
+                            f"⏳ Pague e seu acesso será liberado automaticamente!"
+                        )
+                        
+                        bot_temp.send_message(chat_id, msg_pix_txt, parse_mode="HTML", reply_markup=markup_pix)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro handler upsell_accept_: {e}", exc_info=True)
+                    try: bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.")
+                    except: pass
+
+            # --- 🚀 UPSELL: RECUSAR ---
+            elif data.startswith("upsell_decline_"):
+                try:
+                    # Auto-destruir se configurado
+                    bot_id_str = data.replace("upsell_decline_", "").strip()
+                    upsell_cfg = db.query(UpsellConfig).filter(UpsellConfig.bot_id == int(bot_id_str)).first()
+                    
+                    if upsell_cfg and upsell_cfg.autodestruir:
+                        try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
+                        except: pass
+                    
+                    bot_temp.send_message(chat_id, "👍 Tudo bem! Se mudar de ideia, é só avisar.")
+                    logger.info(f"❌ Upsell recusado por {chat_id}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro upsell_decline_: {e}")
+
+            # --- 📉 DOWNSELL: ACEITAR ---
+            elif data.startswith("downsell_accept_"):
+                try:
+                    bot_id_str = data.replace("downsell_accept_", "").strip()
+                    downsell_cfg = db.query(DownsellConfig).filter(DownsellConfig.bot_id == int(bot_id_str)).first()
+                    
+                    if not downsell_cfg or not downsell_cfg.ativo:
+                        bot_temp.send_message(chat_id, "❌ Esta oferta não está mais disponível.")
+                        return {"status": "ok"}
+                    
+                    # Auto-destruir a mensagem da oferta se configurado
+                    if downsell_cfg.autodestruir:
+                        try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
+                        except: pass
+                    
+                    msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando pagamento da oferta...", parse_mode="HTML")
+                    
+                    mytx = str(uuid.uuid4())
+                    preco_downsell = round(float(downsell_cfg.preco), 2)
+                    
+                    try:
+                        pix = await gerar_pix_pushinpay(
+                            valor_float=preco_downsell,
+                            transaction_id=mytx,
+                            bot_id=bot_db.id,
+                            db=db,
+                            user_telegram_id=str(chat_id),
+                            user_first_name=first_name,
+                            plano_nome=f"DOWNSELL: {downsell_cfg.nome_produto}",
+                            agendar_remarketing=False
+                        )
+                    except Exception as e_pix:
+                        logger.error(f"❌ Erro PIX downsell: {e_pix}", exc_info=True)
+                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except: pass
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar pagamento. Tente novamente.")
+                        return {"status": "error"}
+                    
+                    if pix:
+                        qr = pix.get('qr_code_text') or pix.get('qr_code')
+                        txid = str(pix.get('id') or mytx).lower()
+                        
+                        novo_pedido = Pedido(
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=f"DOWNSELL: {downsell_cfg.nome_produto}",
+                            plano_id=None,
+                            valor=preco_downsell,
+                            transaction_id=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=now_brazil(),
+                            status_funil='fundo',
+                            origem='downsell'
+                        )
+                        db.add(novo_pedido)
+                        db.commit()
+                        
+                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except: pass
+                        
+                        markup_pix = types.InlineKeyboardMarkup()
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
+                        
+                        msg_pix_txt = (
+                            f"🎁 <b>OFERTA ESPECIAL</b>\n\n"
+                            f"📦 {downsell_cfg.nome_produto}\n"
+                            f"💰 Valor: <b>R$ {preco_downsell:.2f}</b>\n\n"
+                            f"📋 <b>PIX Copia e Cola:</b>\n<code>{qr}</code>\n\n"
+                            f"⏳ Pague e seu acesso será liberado automaticamente!"
+                        )
+                        
+                        bot_temp.send_message(chat_id, msg_pix_txt, parse_mode="HTML", reply_markup=markup_pix)
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro handler downsell_accept_: {e}", exc_info=True)
+                    try: bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.")
+                    except: pass
+
+            # --- 📉 DOWNSELL: RECUSAR ---
+            elif data.startswith("downsell_decline_"):
+                try:
+                    bot_id_str = data.replace("downsell_decline_", "").strip()
+                    downsell_cfg = db.query(DownsellConfig).filter(DownsellConfig.bot_id == int(bot_id_str)).first()
+                    
+                    if downsell_cfg and downsell_cfg.autodestruir:
+                        try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
+                        except: pass
+                    
+                    bot_temp.send_message(chat_id, "👍 Tudo bem! Obrigado pela preferência! 😊")
+                    logger.info(f"❌ Downsell recusado por {chat_id}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro downsell_decline_: {e}")
 
     except Exception as e:
         logger.error(f"Erro no webhook: {e}")

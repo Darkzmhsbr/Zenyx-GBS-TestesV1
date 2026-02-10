@@ -121,6 +121,10 @@ class Bot(Base):
     # Relacionamento com Order Bump
     order_bump = relationship("OrderBumpConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     
+    # 🆕 Relacionamentos com Upsell e Downsell
+    upsell_config = relationship("UpsellConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
+    downsell_config = relationship("DownsellConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
+    
     # Relacionamento com Tracking (Links pertencem a um bot)
     tracking_links = relationship("TrackingLink", back_populates="bot", cascade="all, delete-orphan")
 
@@ -166,6 +170,70 @@ class OrderBumpConfig(Base):
     btn_recusar = Column(String, default="❌ NÃO, OBRIGADO")
     
     bot = relationship("Bot", back_populates="order_bump")
+
+# =========================================================
+# 🚀 UPSELL (OFERTA PÓS-COMPRA #1)
+# =========================================================
+class UpsellConfig(Base):
+    __tablename__ = "upsell_config"
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
+    
+    ativo = Column(Boolean, default=False)
+    nome_produto = Column(String)
+    preco = Column(Float)
+    link_acesso = Column(String, nullable=True)
+    
+    # Delay em minutos após pagamento do plano principal
+    delay_minutos = Column(Integer, default=2)
+    
+    # Conteúdo da Oferta
+    msg_texto = Column(Text, default="🔥 Oferta exclusiva para você!")
+    msg_media = Column(String, nullable=True)
+    
+    # Botões
+    btn_aceitar = Column(String, default="✅ QUERO ESSA OFERTA!")
+    btn_recusar = Column(String, default="❌ NÃO, OBRIGADO")
+    
+    # Auto-destruição
+    autodestruir = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
+    
+    bot = relationship("Bot", back_populates="upsell_config")
+
+# =========================================================
+# 📉 DOWNSELL (OFERTA PÓS-COMPRA #2 - APÓS UPSELL)
+# =========================================================
+class DownsellConfig(Base):
+    __tablename__ = "downsell_config"
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey("bots.id"), unique=True)
+    
+    ativo = Column(Boolean, default=False)
+    nome_produto = Column(String)
+    preco = Column(Float)
+    link_acesso = Column(String, nullable=True)
+    
+    # Delay em minutos após pagamento do upsell
+    delay_minutos = Column(Integer, default=10)
+    
+    # Conteúdo da Oferta
+    msg_texto = Column(Text, default="🎁 Última chance! Oferta especial só para você!")
+    msg_media = Column(String, nullable=True)
+    
+    # Botões
+    btn_aceitar = Column(String, default="✅ QUERO ESSA OFERTA!")
+    btn_recusar = Column(String, default="❌ NÃO, OBRIGADO")
+    
+    # Auto-destruição
+    autodestruir = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
+    
+    bot = relationship("Bot", back_populates="downsell_config")
 
 # =========================================================
 # 💲 PLANOS
