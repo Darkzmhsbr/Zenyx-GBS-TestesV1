@@ -5960,8 +5960,12 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             now = now_brazil()
             data_validade = None
             
+            # 🔥 DETECTAR SE É UPSELL/DOWNSELL (não tem plano_id, nome começa com prefixo)
+            plano_nome_lower = str(pedido.plano_nome or "").lower()
+            is_upsell_or_downsell = "upsell:" in plano_nome_lower or "downsell:" in plano_nome_lower
+            
             plano = None
-            if pedido.plano_id:
+            if pedido.plano_id and not is_upsell_or_downsell:
                 try:
                     plano_id_int = int(pedido.plano_id) if str(pedido.plano_id).isdigit() else None
                     if plano_id_int:
@@ -5969,7 +5973,11 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                 except (ValueError, TypeError):
                     logger.warning(f"⚠️ plano_id inválido: {pedido.plano_id}")
             
-            if plano:
+            if is_upsell_or_downsell:
+                # Upsell/Downsell: não tem plano associado, sem validade (produto avulso)
+                data_validade = None
+                logger.info(f"🚀 Pedido é {plano_nome_lower.split(':')[0].upper().strip()} - sem plano associado")
+            elif plano:
                 if plano.is_lifetime:
                     data_validade = None
                     logger.info(f"♾️ Plano '{plano.nome_exibicao}' é VITALÍCIO")
@@ -6047,70 +6055,72 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                             db.commit()
                     
                     if target_id.isdigit():
-                        # Entrega principal
-                        try:
-                            # 🔥 LÓGICA V7: DEFINIÇÃO INTELIGENTE DO CANAL DE DESTINO 🔥
-                            # Se o plano tem um canal específico configurado, usa ele.
-                            # Caso contrário, usa o canal padrão configurado no Bot.
-                            
-                            canal_id_final = bot_data.id_canal_vip # Default
-                            
-                            if plano and plano.id_canal_destino and str(plano.id_canal_destino).strip() != "":
-                                canal_id_final = plano.id_canal_destino
-                                logger.info(f"🎯 Usando Canal Específico do Plano: {canal_id_final}")
-                            else:
-                                logger.info(f"🎯 Usando Canal Padrão do Bot: {canal_id_final}")
-
-                            # Tratamento do ID do canal (remove traços extras se houver)
-                            if str(canal_id_final).replace("-", "").isdigit():
-                                canal_id_final = int(str(canal_id_final).strip())
-                            
-                            # Tenta desbanir antes (boas práticas)
+                        # 🔥 UPSELL/DOWNSELL: Pula entrega de canal VIP (será tratado abaixo)
+                        if not is_upsell_or_downsell:
+                            # Entrega principal (APENAS para planos normais)
                             try:
-                                tb.unban_chat_member(canal_id_final, int(target_id))
-                            except:
-                                pass
-                            
-                            # Gera Link Único para o canal decidido acima
-                            convite = tb.create_chat_invite_link(
-                                chat_id=canal_id_final,
-                                member_limit=1,
-                                name=f"Venda {pedido.first_name}"
-                            )
-                            
-                            msg_cliente = (
-                                f"✅ <b>Pagamento Confirmado!</b>\n"
-                                f"📅 Validade: <b>{texto_validade}</b>\n\n"
-                                f"Seu acesso exclusivo:\n👉 {convite.invite_link}"
-                            )
-                            
-                            tb.send_message(int(target_id), msg_cliente, parse_mode="HTML")
-                            logger.info(f"✅ Entrega enviada para {target_id} (Canal: {canal_id_final})")
-                            
-                        except Exception as e_main:
-                            logger.error(f"❌ Erro na entrega principal (TeleBot): {e_main}")
-                            # Fallback: Tenta avisar o usuário que houve erro na geração
-                            try:
-                                tb.send_message(int(target_id), "✅ Pagamento recebido!\n⚠️ Erro ao gerar link automático. Contate o suporte.")
-                            except: pass
-                        
-                        # Entrega Order Bump
-                        if pedido.tem_order_bump:
-                            try:
-                                bump_config = db.query(OrderBumpConfig).filter(
-                                    OrderBumpConfig.bot_id == bot_data.id
-                                ).first()
+                                # 🔥 LÓGICA V7: DEFINIÇÃO INTELIGENTE DO CANAL DE DESTINO 🔥
+                                # Se o plano tem um canal específico configurado, usa ele.
+                                # Caso contrário, usa o canal padrão configurado no Bot.
                                 
-                                if bump_config and bump_config.link_acesso:
-                                    msg_bump = (
-                                        f"🎁 <b>BÔNUS LIBERADO!</b>\n\n"
-                                        f"👉 <b>{bump_config.nome_produto}</b>\n"
-                                        f"🔗 {bump_config.link_acesso}"
-                                    )
-                                    tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
-                                    logger.info("✅ Order Bump entregue")
-                            except Exception as e_bump:
-                                logger.error(f"❌ Erro Bump: {e_bump}")
+                                canal_id_final = bot_data.id_canal_vip # Default
+                                
+                                if plano and plano.id_canal_destino and str(plano.id_canal_destino).strip() != "":
+                                    canal_id_final = plano.id_canal_destino
+                                    logger.info(f"🎯 Usando Canal Específico do Plano: {canal_id_final}")
+                                else:
+                                    logger.info(f"🎯 Usando Canal Padrão do Bot: {canal_id_final}")
+
+                                # Tratamento do ID do canal (remove traços extras se houver)
+                                if str(canal_id_final).replace("-", "").isdigit():
+                                    canal_id_final = int(str(canal_id_final).strip())
+                                
+                                # Tenta desbanir antes (boas práticas)
+                                try:
+                                    tb.unban_chat_member(canal_id_final, int(target_id))
+                                except:
+                                    pass
+                                
+                                # Gera Link Único para o canal decidido acima
+                                convite = tb.create_chat_invite_link(
+                                    chat_id=canal_id_final,
+                                    member_limit=1,
+                                    name=f"Venda {pedido.first_name}"
+                                )
+                                
+                                msg_cliente = (
+                                    f"✅ <b>Pagamento Confirmado!</b>\n"
+                                    f"📅 Validade: <b>{texto_validade}</b>\n\n"
+                                    f"Seu acesso exclusivo:\n👉 {convite.invite_link}"
+                                )
+                                
+                                tb.send_message(int(target_id), msg_cliente, parse_mode="HTML")
+                                logger.info(f"✅ Entrega enviada para {target_id} (Canal: {canal_id_final})")
+                                
+                            except Exception as e_main:
+                                logger.error(f"❌ Erro na entrega principal (TeleBot): {e_main}")
+                                # Fallback: Tenta avisar o usuário que houve erro na geração
+                                try:
+                                    tb.send_message(int(target_id), "✅ Pagamento recebido!\n⚠️ Erro ao gerar link automático. Contate o suporte.")
+                                except: pass
+                            
+                            # Entrega Order Bump (só para planos normais)
+                            if pedido.tem_order_bump:
+                                try:
+                                    bump_config = db.query(OrderBumpConfig).filter(
+                                        OrderBumpConfig.bot_id == bot_data.id
+                                    ).first()
+                                    
+                                    if bump_config and bump_config.link_acesso:
+                                        msg_bump = (
+                                            f"🎁 <b>BÔNUS LIBERADO!</b>\n\n"
+                                            f"👉 <b>{bump_config.nome_produto}</b>\n"
+                                            f"🔗 {bump_config.link_acesso}"
+                                        )
+                                        tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
+                                        logger.info("✅ Order Bump entregue")
+                                except Exception as e_bump:
+                                    logger.error(f"❌ Erro Bump: {e_bump}")
                         
                         # Notificar Admin
                         try:
@@ -7751,8 +7761,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             f"🚀 <b>OFERTA UPSELL</b>\n\n"
                             f"📦 {upsell_cfg.nome_produto}\n"
                             f"💰 Valor: <b>R$ {preco_upsell:.2f}</b>\n\n"
-                            f"📋 <b>PIX Copia e Cola:</b>\n<code>{qr}</code>\n\n"
-                            f"⏳ Pague e seu acesso será liberado automaticamente!"
+                            f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                            f"👆 Toque na chave PIX acima para copiá-la\n"
+                            f"⚡ Acesso liberado automaticamente!"
                         )
                         
                         bot_temp.send_message(chat_id, msg_pix_txt, parse_mode="HTML", reply_markup=markup_pix)
@@ -7850,8 +7861,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             f"🎁 <b>OFERTA ESPECIAL</b>\n\n"
                             f"📦 {downsell_cfg.nome_produto}\n"
                             f"💰 Valor: <b>R$ {preco_downsell:.2f}</b>\n\n"
-                            f"📋 <b>PIX Copia e Cola:</b>\n<code>{qr}</code>\n\n"
-                            f"⏳ Pague e seu acesso será liberado automaticamente!"
+                            f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                            f"👆 Toque na chave PIX acima para copiá-la\n"
+                            f"⚡ Acesso liberado automaticamente!"
                         )
                         
                         bot_temp.send_message(chat_id, msg_pix_txt, parse_mode="HTML", reply_markup=markup_pix)
