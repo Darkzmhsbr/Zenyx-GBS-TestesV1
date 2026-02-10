@@ -5553,7 +5553,7 @@ def get_tracking_link_metrics(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Métricas detalhadas de um link com breakdown Normal/Upsell/Downsell.
+    Métricas detalhadas de um link com breakdown Normal/Upsell/Downsell/Remarketing/DisparoAuto/OrderBump.
     """
     try:
         user_bot_ids = [bot.id for bot in current_user.bots]
@@ -5564,6 +5564,12 @@ def get_tracking_link_metrics(
         
         if not current_user.is_superuser and link.bot_id not in user_bot_ids:
             raise HTTPException(403, "Acesso negado")
+        
+        # 🔥 Busca preço do Order Bump do bot (para calcular faturamento isolado)
+        bump_config = db.query(OrderBumpConfig).filter(
+            OrderBumpConfig.bot_id == link.bot_id
+        ).first()
+        bump_preco = float(bump_config.preco) if bump_config and bump_config.preco else 0.0
         
         # Busca todos os pedidos aprovados vinculados a este tracking_id
         pedidos = db.query(Pedido).filter(
@@ -5582,11 +5588,19 @@ def get_tracking_link_metrics(
         remarketing_fat = 0.0
         disparo_auto_vendas = 0
         disparo_auto_fat = 0.0
+        order_bump_vendas = 0
+        order_bump_fat = 0.0
         
         for p in pedidos:
             nome_lower = str(p.plano_nome or "").lower()
             origem = str(p.origem or "").lower()
             valor = float(p.valor or 0)
+            
+            # 🔥 Se tem Order Bump, separa o faturamento do bump
+            if p.tem_order_bump and bump_preco > 0:
+                order_bump_vendas += 1
+                order_bump_fat += bump_preco
+                valor = valor - bump_preco  # Valor restante é do plano/oferta
             
             if "upsell:" in nome_lower:
                 upsell_vendas += 1
@@ -5604,8 +5618,8 @@ def get_tracking_link_metrics(
                 normais_vendas += 1
                 normais_fat += valor
         
-        total_vendas = normais_vendas + upsell_vendas + downsell_vendas + remarketing_vendas + disparo_auto_vendas
-        total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat
+        total_vendas = normais_vendas + upsell_vendas + downsell_vendas + remarketing_vendas + disparo_auto_vendas + order_bump_vendas
+        total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat + order_bump_fat
         leads_count = link.leads if hasattr(link, 'leads') else link.clicks
         conversao = round((total_vendas / leads_count * 100), 2) if leads_count > 0 else 0.0
         
@@ -5623,7 +5637,8 @@ def get_tracking_link_metrics(
                 "upsell": {"vendas": upsell_vendas, "faturamento": round(upsell_fat, 2)},
                 "downsell": {"vendas": downsell_vendas, "faturamento": round(downsell_fat, 2)},
                 "remarketing": {"vendas": remarketing_vendas, "faturamento": round(remarketing_fat, 2)},
-                "disparo_auto": {"vendas": disparo_auto_vendas, "faturamento": round(disparo_auto_fat, 2)}
+                "disparo_auto": {"vendas": disparo_auto_vendas, "faturamento": round(disparo_auto_fat, 2)},
+                "order_bump": {"vendas": order_bump_vendas, "faturamento": round(order_bump_fat, 2)}
             }
         }
         
@@ -5734,6 +5749,12 @@ def get_tracking_ranking(
                 Pedido.status.in_(['paid', 'approved', 'active'])
             ).all()
             
+            # 🔥 Busca preço do Order Bump do bot
+            bump_config = db.query(OrderBumpConfig).filter(
+                OrderBumpConfig.bot_id == link.bot_id
+            ).first()
+            bump_preco = float(bump_config.preco) if bump_config and bump_config.preco else 0.0
+            
             normais_fat = 0.0
             normais_v = 0
             upsell_fat = 0.0
@@ -5744,11 +5765,19 @@ def get_tracking_ranking(
             remarketing_v = 0
             disparo_auto_fat = 0.0
             disparo_auto_v = 0
+            order_bump_fat = 0.0
+            order_bump_v = 0
             
             for p in pedidos:
                 nome_lower = str(p.plano_nome or "").lower()
                 origem = str(p.origem or "").lower()
                 valor = float(p.valor or 0)
+                
+                # 🔥 Se tem Order Bump, separa o faturamento do bump
+                if p.tem_order_bump and bump_preco > 0:
+                    order_bump_v += 1
+                    order_bump_fat += bump_preco
+                    valor = valor - bump_preco
                 
                 if "upsell:" in nome_lower:
                     upsell_v += 1
@@ -5766,8 +5795,8 @@ def get_tracking_ranking(
                     normais_v += 1
                     normais_fat += valor
             
-            total_vendas = normais_v + upsell_v + downsell_v + remarketing_v + disparo_auto_v
-            total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat
+            total_vendas = normais_v + upsell_v + downsell_v + remarketing_v + disparo_auto_v + order_bump_v
+            total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat + order_bump_fat
             leads_count = link.leads if hasattr(link, 'leads') else link.clicks
             conversao = round((total_vendas / leads_count * 100), 2) if leads_count and leads_count > 0 else 0.0
             
@@ -5785,7 +5814,8 @@ def get_tracking_ranking(
                     "upsell": {"vendas": upsell_v, "faturamento": round(upsell_fat, 2)},
                     "downsell": {"vendas": downsell_v, "faturamento": round(downsell_fat, 2)},
                     "remarketing": {"vendas": remarketing_v, "faturamento": round(remarketing_fat, 2)},
-                    "disparo_auto": {"vendas": disparo_auto_v, "faturamento": round(disparo_auto_fat, 2)}
+                    "disparo_auto": {"vendas": disparo_auto_v, "faturamento": round(disparo_auto_fat, 2)},
+                    "order_bump": {"vendas": order_bump_v, "faturamento": round(order_bump_fat, 2)}
                 }
             })
         
