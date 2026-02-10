@@ -7794,7 +7794,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         return {"status": "error"}
                     
                     if hasattr(campanha, 'expiration_at') and campanha.expiration_at:
-                        exp_at = campanha.expiration_at.replace(tzinfo=None) if hasattr(campanha.expiration_at, 'replace') else campanha.expiration_at
+                        exp_at = campanha.expiration_at if campanha.expiration_at.tzinfo else campanha.expiration_at.replace(tzinfo=BRAZIL_TZ)
                         if now_brazil() > exp_at:
                             bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
                             return {"status": "expired"}
