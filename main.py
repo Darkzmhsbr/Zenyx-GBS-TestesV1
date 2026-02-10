@@ -5542,6 +5542,233 @@ def delete_link(
         logger.error(f"Erro ao deletar link: {e}")
         raise HTTPException(500, "Erro interno")
 
+# =========================================================
+# 📊 ROTAS DE MÉTRICAS AVANÇADAS DE TRACKING
+# =========================================================
+
+@app.get("/api/admin/tracking/link/{link_id}/metrics")
+def get_tracking_link_metrics(
+    link_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Métricas detalhadas de um link com breakdown Normal/Upsell/Downsell.
+    """
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        
+        link = db.query(TrackingLink).filter(TrackingLink.id == link_id).first()
+        if not link:
+            raise HTTPException(404, "Link não encontrado")
+        
+        if not current_user.is_superuser and link.bot_id not in user_bot_ids:
+            raise HTTPException(403, "Acesso negado")
+        
+        # Busca todos os pedidos aprovados vinculados a este tracking_id
+        pedidos = db.query(Pedido).filter(
+            Pedido.tracking_id == link_id,
+            Pedido.status.in_(['paid', 'approved', 'active'])
+        ).all()
+        
+        # Breakdown por tipo
+        normais_vendas = 0
+        normais_fat = 0.0
+        upsell_vendas = 0
+        upsell_fat = 0.0
+        downsell_vendas = 0
+        downsell_fat = 0.0
+        
+        for p in pedidos:
+            nome_lower = str(p.plano_nome or "").lower()
+            valor = float(p.valor or 0)
+            
+            if "upsell:" in nome_lower:
+                upsell_vendas += 1
+                upsell_fat += valor
+            elif "downsell:" in nome_lower:
+                downsell_vendas += 1
+                downsell_fat += valor
+            else:
+                normais_vendas += 1
+                normais_fat += valor
+        
+        total_vendas = normais_vendas + upsell_vendas + downsell_vendas
+        total_fat = normais_fat + upsell_fat + downsell_fat
+        leads_count = link.leads if hasattr(link, 'leads') else link.clicks
+        conversao = round((total_vendas / leads_count * 100), 2) if leads_count > 0 else 0.0
+        
+        return {
+            "link_id": link.id,
+            "codigo": link.codigo,
+            "nome": link.nome,
+            "cliques": link.clicks or 0,
+            "leads": leads_count or 0,
+            "vendas_total": total_vendas,
+            "faturamento_total": round(total_fat, 2),
+            "conversao": conversao,
+            "breakdown": {
+                "normais": {"vendas": normais_vendas, "faturamento": round(normais_fat, 2)},
+                "upsell": {"vendas": upsell_vendas, "faturamento": round(upsell_fat, 2)},
+                "downsell": {"vendas": downsell_vendas, "faturamento": round(downsell_fat, 2)}
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro métricas link {link_id}: {e}")
+        raise HTTPException(500, "Erro interno")
+
+
+@app.get("/api/admin/tracking/chart")
+def get_tracking_chart(
+    days: int = 7,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Dados para gráfico de desempenho temporal (vendas por dia por código).
+    """
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        if not user_bot_ids:
+            return {"labels": [], "datasets": []}
+        
+        # Busca links do usuário
+        meus_links = db.query(TrackingLink).filter(
+            TrackingLink.bot_id.in_(user_bot_ids)
+        ).all()
+        
+        if not meus_links:
+            return {"labels": [], "datasets": []}
+        
+        link_ids = [l.id for l in meus_links]
+        link_map = {l.id: l.codigo for l in meus_links}
+        
+        # Período
+        now = now_brazil()
+        start_date = now - timedelta(days=days)
+        
+        # Busca pedidos aprovados no período
+        pedidos = db.query(Pedido).filter(
+            Pedido.tracking_id.in_(link_ids),
+            Pedido.status.in_(['paid', 'approved', 'active']),
+            Pedido.data_aprovacao >= start_date
+        ).all()
+        
+        # Gera labels (datas)
+        labels = []
+        for i in range(days):
+            d = start_date + timedelta(days=i+1)
+            labels.append(d.strftime("%d/%m"))
+        
+        # Agrupa vendas por código por dia
+        datasets_map = {}
+        
+        for p in pedidos:
+            if not p.tracking_id or not p.data_aprovacao:
+                continue
+            
+            codigo = link_map.get(p.tracking_id, "desconhecido")
+            dia_label = p.data_aprovacao.strftime("%d/%m")
+            
+            if codigo not in datasets_map:
+                datasets_map[codigo] = {label: 0 for label in labels}
+            
+            if dia_label in datasets_map[codigo]:
+                datasets_map[codigo][dia_label] += 1
+        
+        # Converte para formato final
+        datasets = []
+        for codigo, dias_data in datasets_map.items():
+            datasets.append({
+                "codigo": codigo,
+                "data": [dias_data.get(label, 0) for label in labels]
+            })
+        
+        return {"labels": labels, "datasets": datasets}
+        
+    except Exception as e:
+        logger.error(f"Erro tracking chart: {e}")
+        return {"labels": [], "datasets": []}
+
+
+@app.get("/api/admin/tracking/ranking")
+def get_tracking_ranking(
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Top códigos por faturamento com breakdown.
+    """
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        if not user_bot_ids:
+            return []
+        
+        # Busca links do usuário ordenados por faturamento
+        meus_links = db.query(TrackingLink).filter(
+            TrackingLink.bot_id.in_(user_bot_ids)
+        ).order_by(desc(TrackingLink.faturamento)).limit(limit).all()
+        
+        result = []
+        for link in meus_links:
+            # Busca pedidos para breakdown
+            pedidos = db.query(Pedido).filter(
+                Pedido.tracking_id == link.id,
+                Pedido.status.in_(['paid', 'approved', 'active'])
+            ).all()
+            
+            normais_fat = 0.0
+            normais_v = 0
+            upsell_fat = 0.0
+            upsell_v = 0
+            downsell_fat = 0.0
+            downsell_v = 0
+            
+            for p in pedidos:
+                nome_lower = str(p.plano_nome or "").lower()
+                valor = float(p.valor or 0)
+                
+                if "upsell:" in nome_lower:
+                    upsell_v += 1
+                    upsell_fat += valor
+                elif "downsell:" in nome_lower:
+                    downsell_v += 1
+                    downsell_fat += valor
+                else:
+                    normais_v += 1
+                    normais_fat += valor
+            
+            total_vendas = normais_v + upsell_v + downsell_v
+            total_fat = normais_fat + upsell_fat + downsell_fat
+            leads_count = link.leads if hasattr(link, 'leads') else link.clicks
+            conversao = round((total_vendas / leads_count * 100), 2) if leads_count and leads_count > 0 else 0.0
+            
+            result.append({
+                "id": link.id,
+                "codigo": link.codigo,
+                "nome": link.nome,
+                "cliques": link.clicks or 0,
+                "leads": leads_count or 0,
+                "vendas_total": total_vendas,
+                "faturamento_total": round(total_fat, 2),
+                "conversao": conversao,
+                "breakdown": {
+                    "normais": {"vendas": normais_v, "faturamento": round(normais_fat, 2)},
+                    "upsell": {"vendas": upsell_v, "faturamento": round(upsell_fat, 2)},
+                    "downsell": {"vendas": downsell_v, "faturamento": round(downsell_fat, 2)}
+                }
+            })
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Erro tracking ranking: {e}")
+        return []
+
 
 # =========================================================
 # 🧩 ROTAS DE PASSOS DINÂMICOS (FLOW V2)
@@ -7747,7 +7974,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             tem_order_bump=False,
                             created_at=now_brazil(),
                             status_funil='fundo',
-                            origem='upsell'
+                            origem='upsell',
+                            tracking_id=(db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first() or type('', (), {'tracking_id': None})).tracking_id
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -7847,7 +8075,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             tem_order_bump=False,
                             created_at=now_brazil(),
                             status_funil='fundo',
-                            origem='downsell'
+                            origem='downsell',
+                            tracking_id=(db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first() or type('', (), {'tracking_id': None})).tracking_id
                         )
                         db.add(novo_pedido)
                         db.commit()
