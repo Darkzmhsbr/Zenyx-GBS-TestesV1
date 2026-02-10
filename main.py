@@ -6505,8 +6505,70 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
 
+            # --- 🔄 VERIFICAR PAGAMENTO (check_payment_) ---
+            if data.startswith("check_payment_"):
+                try:
+                    txid = data.replace("check_payment_", "").strip()
+                    
+                    if not txid:
+                        bot_temp.answer_callback_query(
+                            update.callback_query.id,
+                            text="❌ Código de transação inválido.",
+                            show_alert=True
+                        )
+                        return {"status": "ok"}
+                    
+                    # Busca o pedido no banco
+                    pedido = db.query(Pedido).filter(
+                        (Pedido.transaction_id == txid) | (Pedido.txid == txid)
+                    ).first()
+                    
+                    if not pedido:
+                        bot_temp.answer_callback_query(
+                            update.callback_query.id,
+                            text="❌ Transação não encontrada. Tente novamente mais tarde.",
+                            show_alert=True
+                        )
+                        return {"status": "ok"}
+                    
+                    status = str(pedido.status).lower() if pedido.status else "pending"
+                    
+                    if status in ['paid', 'active', 'approved', 'completed', 'succeeded']:
+                        # ✅ Pagamento confirmado
+                        bot_temp.answer_callback_query(
+                            update.callback_query.id,
+                            text="✅ Pagamento CONFIRMADO! Seu acesso está sendo liberado.",
+                            show_alert=True
+                        )
+                    elif status == 'expired':
+                        # ⏰ PIX expirado
+                        bot_temp.answer_callback_query(
+                            update.callback_query.id,
+                            text="⏰ Este PIX expirou! Por favor, gere um novo pagamento.",
+                            show_alert=True
+                        )
+                    else:
+                        # ⏳ Ainda pendente
+                        bot_temp.answer_callback_query(
+                            update.callback_query.id,
+                            text="⏳ Pagamento ainda NÃO identificado.\n\nSe você já pagou, aguarde alguns instantes e tente novamente. O sistema verifica automaticamente.",
+                            show_alert=True
+                        )
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro no handler check_payment_: {e}", exc_info=True)
+                    try:
+                        bot_temp.answer_callback_query(
+                            update.callback_query.id,
+                            text="❌ Erro ao verificar pagamento. Tente novamente.",
+                            show_alert=True
+                        )
+                    except: pass
+                
+                return {"status": "ok"}
+
             # --- A) NAVEGAÇÃO (step_) COM AUTO-DESTRUIÇÃO INTELIGENTE ---
-            if data.startswith("step_"):
+            elif data.startswith("step_"):
                 try: current_step = int(data.split("_")[1])
                 except: current_step = 1
                 
