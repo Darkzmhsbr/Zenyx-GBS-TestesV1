@@ -1657,6 +1657,58 @@ async def get_current_superuser(current_user = Depends(get_current_user)):
     logger.info(f"👑 Super-admin acessando: {current_user.username}")
     return current_user
 
+
+# =========================================================
+# 🛡️ VERIFICAÇÃO DE USUÁRIO ATIVO
+# =========================================================
+def get_current_active_user(current_user: User = Depends(get_current_user)):
+    """
+    Verifica se o usuário logado está ativo.
+    Essencial para o sistema de Roles funcionar.
+    """
+    if not current_user.is_active:
+        raise HTTPException(status_code=400, detail="Usuário inativo")
+    return current_user
+
+
+# =========================================================
+# 🛡️ DECORATOR DE PERMISSÃO (RBAC)
+# =========================================================
+def require_role(allowed_roles: list):
+    """
+    Bloqueia a rota se o usuário não tiver um dos cargos permitidos.
+    Uso: current_user = Depends(require_role(["SUPER_ADMIN", "ADMIN"]))
+    """
+    def role_checker(user: User = Depends(get_current_active_user)):
+        # Super Admin (legado ou novo) tem passe livre
+        if getattr(user, 'is_superuser', False) or getattr(user, 'role', 'USER') == 'SUPER_ADMIN':
+            return user
+        
+        # Verifica se o cargo do usuário está na lista permitida
+        user_role = getattr(user, 'role', 'USER')
+        if user_role not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Acesso negado. Necessário cargo: {allowed_roles}"
+            )
+        return user
+    
+    return role_checker
+
+
+# =========================================================
+# 📋 SCHEMAS PARA CONFIG GLOBAL E BROADCAST
+# =========================================================
+class SystemConfigSchema(BaseModel):
+    default_fee: int = 60
+    master_pushin_pay_id: str = ""
+    maintenance_mode: bool = False
+
+class BroadcastSchema(BaseModel):
+    title: str
+    message: str
+    type: str = "info"
+
 # ============================================================
 # 🚀 ROTAS DA API - AUTO-REMARKETING
 # ============================================================
@@ -3021,8 +3073,14 @@ async def gerar_pix_pushinpay(
                 plataforma_id = get_plataforma_pushin_id(db)
                 
                 if plataforma_id:
-                    # Define a taxa (padrão: R$ 0,60)
-                    taxa_centavos = owner.taxa_venda or 60
+                    # Define a taxa: 1) User personalizada, 2) Config Global, 3) Padrão 60
+                    taxa_centavos = owner.taxa_venda
+                    if not taxa_centavos:
+                        try:
+                            cfg_fee = db.query(SystemConfig).filter(SystemConfig.key == "default_fee").first()
+                            taxa_centavos = int(cfg_fee.value) if cfg_fee and cfg_fee.value else 60
+                        except:
+                            taxa_centavos = 60
                     
                     # 🔥 CALCULA TAXA DA PUSHINPAY (aproximadamente 3%)
                     taxa_pushinpay_estimada = int(valor_centavos * 0.03)
@@ -3829,6 +3887,13 @@ async def gerar_pix(data: PixCreateRequest, db: Session = Depends(get_db)):
         taxa_centavos = 60 
         if membro_dono and hasattr(membro_dono, 'taxa_venda') and membro_dono.taxa_venda:
             taxa_centavos = int(membro_dono.taxa_venda)
+        else:
+            # Fallback: consulta config global
+            try:
+                cfg_fee = db.query(SystemConfig).filter(SystemConfig.key == "default_fee").first()
+                if cfg_fee and cfg_fee.value:
+                    taxa_centavos = int(cfg_fee.value)
+            except: pass
 
         # SUBSTITUA POR:
         logger.info(f"🔍 [DEBUG] Checando split:")
@@ -4809,6 +4874,13 @@ async def create_plan(bot_id: int, req: Request, db: Session = Depends(get_db)):
         db.refresh(novo_plano)
         
         logger.info(f"✅ Plano criado: {novo_plano.nome_exibicao} | Vitalício: {is_lifetime}")
+        
+        # 📋 AUDITORIA: Plano criado
+        try:
+            log_action(db=db, user_id=None, username="system", action="plan_created", resource_type="plan", 
+                       resource_id=novo_plano.id, description=f"Plano '{novo_plano.nome_exibicao}' criado (R$ {novo_plano.preco_atual:.2f})")
+        except: pass
+        
         return novo_plano
 
     except TypeError as te:
@@ -4920,8 +4992,17 @@ def delete_plan(bot_id: int, plano_id: int, db: Session = Depends(get_db)):
         db.query(RemarketingCampaign).filter(RemarketingCampaign.plano_id == plano_id).update({RemarketingCampaign.plano_id: None})
         db.query(Pedido).filter(Pedido.plano_id == plano_id).update({Pedido.plano_id: None})
         
+        nome_plano = plano.nome_exibicao
+        
         db.delete(plano)
         db.commit()
+        
+        # 📋 AUDITORIA: Plano deletado
+        try:
+            log_action(db=db, user_id=None, username="system", action="plan_deleted", resource_type="plan",
+                       resource_id=plano_id, description=f"Plano '{nome_plano}' deletado do bot {bot_id}")
+        except: pass
+        
         return {"status": "deleted"}
     except Exception as e:
         logger.error(f"Erro ao deletar plano: {e}")
@@ -6282,6 +6363,13 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             pedido.pagou_em = now
             
             db.commit()
+            
+            # 📋 AUDITORIA: Venda aprovada
+            try:
+                log_action(db=db, user_id=None, username="webhook", action="sale_approved", resource_type="pedido",
+                           resource_id=pedido.id, 
+                           description=f"Venda aprovada: {pedido.first_name} - {pedido.plano_nome} - R$ {pedido.valor:.2f}")
+            except: pass
             
             # ✅ CANCELAR REMARKETING (PAGAMENTO CONFIRMADO)
             try:
@@ -9106,6 +9194,14 @@ async def enviar_remarketing(
         
         logger.info(f"✅ Campanha {nova_campanha.id} registrada no banco")
         
+        # 📋 AUDITORIA: Campanha de remarketing criada
+        try:
+            log_action(db=db, user_id=current_user.id, username=current_user.username, 
+                       action="remarketing_campaign_created", resource_type="campaign",
+                       resource_id=nova_campanha.id, 
+                       description=f"Campanha remarketing criada (target: {payload.target}, bot: {payload.bot_id})")
+        except: pass
+        
         # =========================================================
         # 3. SE FOR TESTE, ENVIA SÍNCRONO (1 MENSAGEM APENAS)
         # =========================================================
@@ -11010,6 +11106,282 @@ def mark_one_read(
         db.commit()
     
     return {"status": "ok"}
+
+# =========================================================
+# 🤖 SUPER ADMIN - GERENCIAMENTO DE BOTS (NOVO)
+# =========================================================
+
+@app.get("/api/superadmin/bots")
+def list_all_bots_system(
+    page: int = 1,
+    per_page: int = 50,
+    search: str = None,
+    status: str = None,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """
+    Lista TODOS os bots do sistema (visão global).
+    Permite filtrar por nome do bot, username do bot ou username do DONO.
+    """
+    try:
+        if per_page > 100: per_page = 100
+        
+        # Query base com JOIN no dono
+        query = db.query(BotModel).outerjoin(User, BotModel.owner_id == User.id)
+        
+        # Filtro de Busca
+        if search:
+            search_term = f"%{search}%"
+            query = query.filter(
+                (BotModel.nome.ilike(search_term)) |
+                (BotModel.username.ilike(search_term)) |
+                (User.username.ilike(search_term)) |
+                (User.email.ilike(search_term))
+            )
+        
+        # Filtro de Status
+        if status and status != "todos":
+            query = query.filter(BotModel.status == status)
+            
+        total = query.count()
+        bots = query.order_by(BotModel.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
+        
+        bots_data = []
+        for bot in bots:
+            receita = db.query(func.sum(Pedido.valor)).filter(
+                Pedido.bot_id == bot.id,
+                Pedido.status.in_(['approved', 'paid', 'active'])
+            ).scalar() or 0.0
+            
+            vendas = db.query(Pedido).filter(
+                Pedido.bot_id == bot.id,
+                Pedido.status.in_(['approved', 'paid', 'active'])
+            ).count()
+            
+            leads = db.query(Lead).filter(Lead.bot_id == bot.id).count()
+            
+            dono = bot.owner if hasattr(bot, 'owner') and bot.owner else None
+            
+            bots_data.append({
+                "id": bot.id,
+                "nome": bot.nome,
+                "username": bot.username,
+                "status": bot.status,
+                "created_at": str(bot.created_at) if bot.created_at else None,
+                "owner": {
+                    "id": dono.id if dono else None,
+                    "username": dono.username if dono else "Sem dono",
+                    "email": dono.email if dono else None
+                },
+                "stats": {
+                    "receita": round(float(receita), 2),
+                    "vendas": vendas,
+                    "leads": leads
+                }
+            })
+        
+        return {
+            "bots": bots_data,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": (total + per_page - 1) // per_page
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao listar bots (superadmin): {e}")
+        raise HTTPException(500, str(e))
+
+
+@app.delete("/api/superadmin/bots/{bot_id}")
+def delete_bot_force(
+    bot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """Super Admin deleta qualquer bot (forçado)."""
+    try:
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+            
+        nome_bot = bot.nome
+        dono = bot.owner.username if hasattr(bot, 'owner') and bot.owner else "Desconhecido"
+        
+        db.delete(bot)
+        db.commit()
+        
+        # Log de Auditoria
+        try:
+            log = AuditLog(
+                user_id=current_superuser.id,
+                username=current_superuser.username,
+                action="bot_deleted_force",
+                resource_type="bot",
+                resource_id=bot_id,
+                description=f"Super Admin deletou bot '{nome_bot}' do usuário '{dono}'",
+                success=True
+            )
+            db.add(log)
+            db.commit()
+        except: pass
+                   
+        return {"message": f"Bot '{nome_bot}' deletado com sucesso"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro ao deletar bot forçado: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao deletar bot")
+
+
+@app.post("/api/superadmin/impersonate/{user_id}")
+def impersonate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """
+    Gera um token válido para acessar a conta de QUALQUER usuário.
+    Apenas SUPER_ADMIN pode fazer isso.
+    """
+    try:
+        target_user = db.query(User).filter(User.id == user_id).first()
+        if not target_user:
+            raise HTTPException(status_code=404, detail="Usuário alvo não encontrado")
+            
+        # Gera token para o alvo
+        access_token = create_access_token(
+            data={
+                "sub": target_user.username, 
+                "user_id": target_user.id
+            }
+        )
+        
+        has_bots = len(target_user.bots) > 0 if hasattr(target_user, 'bots') else False
+        
+        logger.warning(f"🕵️ IMPERSONATION: {current_superuser.username} entrou na conta de {target_user.username}")
+        
+        # Log de Auditoria
+        try:
+            log = AuditLog(
+                user_id=current_superuser.id,
+                username=current_superuser.username,
+                action="impersonate_user",
+                resource_type="user",
+                resource_id=user_id,
+                description=f"Impersonou usuário '{target_user.username}'",
+                success=True
+            )
+            db.add(log)
+            db.commit()
+        except: pass
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_id": target_user.id,
+            "username": target_user.username,
+            "has_bots": has_bots,
+            "is_impersonation": True
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro impersonation: {e}")
+        raise HTTPException(500, str(e))
+
+
+# =========================================================
+# ⚙️ CONFIG GLOBAL + BROADCAST (SUPER ADMIN)
+# =========================================================
+
+@app.get("/api/admin/config")
+def get_global_config(
+    db: Session = Depends(get_db), 
+    current_user = Depends(get_current_user)
+):
+    """Busca configurações globais do sistema."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Acesso negado")
+    
+    configs = db.query(SystemConfig).all()
+    config_map = {c.key: c.value for c in configs}
+    
+    return {
+        "default_fee": int(config_map.get("default_fee", "60")),
+        "master_pushin_pay_id": config_map.get("master_pushin_pay_id", ""),
+        "maintenance_mode": config_map.get("maintenance_mode", "false") == "true"
+    }
+
+
+@app.post("/api/admin/config")
+def update_global_config(
+    config: SystemConfigSchema, 
+    db: Session = Depends(get_db), 
+    current_user = Depends(get_current_user)
+):
+    """Salva configurações globais do sistema."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Acesso negado")
+    
+    def upsert(key, value):
+        item = db.query(SystemConfig).filter(SystemConfig.key == key).first()
+        if item:
+            item.value = str(value)
+        else:
+            db.add(SystemConfig(key=key, value=str(value)))
+    
+    try:
+        upsert("default_fee", config.default_fee)
+        upsert("master_pushin_pay_id", config.master_pushin_pay_id)
+        upsert("maintenance_mode", "true" if config.maintenance_mode else "false")
+        db.commit()
+        
+        logger.info(f"⚙️ Config global atualizada por {current_user.username}")
+        return {"message": "Configurações salvas com sucesso!"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/broadcast")
+def send_broadcast(
+    broadcast: BroadcastSchema, 
+    db: Session = Depends(get_db), 
+    current_user = Depends(get_current_user)
+):
+    """Envia notificação em massa para todos os usuários ativos."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Acesso negado")
+    
+    try:
+        users = db.query(User).filter(User.is_active == True).all()
+        count = 0
+        for user in users:
+            db.add(Notification(
+                user_id=user.id, 
+                title=broadcast.title, 
+                message=broadcast.message, 
+                type=broadcast.type
+            ))
+            count += 1
+        
+        db.commit()
+        
+        logger.info(f"📢 Broadcast enviado por {current_user.username} para {count} usuários")
+        return {"message": f"Notificação enviada para {count} usuários!"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro broadcast: {e}")
+        raise HTTPException(500, str(e))
+
 
 # ========================================================================
 # ENDPOINTS PÚBLICOS PARA LANDING PAGE
