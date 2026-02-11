@@ -13,6 +13,7 @@ import uuid
 from sqlalchemy.exc import IntegrityError
 import traceback  # 🔥 NOVO: Para logging detalhado de erros
 import asyncio  # 🔥 Garantir que asyncio está importado
+from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func, desc, text, and_, or_
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
@@ -37,6 +38,11 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from threading import Lock
+
+# =========================================================
+# 🧵 POOL DE THREADS GLOBAL (EVITA can't start new thread)
+# =========================================================
+thread_pool = ThreadPoolExecutor(max_workers=20, thread_name_prefix="zenyx")
 
 # =========================================================
 # ✅ IMPORTS CORRIGIDOS DO DATABASE
@@ -94,8 +100,11 @@ def agendar_destruicao_msg(bot, chat_id, message_id, delay_seconds=5):
             # Ignora erro se a mensagem já foi deletada ou não existe mais
             pass
 
-    # Inicia o timer em paralelo
-    threading.Thread(target=tarefa_destruir, daemon=True).start()
+    # Inicia via pool (evita criar threads infinitas)
+    try:
+        thread_pool.submit(tarefa_destruir)
+    except RuntimeError:
+        pass  # Pool cheio, ignora destruição
 
 # =========================================================
 # 🆓 FUNÇÃO: APROVAR ENTRADA NO CANAL FREE
@@ -234,10 +243,13 @@ def alternar_mensagens_pagamento(bot_instance, chat_id, bot_id):
                 # Aguarda próximo ciclo
                 time.sleep(rotation_interval)
         
-        # Inicia thread
-        thread = threading.Thread(target=loop_alternancia, daemon=True)
-        thread.start()
-        alternating_tasks[chat_id] = thread
+        # Inicia via pool (evita criar threads infinitas)
+        try:
+            future = thread_pool.submit(loop_alternancia)
+            alternating_tasks[chat_id] = future
+        except RuntimeError:
+            logger.warning(f"⚠️ Pool cheio, alternância para {chat_id} ignorada")
+            return
         
         logger.info(f"✅ Mensagens alternantes iniciadas para {chat_id} (bot {bot_id})")
         
@@ -426,8 +438,11 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
                         # Erros comuns: mensagem já apagada ou bot sem admin. Não quebra o sistema.
                         logger.warning(f"⚠️ Tentativa de auto-destruição falhou (pode já não existir): {e}")
                 
-                # Inicia a contagem em paralelo (Daemon thread) para não travar o envio de outros usuários
-                threading.Thread(target=auto_delete, daemon=True).start()
+                # Inicia a contagem via pool (evita criar threads infinitas)
+                try:
+                    thread_pool.submit(auto_delete)
+                except RuntimeError:
+                    pass
                 logger.info(f"⏳ Auto-destruição IMEDIATA agendada para {config.auto_destruct_seconds}s")
 
         logger.info(f"✅ [REMARKETING] Enviado com sucesso para {chat_id} (bot {bot_id})")
@@ -468,16 +483,16 @@ def agendar_remarketing_automatico(bot_instance, chat_id, bot_id):
             except:
                 pass
         
-        # Cria novo timer
-        timer = threading.Timer(
-            delay_seconds,
-            enviar_remarketing_automatico,
-            args=[bot_instance, chat_id, bot_id]
-        )
-        timer.daemon = True
-        timer.start()
+        # Cria tarefa com delay via pool (evita criar threads infinitas)
+        def delayed_remarketing():
+            time.sleep(delay_seconds)
+            enviar_remarketing_automatico(bot_instance, chat_id, bot_id)
         
-        remarketing_timers[chat_id] = timer
+        try:
+            future = thread_pool.submit(delayed_remarketing)
+            remarketing_timers[chat_id] = future
+        except RuntimeError:
+            logger.warning(f"⚠️ Pool cheio, remarketing para {chat_id} ignorado")
         
         logger.info(f"✅ Remarketing agendado para {chat_id} em {config.delay_minutes} minutos")
         
@@ -492,11 +507,14 @@ def cancelar_remarketing(chat_id):
     Cancela o remarketing agendado (usado quando usuário paga).
     """
     try:
-        # Cancela timer
+        # Cancela timer/future
         if chat_id in remarketing_timers:
-            timer = remarketing_timers.pop(chat_id, None)
-            if timer:
-                timer.cancel()
+            future = remarketing_timers.pop(chat_id, None)
+            if future:
+                try:
+                    future.cancel()  # Funciona para Future do ThreadPoolExecutor
+                except:
+                    pass
         
         # Cancela mensagens alternantes
         cancelar_alternacao_mensagens(chat_id)
@@ -2282,13 +2300,19 @@ def cancel_remarketing_for_user(chat_id: int):
         with remarketing_lock:
             # Cancela remarketing
             if chat_id in remarketing_timers:
-                remarketing_timers[chat_id].cancel()
+                try:
+                    remarketing_timers[chat_id].cancel()
+                except:
+                    pass
                 del remarketing_timers[chat_id]
                 canceled.append('remarketing')
             
             # Cancela alternating
             if chat_id in alternating_tasks:
-                alternating_tasks[chat_id].cancel()
+                try:
+                    alternating_tasks[chat_id].cancel()
+                except:
+                    pass
                 del alternating_tasks[chat_id]
                 canceled.append('alternating')
         
@@ -6379,11 +6403,17 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                     # Cancela timers
                     with remarketing_lock:
                         if chat_id_int in remarketing_timers:
-                            remarketing_timers[chat_id_int].cancel()
+                            try:
+                                remarketing_timers[chat_id_int].cancel()
+                            except:
+                                pass
                             del remarketing_timers[chat_id_int]
                         
                         if chat_id_int in alternating_tasks:
-                            alternating_tasks[chat_id_int].cancel()
+                            try:
+                                alternating_tasks[chat_id_int].cancel()
+                            except:
+                                pass
                             del alternating_tasks[chat_id_int]
                     
                     logger.info(f"✅ Remarketing cancelado: {chat_id_int}")
@@ -7371,8 +7401,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 except Exception as e:
                                     logger.warning(f"⚠️ Falha ao deletar msg (já deletada?): {e}")
 
-                            # Inicia a thread de destruição
-                            threading.Thread(target=auto_delete_task, daemon=True).start()
+                            # Inicia via pool (evita can't start new thread)
+                            try:
+                                thread_pool.submit(auto_delete_task)
+                            except RuntimeError:
+                                pass
                             
                             # Limpa do dicionário para não tentar deletar de novo
                             if chat_id in dict_pendente: del dict_pendente[chat_id]
@@ -7556,7 +7589,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 except Exception as e:
                                     logger.warning(f"⚠️ Falha ao deletar msg após clique (já deletada?): {e}")
 
-                            threading.Thread(target=auto_delete_after_click, daemon=True).start()
+                            try:
+                                thread_pool.submit(auto_delete_after_click)
+                            except RuntimeError:
+                                pass
                             
                             if chat_id in dict_pendente: del dict_pendente[chat_id]
                             if str(chat_id) in dict_pendente: del dict_pendente[str(chat_id)]
