@@ -9670,18 +9670,22 @@ def dashboard_stats(
     ✅ CORREÇÃO: Retorna valores em CENTAVOS (frontend divide por 100)
     """
     try:
-        # Converte datas
+        # Converte datas (UTC → Brasília para gráfico correto)
+        tz_br = timezone('America/Sao_Paulo')
+        
         if start_date:
-            start = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            start_utc = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+            start = start_utc.astimezone(tz_br)
         else:
             start = now_brazil() - timedelta(days=30)
         
         if end_date:
-            end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            end_utc = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+            end = end_utc.astimezone(tz_br)
         else:
             end = now_brazil()
         
-        logger.info(f"📊 Dashboard Stats - Período: {start.date()} a {end.date()}")
+        logger.info(f"📊 Dashboard Stats - Período: {start.date()} a {end.date()} (Brasília)")
         
         # 🔥 VERIFICA SE É SUPER ADMIN COM SPLIT
         is_super_with_split = (
@@ -9801,12 +9805,21 @@ def dashboard_stats(
         else:
             sales_today = sum(int(p.valor * 100) if p.valor else 0 for p in vendas_hoje)
         
-        # Leads do mês
+        # Leads do mês (para exibição)
         mes_start = now_brazil().replace(day=1, hour=0, minute=0, second=0)
         query_leads_mes = db.query(Lead).filter(Lead.created_at >= mes_start)
         if not is_super_with_split or bot_id:
              if bots_ids: query_leads_mes = query_leads_mes.filter(Lead.bot_id.in_(bots_ids))
         leads_mes = query_leads_mes.count()
+        
+        # Leads do período (mesma janela temporal das vendas - para taxa de conversão)
+        query_leads_periodo = db.query(Lead).filter(
+            Lead.created_at >= start,
+            Lead.created_at <= end
+        )
+        if not is_super_with_split or bot_id:
+             if bots_ids: query_leads_periodo = query_leads_periodo.filter(Lead.bot_id.in_(bots_ids))
+        leads_periodo = query_leads_periodo.count()
         
         # Leads de hoje
         query_leads_hoje = db.query(Lead).filter(Lead.created_at >= hoje_start)
@@ -9829,9 +9842,9 @@ def dashboard_stats(
         # Reembolsos (Placeholder)
         reembolsos = 0
         
-        # Taxa de conversão
-        if leads_mes > 0:
-            taxa_conversao = round((total_transacoes / leads_mes) * 100, 2)
+        # Taxa de conversão (usa leads do MESMO período das vendas)
+        if leads_periodo > 0:
+            taxa_conversao = round((total_transacoes / leads_periodo) * 100, 2)
         else:
             taxa_conversao = 0
         
