@@ -3495,7 +3495,8 @@ class OrderBumpCreate(BaseModel):
     nome_produto: str
     preco: float
     link_acesso: str
-    autodestruir: Optional[bool] = False  # <--- ADICIONE AQUI
+    group_id: Optional[int] = None  # ✅ FASE 2: Referência ao catálogo de Grupos
+    autodestruir: Optional[bool] = False
     msg_texto: Optional[str] = None
     msg_media: Optional[str] = None
     btn_aceitar: Optional[str] = "✅ SIM, ADICIONAR"
@@ -3507,6 +3508,7 @@ class UpsellCreate(BaseModel):
     nome_produto: str = ""
     preco: float = 0.0
     link_acesso: str = ""
+    group_id: Optional[int] = None  # ✅ FASE 2: Referência ao catálogo de Grupos
     delay_minutos: int = 2
     msg_texto: Optional[str] = "🔥 Oferta exclusiva para você!"
     msg_media: Optional[str] = None
@@ -3519,6 +3521,7 @@ class DownsellCreate(BaseModel):
     nome_produto: str = ""
     preco: float = 0.0
     link_acesso: str = ""
+    group_id: Optional[int] = None  # ✅ FASE 2: Referência ao catálogo de Grupos
     delay_minutos: int = 10
     msg_texto: Optional[str] = "🎁 Última chance! Oferta especial só para você!"
     msg_media: Optional[str] = None
@@ -5090,6 +5093,7 @@ def save_order_bump(
     bump.nome_produto = dados.nome_produto
     bump.preco = dados.preco
     bump.link_acesso = dados.link_acesso
+    bump.group_id = dados.group_id  # ✅ FASE 2
     bump.autodestruir = dados.autodestruir
     bump.msg_texto = dados.msg_texto
     bump.msg_media = dados.msg_media
@@ -5132,6 +5136,7 @@ def save_upsell(
     config.nome_produto = dados.nome_produto
     config.preco = dados.preco
     config.link_acesso = dados.link_acesso
+    config.group_id = dados.group_id  # ✅ FASE 2
     config.delay_minutos = dados.delay_minutos
     config.msg_texto = dados.msg_texto
     config.msg_media = dados.msg_media
@@ -5175,6 +5180,7 @@ def save_downsell(
     config.nome_produto = dados.nome_produto
     config.preco = dados.preco
     config.link_acesso = dados.link_acesso
+    config.group_id = dados.group_id  # ✅ FASE 2
     config.delay_minutos = dados.delay_minutos
     config.msg_texto = dados.msg_texto
     config.msg_media = dados.msg_media
@@ -6524,6 +6530,50 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                                     tb.send_message(int(target_id), "✅ Pagamento recebido!\n⚠️ Erro ao gerar link automático. Contate o suporte.")
                                 except: pass
                             
+                            # =========================================================
+                            # 📦 FASE 2: ENTREGA DE GRUPOS EXTRAS (CATÁLOGO)
+                            # Consulta bot_groups vinculados ao plano comprado
+                            # e gera convite automático para cada um
+                            # =========================================================
+                            try:
+                                if plano:
+                                    grupos_extras = db.query(BotGroup).filter(
+                                        BotGroup.bot_id == bot_data.id,
+                                        BotGroup.is_active == True
+                                    ).all()
+                                    
+                                    for grupo in grupos_extras:
+                                        # Verifica se este plano está vinculado ao grupo
+                                        plan_ids = grupo.plan_ids or []
+                                        if plano.id in plan_ids:
+                                            try:
+                                                grupo_canal_id = int(str(grupo.group_id).strip())
+                                                
+                                                # Desbanir antes
+                                                try:
+                                                    tb.unban_chat_member(grupo_canal_id, int(target_id))
+                                                except:
+                                                    pass
+                                                
+                                                # Gerar convite único
+                                                convite_extra = tb.create_chat_invite_link(
+                                                    chat_id=grupo_canal_id,
+                                                    member_limit=1,
+                                                    name=f"Extra {pedido.first_name} - {grupo.title}"
+                                                )
+                                                
+                                                msg_extra = (
+                                                    f"🎁 <b>BÔNUS: {grupo.title}</b>\n\n"
+                                                    f"👉 Acesse: {convite_extra.invite_link}"
+                                                )
+                                                tb.send_message(int(target_id), msg_extra, parse_mode="HTML")
+                                                logger.info(f"✅ Grupo extra entregue: {grupo.title} para {target_id}")
+                                                
+                                            except Exception as e_grupo:
+                                                logger.error(f"❌ Erro ao entregar grupo extra '{grupo.title}': {e_grupo}")
+                            except Exception as e_grupos:
+                                logger.error(f"⚠️ Erro geral ao entregar grupos extras: {e_grupos}")
+                            
                             # Entrega Order Bump (só para planos normais)
                             if pedido.tem_order_bump:
                                 try:
@@ -6531,14 +6581,53 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                                         OrderBumpConfig.bot_id == bot_data.id
                                     ).first()
                                     
-                                    if bump_config and bump_config.link_acesso:
-                                        msg_bump = (
-                                            f"🎁 <b>BÔNUS LIBERADO!</b>\n\n"
-                                            f"👉 <b>{bump_config.nome_produto}</b>\n"
-                                            f"🔗 {bump_config.link_acesso}"
-                                        )
-                                        tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
-                                        logger.info("✅ Order Bump entregue")
+                                    if bump_config:
+                                        # ✅ FASE 2: Se tem group_id, gera convite automático
+                                        if bump_config.group_id:
+                                            try:
+                                                grupo_bump = db.query(BotGroup).filter(
+                                                    BotGroup.id == bump_config.group_id,
+                                                    BotGroup.is_active == True
+                                                ).first()
+                                                
+                                                if grupo_bump:
+                                                    bump_canal_id = int(str(grupo_bump.group_id).strip())
+                                                    try:
+                                                        tb.unban_chat_member(bump_canal_id, int(target_id))
+                                                    except:
+                                                        pass
+                                                    convite_bump = tb.create_chat_invite_link(
+                                                        chat_id=bump_canal_id,
+                                                        member_limit=1,
+                                                        name=f"Bump {pedido.first_name}"
+                                                    )
+                                                    msg_bump = (
+                                                        f"🎁 <b>BÔNUS LIBERADO!</b>\n\n"
+                                                        f"👉 <b>{bump_config.nome_produto}</b>\n"
+                                                        f"🔗 Acesse: {convite_bump.invite_link}"
+                                                    )
+                                                    tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
+                                                    logger.info("✅ Order Bump entregue (convite automático)")
+                                            except Exception as e_bump_auto:
+                                                logger.error(f"❌ Erro bump automático: {e_bump_auto}")
+                                                # Fallback: usa link_acesso manual
+                                                if bump_config.link_acesso:
+                                                    msg_bump = (
+                                                        f"🎁 <b>BÔNUS LIBERADO!</b>\n\n"
+                                                        f"👉 <b>{bump_config.nome_produto}</b>\n"
+                                                        f"🔗 {bump_config.link_acesso}"
+                                                    )
+                                                    tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
+                                        
+                                        # Sem group_id → usa link_acesso como antes
+                                        elif bump_config.link_acesso:
+                                            msg_bump = (
+                                                f"🎁 <b>BÔNUS LIBERADO!</b>\n\n"
+                                                f"👉 <b>{bump_config.nome_produto}</b>\n"
+                                                f"🔗 {bump_config.link_acesso}"
+                                            )
+                                            tb.send_message(int(target_id), msg_bump, parse_mode="HTML")
+                                            logger.info("✅ Order Bump entregue (link manual)")
                                 except Exception as e_bump:
                                     logger.error(f"❌ Erro Bump: {e_bump}")
                         
@@ -6594,17 +6683,53 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                             elif "upsell:" in plano_nome_lower:
                                 # Entrega acesso do upsell
                                 upsell_cfg = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_data.id).first()
-                                if upsell_cfg and upsell_cfg.link_acesso:
-                                    try:
-                                        msg_upsell_entrega = (
-                                            f"🎉 <b>UPSELL LIBERADO!</b>\n\n"
-                                            f"📦 <b>{upsell_cfg.nome_produto}</b>\n"
-                                            f"🔗 Acesse: {upsell_cfg.link_acesso}"
-                                        )
-                                        tb.send_message(int(target_id), msg_upsell_entrega, parse_mode="HTML")
-                                        logger.info(f"✅ Upsell entregue para {target_id}")
-                                    except Exception as e_up:
-                                        logger.error(f"❌ Erro entrega upsell: {e_up}")
+                                if upsell_cfg:
+                                    # ✅ FASE 2: Se tem group_id, gera convite automático
+                                    if upsell_cfg.group_id:
+                                        try:
+                                            grupo_up = db.query(BotGroup).filter(
+                                                BotGroup.id == upsell_cfg.group_id,
+                                                BotGroup.is_active == True
+                                            ).first()
+                                            if grupo_up:
+                                                up_canal_id = int(str(grupo_up.group_id).strip())
+                                                try:
+                                                    tb.unban_chat_member(up_canal_id, int(target_id))
+                                                except:
+                                                    pass
+                                                convite_up = tb.create_chat_invite_link(
+                                                    chat_id=up_canal_id,
+                                                    member_limit=1,
+                                                    name=f"Upsell {pedido.first_name}"
+                                                )
+                                                msg_upsell_entrega = (
+                                                    f"🎉 <b>UPSELL LIBERADO!</b>\n\n"
+                                                    f"📦 <b>{upsell_cfg.nome_produto}</b>\n"
+                                                    f"🔗 Acesse: {convite_up.invite_link}"
+                                                )
+                                                tb.send_message(int(target_id), msg_upsell_entrega, parse_mode="HTML")
+                                                logger.info(f"✅ Upsell entregue (convite automático) para {target_id}")
+                                        except Exception as e_up_auto:
+                                            logger.error(f"❌ Erro upsell automático: {e_up_auto}")
+                                            # Fallback: link manual
+                                            if upsell_cfg.link_acesso:
+                                                msg_upsell_entrega = (
+                                                    f"🎉 <b>UPSELL LIBERADO!</b>\n\n"
+                                                    f"📦 <b>{upsell_cfg.nome_produto}</b>\n"
+                                                    f"🔗 Acesse: {upsell_cfg.link_acesso}"
+                                                )
+                                                tb.send_message(int(target_id), msg_upsell_entrega, parse_mode="HTML")
+                                    elif upsell_cfg.link_acesso:
+                                        try:
+                                            msg_upsell_entrega = (
+                                                f"🎉 <b>UPSELL LIBERADO!</b>\n\n"
+                                                f"📦 <b>{upsell_cfg.nome_produto}</b>\n"
+                                                f"🔗 Acesse: {upsell_cfg.link_acesso}"
+                                            )
+                                            tb.send_message(int(target_id), msg_upsell_entrega, parse_mode="HTML")
+                                            logger.info(f"✅ Upsell entregue (link manual) para {target_id}")
+                                        except Exception as e_up:
+                                            logger.error(f"❌ Erro entrega upsell: {e_up}")
                                 
                                 # Agora agenda o DOWNSELL
                                 downsell_cfg = db.query(DownsellConfig).filter(
@@ -6626,17 +6751,52 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                             # Se for pagamento de DOWNSELL → entrega acesso
                             elif "downsell:" in plano_nome_lower:
                                 downsell_cfg = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_data.id).first()
-                                if downsell_cfg and downsell_cfg.link_acesso:
-                                    try:
-                                        msg_down_entrega = (
-                                            f"🎉 <b>ACESSO LIBERADO!</b>\n\n"
-                                            f"📦 <b>{downsell_cfg.nome_produto}</b>\n"
-                                            f"🔗 Acesse: {downsell_cfg.link_acesso}"
-                                        )
-                                        tb.send_message(int(target_id), msg_down_entrega, parse_mode="HTML")
-                                        logger.info(f"✅ Downsell entregue para {target_id}")
-                                    except Exception as e_down:
-                                        logger.error(f"❌ Erro entrega downsell: {e_down}")
+                                if downsell_cfg:
+                                    # ✅ FASE 2: Se tem group_id, gera convite automático
+                                    if downsell_cfg.group_id:
+                                        try:
+                                            grupo_down = db.query(BotGroup).filter(
+                                                BotGroup.id == downsell_cfg.group_id,
+                                                BotGroup.is_active == True
+                                            ).first()
+                                            if grupo_down:
+                                                down_canal_id = int(str(grupo_down.group_id).strip())
+                                                try:
+                                                    tb.unban_chat_member(down_canal_id, int(target_id))
+                                                except:
+                                                    pass
+                                                convite_down = tb.create_chat_invite_link(
+                                                    chat_id=down_canal_id,
+                                                    member_limit=1,
+                                                    name=f"Downsell {pedido.first_name}"
+                                                )
+                                                msg_down_entrega = (
+                                                    f"🎉 <b>ACESSO LIBERADO!</b>\n\n"
+                                                    f"📦 <b>{downsell_cfg.nome_produto}</b>\n"
+                                                    f"🔗 Acesse: {convite_down.invite_link}"
+                                                )
+                                                tb.send_message(int(target_id), msg_down_entrega, parse_mode="HTML")
+                                                logger.info(f"✅ Downsell entregue (convite automático) para {target_id}")
+                                        except Exception as e_down_auto:
+                                            logger.error(f"❌ Erro downsell automático: {e_down_auto}")
+                                            if downsell_cfg.link_acesso:
+                                                msg_down_entrega = (
+                                                    f"🎉 <b>ACESSO LIBERADO!</b>\n\n"
+                                                    f"📦 <b>{downsell_cfg.nome_produto}</b>\n"
+                                                    f"🔗 Acesse: {downsell_cfg.link_acesso}"
+                                                )
+                                                tb.send_message(int(target_id), msg_down_entrega, parse_mode="HTML")
+                                    elif downsell_cfg.link_acesso:
+                                        try:
+                                            msg_down_entrega = (
+                                                f"🎉 <b>ACESSO LIBERADO!</b>\n\n"
+                                                f"📦 <b>{downsell_cfg.nome_produto}</b>\n"
+                                                f"🔗 Acesse: {downsell_cfg.link_acesso}"
+                                            )
+                                            tb.send_message(int(target_id), msg_down_entrega, parse_mode="HTML")
+                                            logger.info(f"✅ Downsell entregue (link manual) para {target_id}")
+                                        except Exception as e_down:
+                                            logger.error(f"❌ Erro entrega downsell: {e_down}")
                                         
                         except Exception as e_upsell_schedule:
                             logger.error(f"⚠️ Erro ao agendar upsell/downsell: {e_upsell_schedule}")
@@ -12829,6 +12989,133 @@ async def migrate_alternating_duration(db: Session = Depends(get_db)):
         return {
             "status": "success",
             "message": "✅ Migração concluída!",
+            "resultados": resultados
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"❌ Erro geral na migração: {str(e)}",
+            "detalhes": str(e)
+        }
+# ============================================================
+# 🔧 ROTA DE MIGRAÇÃO - GRUPOS E CANAIS (FASE 1 + FASE 2)
+# ============================================================
+@app.get("/migrate-bot-groups")
+async def migrate_bot_groups(db: Session = Depends(get_db)):
+    """
+    🔥 Migração Manual: Cria a tabela bot_groups e adiciona colunas group_id
+    nas tabelas de ofertas (order_bump_config, upsell_config, downsell_config).
+    Acesse: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-bot-groups
+    """
+    try:
+        from sqlalchemy import text
+        
+        resultados = []
+        
+        # 1. Criar tabela bot_groups
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS bot_groups (
+                    id SERIAL PRIMARY KEY,
+                    bot_id INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                    owner_id INTEGER NOT NULL REFERENCES users(id),
+                    title VARCHAR NOT NULL,
+                    group_id VARCHAR NOT NULL,
+                    link VARCHAR,
+                    plan_ids JSON DEFAULT '[]'::json,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+            """))
+            db.commit()
+            resultados.append("✅ Tabela 'bot_groups' criada com sucesso!")
+        except Exception as e:
+            db.rollback()
+            if "already exists" in str(e).lower():
+                resultados.append("ℹ️ Tabela 'bot_groups' já existe")
+            else:
+                resultados.append(f"❌ Erro ao criar tabela 'bot_groups': {str(e)}")
+        
+        # 2. Criar índices
+        try:
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_bot_groups_bot_id ON bot_groups(bot_id);"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_bot_groups_owner_id ON bot_groups(owner_id);"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_bot_groups_is_active ON bot_groups(is_active);"))
+            db.commit()
+            resultados.append("✅ Índices criados com sucesso!")
+        except Exception as e:
+            db.rollback()
+            resultados.append(f"⚠️ Índices: {str(e)}")
+        
+        # 3. Adicionar coluna group_id na order_bump_config
+        try:
+            db.execute(text("""
+                ALTER TABLE order_bump_config 
+                ADD COLUMN group_id INTEGER REFERENCES bot_groups(id) ON DELETE SET NULL;
+            """))
+            db.commit()
+            resultados.append("✅ Coluna 'group_id' adicionada em order_bump_config!")
+        except Exception as e:
+            db.rollback()
+            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                resultados.append("ℹ️ Coluna 'group_id' já existe em order_bump_config")
+            else:
+                resultados.append(f"❌ Erro order_bump_config: {str(e)}")
+        
+        # 4. Adicionar coluna group_id na upsell_config
+        try:
+            db.execute(text("""
+                ALTER TABLE upsell_config 
+                ADD COLUMN group_id INTEGER REFERENCES bot_groups(id) ON DELETE SET NULL;
+            """))
+            db.commit()
+            resultados.append("✅ Coluna 'group_id' adicionada em upsell_config!")
+        except Exception as e:
+            db.rollback()
+            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                resultados.append("ℹ️ Coluna 'group_id' já existe em upsell_config")
+            else:
+                resultados.append(f"❌ Erro upsell_config: {str(e)}")
+        
+        # 5. Adicionar coluna group_id na downsell_config
+        try:
+            db.execute(text("""
+                ALTER TABLE downsell_config 
+                ADD COLUMN group_id INTEGER REFERENCES bot_groups(id) ON DELETE SET NULL;
+            """))
+            db.commit()
+            resultados.append("✅ Coluna 'group_id' adicionada em downsell_config!")
+        except Exception as e:
+            db.rollback()
+            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                resultados.append("ℹ️ Coluna 'group_id' já existe em downsell_config")
+            else:
+                resultados.append(f"❌ Erro downsell_config: {str(e)}")
+        
+        # 6. Verificar estrutura final
+        try:
+            resultado = db.execute(text("""
+                SELECT table_name, column_name, data_type 
+                FROM information_schema.columns 
+                WHERE (table_name = 'bot_groups')
+                OR (table_name IN ('order_bump_config', 'upsell_config', 'downsell_config') AND column_name = 'group_id')
+                ORDER BY table_name, column_name;
+            """))
+            colunas = resultado.fetchall()
+            
+            if colunas:
+                resultados.append("📊 Estrutura verificada:")
+                for col in colunas:
+                    resultados.append(f"   - {col[0]}.{col[1]}: {col[2]}")
+        except Exception as e:
+            resultados.append(f"⚠️ Erro ao verificar estrutura: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "✅ Migração Grupos e Canais concluída!",
             "resultados": resultados
         }
         

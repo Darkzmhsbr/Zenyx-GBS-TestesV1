@@ -162,6 +162,9 @@ class OrderBumpConfig(Base):
     preco = Column(Float)         # Valor a ser somado
     link_acesso = Column(String, nullable=True) # Link do canal/grupo extra
 
+    # ✅ FASE 2: Referência ao catálogo de Grupos e Canais
+    group_id = Column(Integer, ForeignKey('bot_groups.id', ondelete='SET NULL'), nullable=True)
+
     autodestruir = Column(Boolean, default=False)
     
     # Conteúdo da Oferta
@@ -186,6 +189,9 @@ class UpsellConfig(Base):
     nome_produto = Column(String)
     preco = Column(Float)
     link_acesso = Column(String, nullable=True)
+    
+    # ✅ FASE 2: Referência ao catálogo de Grupos e Canais
+    group_id = Column(Integer, ForeignKey('bot_groups.id', ondelete='SET NULL'), nullable=True)
     
     # Delay em minutos após pagamento do plano principal
     delay_minutos = Column(Integer, default=2)
@@ -218,6 +224,9 @@ class DownsellConfig(Base):
     nome_produto = Column(String)
     preco = Column(Float)
     link_acesso = Column(String, nullable=True)
+    
+    # ✅ FASE 2: Referência ao catálogo de Grupos e Canais
+    group_id = Column(Integer, ForeignKey('bot_groups.id', ondelete='SET NULL'), nullable=True)
     
     # Delay em minutos após pagamento do upsell
     delay_minutos = Column(Integer, default=10)
