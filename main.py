@@ -77,7 +77,9 @@ from database import (
     CanalFreeConfig,
     # ✅ NOVOS IMPORTS PARA UPSELL/DOWNSELL
     UpsellConfig,
-    DownsellConfig
+    DownsellConfig,
+    # ✅ NOVO IMPORT PARA GRUPOS E CANAIS
+    BotGroup
 )
 
 import update_db 
@@ -3523,6 +3525,23 @@ class DownsellCreate(BaseModel):
     btn_aceitar: Optional[str] = "✅ QUERO ESSA OFERTA!"
     btn_recusar: Optional[str] = "❌ NÃO, OBRIGADO"
     autodestruir: Optional[bool] = False
+
+# =========================================================
+# 📦 GRUPOS E CANAIS - PYDANTIC MODELS
+# =========================================================
+class BotGroupCreate(BaseModel):
+    title: str
+    group_id: str
+    link: Optional[str] = None
+    plan_ids: Optional[List[int]] = []
+    is_active: Optional[bool] = True
+
+class BotGroupUpdate(BaseModel):
+    title: Optional[str] = None
+    group_id: Optional[str] = None
+    link: Optional[str] = None
+    plan_ids: Optional[List[int]] = None
+    is_active: Optional[bool] = None
 
 class IntegrationUpdate(BaseModel):
     token: str
@@ -9648,6 +9667,371 @@ def get_canais_disponiveis(
     except Exception as e:
         logger.error(f"❌ Erro ao buscar canais: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# =========================================================
+# 📦 GRUPOS E CANAIS - CATÁLOGO DE PRODUTOS (ESTEIRA)
+# =========================================================
+
+@app.get("/api/admin/bots/{bot_id}/groups")
+def list_bot_groups(
+    bot_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Lista todos os grupos/canais extras cadastrados para o bot"""
+    try:
+        # Verificar permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        # Buscar grupos do bot
+        groups = db.query(BotGroup).filter(
+            BotGroup.bot_id == bot_id
+        ).order_by(BotGroup.created_at.desc()).all()
+        
+        # Buscar planos do bot para enriquecer a resposta
+        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
+        planos_map = {p.id: p.nome_exibicao for p in planos}
+        
+        result = []
+        for g in groups:
+            plan_ids = g.plan_ids or []
+            plan_names = [planos_map.get(pid, f"Plano #{pid}") for pid in plan_ids]
+            
+            result.append({
+                "id": g.id,
+                "bot_id": g.bot_id,
+                "title": g.title,
+                "group_id": g.group_id,
+                "link": g.link,
+                "plan_ids": plan_ids,
+                "plan_names": plan_names,
+                "is_active": g.is_active,
+                "created_at": g.created_at.isoformat() if g.created_at else None,
+                "updated_at": g.updated_at.isoformat() if g.updated_at else None
+            })
+        
+        return {"groups": result, "total": len(result)}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao listar grupos do bot {bot_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/bots/{bot_id}/groups")
+def create_bot_group(
+    bot_id: int,
+    data: BotGroupCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Cria um novo grupo/canal extra para o bot"""
+    try:
+        # Verificar permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        # Validações
+        if not data.title or not data.title.strip():
+            raise HTTPException(status_code=400, detail="Título é obrigatório")
+        
+        if not data.group_id or not data.group_id.strip():
+            raise HTTPException(status_code=400, detail="ID do grupo é obrigatório")
+        
+        # Verificar se já existe um grupo com mesmo group_id para este bot
+        existing = db.query(BotGroup).filter(
+            BotGroup.bot_id == bot_id,
+            BotGroup.group_id == data.group_id.strip()
+        ).first()
+        
+        if existing:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Já existe um grupo cadastrado com o ID {data.group_id} neste bot"
+            )
+        
+        # Validar se os plan_ids existem para este bot
+        if data.plan_ids:
+            planos_existentes = db.query(PlanoConfig.id).filter(
+                PlanoConfig.bot_id == bot_id,
+                PlanoConfig.id.in_(data.plan_ids)
+            ).all()
+            ids_validos = [p.id for p in planos_existentes]
+            ids_invalidos = [pid for pid in data.plan_ids if pid not in ids_validos]
+            if ids_invalidos:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Planos não encontrados: {ids_invalidos}"
+                )
+        
+        # Criar grupo
+        new_group = BotGroup(
+            bot_id=bot_id,
+            owner_id=current_user.id,
+            title=data.title.strip(),
+            group_id=data.group_id.strip(),
+            link=data.link.strip() if data.link else None,
+            plan_ids=data.plan_ids or [],
+            is_active=data.is_active if data.is_active is not None else True
+        )
+        
+        db.add(new_group)
+        db.commit()
+        db.refresh(new_group)
+        
+        logger.info(f"✅ Grupo criado: '{new_group.title}' (ID: {new_group.group_id}) para Bot {bot_id}")
+        
+        # Audit Log
+        try:
+            audit = AuditLog(
+                user_id=current_user.id,
+                username=current_user.username,
+                action="group_created",
+                resource_type="bot_group",
+                resource_id=new_group.id,
+                description=f"Grupo '{new_group.title}' criado para Bot {bot_id}",
+                success=True
+            )
+            db.add(audit)
+            db.commit()
+        except Exception:
+            pass
+        
+        return {
+            "id": new_group.id,
+            "bot_id": new_group.bot_id,
+            "title": new_group.title,
+            "group_id": new_group.group_id,
+            "link": new_group.link,
+            "plan_ids": new_group.plan_ids,
+            "is_active": new_group.is_active,
+            "created_at": new_group.created_at.isoformat() if new_group.created_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro ao criar grupo: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/admin/bots/{bot_id}/groups/{group_id}")
+def update_bot_group(
+    bot_id: int,
+    group_id: int,
+    data: BotGroupUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Atualiza um grupo/canal extra existente"""
+    try:
+        # Verificar permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        # Buscar grupo
+        group = db.query(BotGroup).filter(
+            BotGroup.id == group_id,
+            BotGroup.bot_id == bot_id
+        ).first()
+        
+        if not group:
+            raise HTTPException(status_code=404, detail="Grupo não encontrado")
+        
+        # Atualizar campos (apenas os que foram enviados)
+        if data.title is not None:
+            if not data.title.strip():
+                raise HTTPException(status_code=400, detail="Título não pode ser vazio")
+            group.title = data.title.strip()
+        
+        if data.group_id is not None:
+            if not data.group_id.strip():
+                raise HTTPException(status_code=400, detail="ID do grupo não pode ser vazio")
+            # Verificar duplicidade (excluindo o próprio registro)
+            existing = db.query(BotGroup).filter(
+                BotGroup.bot_id == bot_id,
+                BotGroup.group_id == data.group_id.strip(),
+                BotGroup.id != group_id
+            ).first()
+            if existing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Já existe outro grupo com o ID {data.group_id}"
+                )
+            group.group_id = data.group_id.strip()
+        
+        if data.link is not None:
+            group.link = data.link.strip() if data.link else None
+        
+        if data.plan_ids is not None:
+            # Validar planos
+            if data.plan_ids:
+                planos_existentes = db.query(PlanoConfig.id).filter(
+                    PlanoConfig.bot_id == bot_id,
+                    PlanoConfig.id.in_(data.plan_ids)
+                ).all()
+                ids_validos = [p.id for p in planos_existentes]
+                ids_invalidos = [pid for pid in data.plan_ids if pid not in ids_validos]
+                if ids_invalidos:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Planos não encontrados: {ids_invalidos}"
+                    )
+            group.plan_ids = data.plan_ids
+        
+        if data.is_active is not None:
+            group.is_active = data.is_active
+        
+        db.commit()
+        db.refresh(group)
+        
+        logger.info(f"✅ Grupo atualizado: '{group.title}' (ID: {group.group_id}) - Bot {bot_id}")
+        
+        return {
+            "id": group.id,
+            "bot_id": group.bot_id,
+            "title": group.title,
+            "group_id": group.group_id,
+            "link": group.link,
+            "plan_ids": group.plan_ids,
+            "is_active": group.is_active,
+            "created_at": group.created_at.isoformat() if group.created_at else None,
+            "updated_at": group.updated_at.isoformat() if group.updated_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro ao atualizar grupo {group_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/admin/bots/{bot_id}/groups/{group_id}")
+def delete_bot_group(
+    bot_id: int,
+    group_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Remove um grupo/canal extra do bot"""
+    try:
+        # Verificar permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        # Buscar grupo
+        group = db.query(BotGroup).filter(
+            BotGroup.id == group_id,
+            BotGroup.bot_id == bot_id
+        ).first()
+        
+        if not group:
+            raise HTTPException(status_code=404, detail="Grupo não encontrado")
+        
+        group_title = group.title
+        group_telegram_id = group.group_id
+        
+        db.delete(group)
+        db.commit()
+        
+        logger.info(f"🗑️ Grupo removido: '{group_title}' (ID: {group_telegram_id}) - Bot {bot_id}")
+        
+        # Audit Log
+        try:
+            audit = AuditLog(
+                user_id=current_user.id,
+                username=current_user.username,
+                action="group_deleted",
+                resource_type="bot_group",
+                resource_id=group_id,
+                description=f"Grupo '{group_title}' removido do Bot {bot_id}",
+                success=True
+            )
+            db.add(audit)
+            db.commit()
+        except Exception:
+            pass
+        
+        return {"status": "ok", "message": f"Grupo '{group_title}' removido com sucesso"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro ao deletar grupo {group_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/bots/{bot_id}/groups/{group_id}")
+def get_bot_group(
+    bot_id: int,
+    group_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Retorna detalhes de um grupo/canal específico"""
+    try:
+        # Verificar permissão
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(status_code=404, detail="Bot não encontrado")
+        
+        if bot.owner_id != current_user.id and not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        group = db.query(BotGroup).filter(
+            BotGroup.id == group_id,
+            BotGroup.bot_id == bot_id
+        ).first()
+        
+        if not group:
+            raise HTTPException(status_code=404, detail="Grupo não encontrado")
+        
+        # Enriquecer com nomes dos planos
+        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
+        planos_map = {p.id: p.nome_exibicao for p in planos}
+        plan_ids = group.plan_ids or []
+        plan_names = [planos_map.get(pid, f"Plano #{pid}") for pid in plan_ids]
+        
+        return {
+            "id": group.id,
+            "bot_id": group.bot_id,
+            "title": group.title,
+            "group_id": group.group_id,
+            "link": group.link,
+            "plan_ids": plan_ids,
+            "plan_names": plan_names,
+            "is_active": group.is_active,
+            "created_at": group.created_at.isoformat() if group.created_at else None,
+            "updated_at": group.updated_at.isoformat() if group.updated_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao buscar grupo {group_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # =========================================================
 # 📊 ROTA DE DASHBOARD V2 (COM FILTRO DE DATA E SUPORTE ADMIN)

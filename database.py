@@ -136,6 +136,9 @@ class Bot(Base):
     remarketing_config = relationship("RemarketingConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     alternating_messages = relationship("AlternatingMessages", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     remarketing_logs = relationship("RemarketingLog", back_populates="bot", cascade="all, delete-orphan")
+    
+    # ✅ NOVO: GRUPOS E CANAIS (ESTEIRA DE PRODUTOS)
+    bot_groups = relationship("BotGroup", back_populates="bot", cascade="all, delete-orphan")
 
 class BotAdmin(Base):
     __tablename__ = "bot_admins"
@@ -795,3 +798,45 @@ class CanalFreeConfig(Base):
     
     def __repr__(self):
         return f"<CanalFreeConfig(bot_id={self.bot_id}, canal={self.canal_name}, active={self.is_active})>"
+
+# =========================================================
+# 📦 GRUPOS E CANAIS (ESTEIRA DE PRODUTOS / CATÁLOGO)
+# =========================================================
+class BotGroup(Base):
+    """
+    Catálogo de grupos/canais extras vinculados a um bot.
+    Permite criar uma esteira de produtos onde cada grupo pode
+    ser associado a planos específicos, Order Bumps, Upsells e Downsells.
+    
+    Exemplo de uso:
+    - Produto Principal: Canal VIP (registrado na criação do bot)
+    - Produto Upsell: Canal Premium (cadastrado aqui)
+    - Produto Downsell: Grupo de Bônus (cadastrado aqui)
+    """
+    __tablename__ = "bot_groups"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey('bots.id', ondelete='CASCADE'), nullable=False, index=True)
+    owner_id = Column(Integer, ForeignKey('users.id'), nullable=False, index=True)
+    
+    # Identificação do Grupo/Canal
+    title = Column(String, nullable=False)          # Ex: "Grupo de Dietas", "Canal Premium"
+    group_id = Column(String, nullable=False)        # ID do Telegram: "-1001234567890"
+    link = Column(String, nullable=True)             # Link de convite: "t.me/+abc123"
+    
+    # Planos vinculados (quais planos dão acesso a este grupo)
+    plan_ids = Column(JSON, default=[])              # Ex: [1, 3, 5]
+    
+    # Status
+    is_active = Column(Boolean, default=True, index=True)
+    
+    # Auditoria
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
+    
+    # Relacionamentos
+    bot = relationship("Bot", back_populates="bot_groups")
+    owner = relationship("User")
+    
+    def __repr__(self):
+        return f"<BotGroup(id={self.id}, bot_id={self.bot_id}, title='{self.title}', group_id='{self.group_id}', active={self.is_active})>"
