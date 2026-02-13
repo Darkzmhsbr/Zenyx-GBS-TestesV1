@@ -42,7 +42,7 @@ from threading import Lock
 # =========================================================
 # 🧵 POOL DE THREADS GLOBAL (EVITA can't start new thread)
 # =========================================================
-thread_pool = ThreadPoolExecutor(max_workers=20, thread_name_prefix="zenyx")
+thread_pool = ThreadPoolExecutor(max_workers=10, thread_name_prefix="zenyx")
 
 # =========================================================
 # ✅ IMPORTS CORRIGIDOS DO DATABASE
@@ -115,13 +115,29 @@ def aprovar_entrada_canal_free(bot_token: str, canal_id: str, user_id: int):
     """
     Aprova entrada do usuário no canal após o delay configurado.
     Executado pelo scheduler.
+    🔥 FIX: threaded=False para não criar threads extras no Railway.
+    🔥 FIX: Retry com 3 tentativas para lidar com erros temporários.
     """
-    try:
-        bot = telebot.TeleBot(bot_token)
-        bot.approve_chat_join_request(int(canal_id), user_id)
-        logger.info(f"✅ [CANAL FREE] Usuário {user_id} aprovado no canal {canal_id}")
-    except Exception as e:
-        logger.error(f"❌ [CANAL FREE] Erro ao aprovar usuário {user_id}: {e}")
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            bot = telebot.TeleBot(bot_token, threaded=False)
+            bot.approve_chat_join_request(int(canal_id), user_id)
+            logger.info(f"✅ [CANAL FREE] Usuário {user_id} aprovado no canal {canal_id}")
+            return  # Sucesso, sai da função
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Se o usuário já foi aprovado ou não tem request pendente, ignora
+            if "user_already_participant" in error_msg or "hide_requester_missing" in error_msg or "request not found" in error_msg:
+                logger.info(f"ℹ️ [CANAL FREE] Usuário {user_id} já aprovado/participante no canal {canal_id}")
+                return
+            
+            if attempt < max_retries - 1:
+                logger.warning(f"⚠️ [CANAL FREE] Tentativa {attempt+1}/{max_retries} falhou para {user_id}: {e}")
+                import time
+                time.sleep(2)  # Espera 2s antes de tentar novamente
+            else:
+                logger.error(f"❌ [CANAL FREE] Todas as {max_retries} tentativas falharam para {user_id}: {e}")
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
@@ -7017,6 +7033,18 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 username = join_request.from_user.username
                 
                 logger.info(f"🆓 [CANAL FREE] Solicitação de entrada - User: {user_name} ({user_id}), Canal: {canal_id}")
+                
+                # 🔥 FIX: DEDUPLICAÇÃO - Se já existe um job agendado para este usuário/canal, ignora
+                job_id = f"approve_free_{canal_id}_{user_id}"
+                existing_job = None
+                try:
+                    existing_job = scheduler.get_job(job_id)
+                except:
+                    pass
+                
+                if existing_job:
+                    logger.info(f"ℹ️ [CANAL FREE] Aprovação já agendada para {user_name} ({user_id}), ignorando duplicata")
+                    return {"status": "ok", "message": "Já agendado"}
                 
                 # Buscar configuração do Canal Free
                 config = db.query(CanalFreeConfig).filter(
