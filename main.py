@@ -3325,38 +3325,47 @@ async def gerar_pix_pushinpay(
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
 def notificar_admin_principal(bot_db: BotModel, mensagem: str):
     """
-    Envia notificação para o Admin Principal E para os Admins Extras configurados.
+    Envia notificação para:
+    1. Canal de Notificações (se configurado) — mensagem vai para o canal
+    2. Admin Principal (DM) — mantém comportamento original
+    3. Admins Extras (DM) — mantém comportamento original
     """
+    try:
+        sender = telebot.TeleBot(bot_db.token, threaded=False)
+    except Exception as e:
+        logger.error(f"Falha ao criar bot para notificação: {e}")
+        return
+    
+    # ✅ 1. ENVIO NO CANAL DE NOTIFICAÇÕES (PRIORIDADE)
+    if bot_db.id_canal_notificacao and str(bot_db.id_canal_notificacao).strip():
+        try:
+            canal_notif = str(bot_db.id_canal_notificacao).strip()
+            if canal_notif.replace("-", "").isdigit():
+                canal_notif = int(canal_notif)
+            sender.send_message(canal_notif, mensagem, parse_mode="HTML")
+            logger.info(f"📢 Notificação enviada no canal {bot_db.id_canal_notificacao}")
+        except Exception as e_canal:
+            logger.error(f"❌ Erro ao enviar no canal de notificações {bot_db.id_canal_notificacao}: {e_canal}")
+    
+    # 2. ENVIO VIA DM PARA ADMINS (COMPORTAMENTO ORIGINAL MANTIDO)
     ids_unicos = set()
 
-    # 1. Adiciona Admin Principal (Prioridade)
     if bot_db.admin_principal_id:
         ids_unicos.add(str(bot_db.admin_principal_id).strip())
 
-    # 2. Adiciona Admins Extras (Com proteção contra lazy loading)
     try:
         if bot_db.admins:
             for admin in bot_db.admins:
                 if admin.telegram_id:
                     ids_unicos.add(str(admin.telegram_id).strip())
     except Exception as e:
-        # Se der erro ao ler admins extras (ex: sessão fechada), ignora e manda só pro principal
         logger.warning(f"Não foi possível ler admins extras: {e}")
 
-    if not ids_unicos:
-        return
-
-    try:
-        sender = telebot.TeleBot(bot_db.token)
-        for chat_id in ids_unicos:
-            try:
-                # 🔥 GARANTE O PARSE_MODE HTML
-                sender.send_message(chat_id, mensagem, parse_mode="HTML")
-            except Exception as e_send:
-                logger.error(f"Erro ao notificar admin {chat_id}: {e_send}")
-                
-    except Exception as e:
-        logger.error(f"Falha geral na notificação: {e}")
+    for chat_id in ids_unicos:
+        try:
+            sender.send_message(chat_id, mensagem, parse_mode="HTML")
+        except Exception as e_send:
+            logger.error(f"Erro ao notificar admin {chat_id}: {e_send}")
 
 # --- ROTAS DE INTEGRAÇÃO (SALVAR TOKEN) ---
 # =========================================================
@@ -3420,7 +3429,8 @@ class BotCreate(BaseModel):
     token: str
     id_canal_vip: str
     admin_principal_id: Optional[str] = None
-    suporte_username: Optional[str] = None # 🔥 NOVO CAMPO
+    suporte_username: Optional[str] = None
+    id_canal_notificacao: Optional[str] = None  # ✅ Canal de Notificações
 
 # Novo modelo para Atualização
 class BotUpdate(BaseModel):
@@ -3428,7 +3438,8 @@ class BotUpdate(BaseModel):
     token: Optional[str] = None
     id_canal_vip: Optional[str] = None
     admin_principal_id: Optional[str] = None
-    suporte_username: Optional[str] = None # 🔥 NOVO CAMPO
+    suporte_username: Optional[str] = None
+    id_canal_notificacao: Optional[str] = None  # ✅ Canal de Notificações
 
 # Modelo para Criar Admin
 class BotAdminCreate(BaseModel):
@@ -4394,7 +4405,8 @@ def criar_bot(
         id_canal_vip=bot_data.id_canal_vip,
         admin_principal_id=bot_data.admin_principal_id,
         suporte_username=bot_data.suporte_username,
-        owner_id=current_user.id,  # 🔒 Atribui automaticamente
+        id_canal_notificacao=bot_data.id_canal_notificacao,  # ✅ Canal de Notificações
+        owner_id=current_user.id,
         status="ativo"
     )
 
@@ -4543,6 +4555,11 @@ def update_bot(
     if dados.suporte_username is not None and dados.suporte_username != bot_db.suporte_username:
         changes["suporte"] = {"old": bot_db.suporte_username, "new": dados.suporte_username}
         bot_db.suporte_username = dados.suporte_username
+    
+    # ✅ Canal de Notificações
+    if dados.id_canal_notificacao is not None and dados.id_canal_notificacao != bot_db.id_canal_notificacao:
+        changes["canal_notificacao"] = {"old": bot_db.id_canal_notificacao, "new": dados.id_canal_notificacao}
+        bot_db.id_canal_notificacao = dados.id_canal_notificacao if dados.id_canal_notificacao.strip() else None
     
     # 2. LÓGICA DE TROCA DE TOKEN (MANTIDA INTACTA)
     if dados.token and dados.token != old_token:
@@ -4861,6 +4878,7 @@ def listar_bots(
             "id_canal_vip": bot.id_canal_vip,
             "admin_principal_id": bot.admin_principal_id,
             "suporte_username": bot.suporte_username,
+            "id_canal_notificacao": bot.id_canal_notificacao,  # ✅ Canal de Notificações
             "status": bot.status,
             "leads": leads_count,
             "revenue": revenue,
@@ -6649,6 +6667,16 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                         
                         # Notificar Admin
                         try:
+                            # ✅ Buscar código de tracking se existir
+                            tracking_info = ""
+                            if pedido.tracking_id:
+                                try:
+                                    tracking_link = db.query(TrackingLink).filter(TrackingLink.id == pedido.tracking_id).first()
+                                    if tracking_link and tracking_link.codigo:
+                                        tracking_info = f"\n📊 Origem: <b>{tracking_link.codigo}</b>"
+                                except:
+                                    pass
+                            
                             msg_admin = (
                                 f"💰 <b>VENDA REALIZADA!</b>\n\n"
                                 f"🤖 Bot: <b>{bot_data.nome}</b>\n"
@@ -6656,6 +6684,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                                 f"📦 Plano: {pedido.plano_nome}\n"
                                 f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
                                 f"📅 Vence em: {texto_validade}"
+                                f"{tracking_info}"
                             )
                             # Função auxiliar que você já deve ter no código
                             # Se não tiver, substitua por lógica direta de envio
@@ -10506,12 +10535,23 @@ async def webhook(req: Request, bg_tasks: BackgroundTasks):
                     bot_db = db.query(BotModel).filter(BotModel.id == p.bot_id).first()
                     
                     if bot_db and bot_db.admin_principal_id:
+                        # ✅ Buscar código de tracking se existir
+                        tracking_info_site = ""
+                        if p.tracking_id:
+                            try:
+                                tracking_link_site = db.query(TrackingLink).filter(TrackingLink.id == p.tracking_id).first()
+                                if tracking_link_site and tracking_link_site.codigo:
+                                    tracking_info_site = f"\n📊 Origem: <b>{tracking_link_site.codigo}</b>"
+                            except:
+                                pass
+                        
                         msg_venda = (
-                            f"💰 *VENDA APROVADA (SITE)!*\n\n"
+                            f"💰 <b>VENDA APROVADA (SITE)!</b>\n\n"
                             f"👤 Cliente: {p.first_name}\n"
                             f"💎 Plano: {p.plano_nome}\n"
                             f"💵 Valor: R$ {p.valor:.2f}\n"
                             f"🆔 ID/User: {p.telegram_id}"
+                            f"{tracking_info_site}"
                         )
                         # Chama a função auxiliar de notificação (assumindo que existe no seu código)
                         notificar_admin_principal(bot_db, msg_venda) 
@@ -13152,5 +13192,62 @@ async def migrate_bot_groups(db: Session = Depends(get_db)):
         return {
             "status": "error",
             "message": f"❌ Erro geral na migração: {str(e)}",
+            "detalhes": str(e)
+        }
+# ============================================================
+# 🔧 ROTA DE MIGRAÇÃO - CANAL DE NOTIFICAÇÕES
+# ============================================================
+@app.get("/migrate-canal-notificacao")
+async def migrate_canal_notificacao(db: Session = Depends(get_db)):
+    """
+    Migração: Adiciona coluna id_canal_notificacao na tabela bots.
+    Acesse: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-canal-notificacao
+    """
+    try:
+        from sqlalchemy import text
+        
+        resultados = []
+        
+        # 1. Adicionar coluna id_canal_notificacao
+        try:
+            db.execute(text("""
+                ALTER TABLE bots 
+                ADD COLUMN id_canal_notificacao VARCHAR;
+            """))
+            db.commit()
+            resultados.append("✅ Coluna 'id_canal_notificacao' criada com sucesso!")
+        except Exception as e:
+            db.rollback()
+            if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                resultados.append("ℹ️ Coluna 'id_canal_notificacao' já existe")
+            else:
+                resultados.append(f"❌ Erro: {str(e)}")
+        
+        # 2. Verificar
+        try:
+            resultado = db.execute(text("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = 'bots' AND column_name = 'id_canal_notificacao';
+            """))
+            cols = resultado.fetchall()
+            if cols:
+                resultados.append(f"✅ Verificado: bots.{cols[0][0]} ({cols[0][1]})")
+            else:
+                resultados.append("⚠️ Coluna não encontrada após migração")
+        except Exception as e:
+            resultados.append(f"⚠️ Erro ao verificar: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "✅ Migração Canal de Notificações concluída!",
+            "resultados": resultados
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"❌ Erro geral: {str(e)}",
             "detalhes": str(e)
         }

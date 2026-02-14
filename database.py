@@ -92,6 +92,9 @@ class Bot(Base):
     # 🔥 Username do Suporte
     suporte_username = Column(String, nullable=True)
     
+    # ✅ Canal de Notificações (onde o bot envia avisos de vendas, toggle, etc)
+    id_canal_notificacao = Column(String, nullable=True)
+    
     status = Column(String, default="ativo")
     
     # Token Individual por Bot
