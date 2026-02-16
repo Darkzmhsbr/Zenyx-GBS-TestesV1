@@ -15,8 +15,9 @@ import traceback  # 🔥 NOVO: Para logging detalhado de erros
 import asyncio  # 🔥 Garantir que asyncio está importado
 from concurrent.futures import ThreadPoolExecutor
 
-from sqlalchemy import func, desc, text, and_, or_
-from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks, Queryfrom fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func, desc, text, and_, or_, extract
+from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from pydantic import BaseModel, EmailStr, Field 
