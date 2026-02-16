@@ -12159,10 +12159,11 @@ def obter_ranking(
         resultado = (
             db.query(
                 User.username,
-                func.sum(Pedido.valor).label("total_faturado")
+                func.sum(Pedido.valor).label("total_faturado"),
+                func.count(Pedido.id).label("total_vendas")  # 🔥 NOVO: Conta a quantidade de vendas
             )
-            .join(BotModel, BotModel.owner_id == User.id)  # <-- ATENÇÃO AQUI!
-            .join(Pedido, Pedido.bot_id == BotModel.id)    # <-- E AQUI!
+            .join(BotModel, BotModel.owner_id == User.id)
+            .join(Pedido, Pedido.bot_id == BotModel.id)
             .filter(Pedido.data_aprovacao != None)
             .filter(User.is_superuser == False)
             .filter(extract('month', Pedido.data_aprovacao) == mes)
@@ -12178,14 +12179,15 @@ def obter_ranking(
             ranking_formatado.append({
                 "posicao": index + 1,
                 "username": row.username,
-                "total_faturado": round(row.total_faturado, 2) if row.total_faturado else 0.0
+                "total_faturado": round(row.total_faturado, 2) if row.total_faturado else 0.0,
+                "total_vendas": row.total_vendas  # 🔥 NOVO: Envia o número de vendas para o site
             })
 
         return {"status": "success", "ranking": ranking_formatado}
 
     except Exception as e:
         return {"status": "error", "message": f"Erro ao gerar ranking: {str(e)}"}
-
+        
 # =========================================================
 # 🚑 MIGRAÇÃO DE EMERGÊNCIA (CORREÇÃO DE COLUNA)
 # =========================================================
