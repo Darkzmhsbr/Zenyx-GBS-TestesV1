@@ -16,8 +16,7 @@ import asyncio  # 🔥 Garantir que asyncio está importado
 from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func, desc, text, and_, or_
-from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks, Queryfrom fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from pydantic import BaseModel, EmailStr, Field 
@@ -12145,6 +12144,46 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
             "total_revenue": 0.0,
             "active_users": 0
         }
+
+# =========================================================
+# 🏆 NOVA ROTA: RANKING DE TOP VENDEDORES (TOP 10)
+# =========================================================
+@app.get("/api/ranking")
+def obter_ranking(
+    mes: int = Query(..., description="Mês numérico (Ex: 2 para Fevereiro)"),
+    ano: int = Query(..., description="Ano com 4 dígitos (Ex: 2026)"),
+    db: Session = Depends(get_db)
+):
+    try:
+        resultado = (
+            db.query(
+                User.username,
+                func.sum(Pedido.valor).label("total_faturado")
+            )
+            .join(BotModel, BotModel.owner_id == User.id)  # <-- ATENÇÃO AQUI!
+            .join(Pedido, Pedido.bot_id == BotModel.id)    # <-- E AQUI!
+            .filter(Pedido.data_aprovacao != None)
+            .filter(User.is_superuser == False)
+            .filter(extract('month', Pedido.data_aprovacao) == mes)
+            .filter(extract('year', Pedido.data_aprovacao) == ano)
+            .group_by(User.id)
+            .order_by(func.sum(Pedido.valor).desc())
+            .limit(10)
+            .all()
+        )
+
+        ranking_formatado = []
+        for index, row in enumerate(resultado):
+            ranking_formatado.append({
+                "posicao": index + 1,
+                "username": row.username,
+                "total_faturado": round(row.total_faturado, 2) if row.total_faturado else 0.0
+            })
+
+        return {"status": "success", "ranking": ranking_formatado}
+
+    except Exception as e:
+        return {"status": "error", "message": f"Erro ao gerar ranking: {str(e)}"}
 
 # =========================================================
 # 🚑 MIGRAÇÃO DE EMERGÊNCIA (CORREÇÃO DE COLUNA)
