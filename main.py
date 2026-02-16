@@ -10,13 +10,14 @@ import threading
 from telebot import types
 import json
 import uuid
+import boto3
 from sqlalchemy.exc import IntegrityError
 import traceback  # 🔥 NOVO: Para logging detalhado de erros
 import asyncio  # 🔥 Garantir que asyncio está importado
 from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func, desc, text, and_, or_, extract
-from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks, Query
+from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks, Query, File, UploadFile, Form 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -337,20 +338,15 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
         message_id = None
         try:
             if config.media_url and config.media_type:
+                # 🔥 LÓGICA ATUALIZADA COM SUPORTE A ÁUDIO
                 if config.media_type == 'photo':
-                    msg = bot_instance.send_photo(
-                        chat_id,
-                        config.media_url,
-                        caption=mensagem,
-                        parse_mode='HTML'
-                    )
+                    msg = bot_instance.send_photo(chat_id, config.media_url, caption=mensagem, parse_mode='HTML')
                 elif config.media_type == 'video':
-                    msg = bot_instance.send_video(
-                        chat_id,
-                        config.media_url,
-                        caption=mensagem,
-                        parse_mode='HTML'
-                    )
+                    msg = bot_instance.send_video(chat_id, config.media_url, caption=mensagem, parse_mode='HTML')
+                elif config.media_type == 'audio' or config.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
+                    bot_instance.send_chat_action(chat_id, 'record_voice')
+                    time.sleep(3) # Simula o tempo de gravação
+                    msg = bot_instance.send_voice(chat_id, config.media_url, caption=mensagem, parse_mode='HTML')
                 else:
                     msg = bot_instance.send_message(chat_id, mensagem, parse_mode='HTML')
             else:
@@ -969,10 +965,15 @@ async def send_remarketing_job(
             mtype = config_dict.get('media_type')
             
             try:
+                # 🔥 LÓGICA ATUALIZADA COM SUPORTE A ÁUDIO E ASYNCIO
                 if media and mtype == 'photo':
                     sent_msg = bot.send_photo(chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
                 elif media and mtype == 'video':
                     sent_msg = bot.send_video(chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
+                elif media and (mtype == 'audio' or media.lower().endswith(('.ogg', '.mp3', '.wav'))):
+                    bot.send_chat_action(chat_id, 'record_voice')
+                    await asyncio.sleep(3) # Pausa assíncrona
+                    sent_msg = bot.send_voice(chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
                 else:
                     sent_msg = bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
                 
@@ -6331,12 +6332,17 @@ async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: in
         msg_texto = config.msg_texto or f"{'🚀' if offer_type == 'upsell' else '🎁'} Oferta especial!"
         
         try:
+            # 🔥 LÓGICA ATUALIZADA COM SUPORTE A ÁUDIO
             if config.msg_media:
-                media_url = config.msg_media.strip()
-                if media_url.lower().endswith(('.mp4', '.mov')):
-                    tb.send_video(chat_id, media_url, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
+                media_url = config.msg_media.strip().lower()
+                if media_url.endswith(('.mp4', '.mov', '.avi')):
+                    tb.send_video(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
+                elif media_url.endswith(('.ogg', '.mp3', '.wav')):
+                    tb.send_chat_action(chat_id, 'record_voice')
+                    await asyncio.sleep(3)
+                    tb.send_voice(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
                 else:
-                    tb.send_photo(chat_id, media_url, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
+                    tb.send_photo(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
             else:
                 tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
             
@@ -6929,10 +6935,16 @@ def enviar_oferta_final(bot_temp, chat_id, fluxo, bot_id, db):
     media = fluxo.msg_2_media if fluxo else None
     
     # 🔥 ENVIO COM TRATAMENTO DE ERRO
+    # 🔥 ENVIO COM TRATAMENTO DE ERRO E ÁUDIO
     try:
         if media:
-            if media.lower().endswith(('.mp4', '.mov', '.avi')): 
+            media_low = media.lower()
+            if media_low.endswith(('.mp4', '.mov', '.avi')): 
                 bot_temp.send_video(chat_id, media, caption=texto, reply_markup=mk, parse_mode="HTML")
+            elif media_low.endswith(('.ogg', '.mp3', '.wav')):
+                bot_temp.send_chat_action(chat_id, 'record_voice')
+                time.sleep(3)
+                bot_temp.send_voice(chat_id, media, caption=texto, reply_markup=mk, parse_mode="HTML")
             else: 
                 bot_temp.send_photo(chat_id, media, caption=texto, reply_markup=mk, parse_mode="HTML")
         else:
@@ -6966,24 +6978,27 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
             markup_step.add(types.InlineKeyboardButton(text=passo_atual.btn_texto, callback_data=callback))
 
         # 2. Envia a mensagem deste passo (AGORA COM HTML ✅)
+        # 2. Envia a mensagem deste passo (AGORA COM HTML E ÁUDIO ✅)
         sent_msg = None
         if passo_atual.msg_media:
             try:
-                if passo_atual.msg_media.lower().endswith(('.mp4', '.mov', '.avi')):
+                media_low = passo_atual.msg_media.lower()
+                if media_low.endswith(('.mp4', '.mov', '.avi')):
                     sent_msg = bot_temp.send_video(
-                        chat_id, 
-                        passo_atual.msg_media, 
-                        caption=passo_atual.msg_texto, 
-                        reply_markup=markup_step if passo_atual.mostrar_botao else None,
-                        parse_mode="HTML" # 🔥 CORREÇÃO AQUI
+                        chat_id, passo_atual.msg_media, caption=passo_atual.msg_texto, 
+                        reply_markup=markup_step if passo_atual.mostrar_botao else None, parse_mode="HTML"
+                    )
+                elif media_low.endswith(('.ogg', '.mp3', '.wav')):
+                    bot_temp.send_chat_action(chat_id, 'record_voice')
+                    time.sleep(3)
+                    sent_msg = bot_temp.send_voice(
+                        chat_id, passo_atual.msg_media, caption=passo_atual.msg_texto, 
+                        reply_markup=markup_step if passo_atual.mostrar_botao else None, parse_mode="HTML"
                     )
                 else:
                     sent_msg = bot_temp.send_photo(
-                        chat_id, 
-                        passo_atual.msg_media, 
-                        caption=passo_atual.msg_texto, 
-                        reply_markup=markup_step if passo_atual.mostrar_botao else None,
-                        parse_mode="HTML" # 🔥 CORREÇÃO AQUI
+                        chat_id, passo_atual.msg_media, caption=passo_atual.msg_texto, 
+                        reply_markup=markup_step if passo_atual.mostrar_botao else None, parse_mode="HTML"
                     )
             except Exception as e_media:
                 logger.error(f"Erro ao enviar mídia passo {passo_atual.step_order}: {e_media}")
@@ -7053,6 +7068,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         # ========================================
         # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
         # ========================================
+        # ========================================
+        # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
+        # ========================================
         if update.chat_join_request:
             try:
                 join_request = update.chat_join_request
@@ -7116,13 +7134,25 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                     url=btn['url']
                                 ))
                     
-                    # Enviar mensagem com ou sem mídia (USANDO final_message)
+                    # 🔥 LÓGICA DE MÍDIA ATUALIZADA (SUPORTE A ÁUDIO)
                     if config.media_url:
-                        if config.media_type == 'video':
+                        media_low = config.media_url.lower()
+                        if config.media_type == 'video' or media_low.endswith(('.mp4', '.mov', '.avi')):
                             bot_temp.send_video(
                                 user_id,
                                 config.media_url,
-                                caption=final_message, # ✅ Texto processado
+                                caption=final_message,
+                                reply_markup=markup,
+                                parse_mode="HTML"
+                            )
+                        elif config.media_type == 'audio' or media_low.endswith(('.ogg', '.mp3', '.wav')):
+                            # 🎤 Simula o "Gravando Áudio..."
+                            bot_temp.send_chat_action(user_id, 'record_voice')
+                            time.sleep(3)
+                            bot_temp.send_voice(
+                                user_id,
+                                config.media_url,
+                                caption=final_message,
                                 reply_markup=markup,
                                 parse_mode="HTML"
                             )
@@ -7130,14 +7160,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             bot_temp.send_photo(
                                 user_id,
                                 config.media_url,
-                                caption=final_message, # ✅ Texto processado
+                                caption=final_message,
                                 reply_markup=markup,
                                 parse_mode="HTML"
                             )
                     else:
                         bot_temp.send_message(
                             user_id,
-                            final_message, # ✅ Texto processado
+                            final_message,
                             reply_markup=markup,
                             parse_mode="HTML"
                         )
@@ -7414,13 +7444,19 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             ))
 
                 # 🔥 BLOCO DE ENVIO COM LOG
+                # 🔥 BLOCO DE ENVIO COM LOG E ÁUDIO
                 try:
                     logger.info(f"📤 Tentando enviar menu para {chat_id}...")
                     sent_msg_start = None
                     
                     if media:
-                        if media.endswith(('.mp4', '.mov')): 
+                        media_low = media.lower()
+                        if media_low.endswith(('.mp4', '.mov', '.avi')): 
                             sent_msg_start = bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
+                        elif media_low.endswith(('.ogg', '.mp3', '.wav')):
+                            bot_temp.send_chat_action(chat_id, 'record_voice')
+                            time.sleep(3)
+                            sent_msg_start = bot_temp.send_voice(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
                         else: 
                             sent_msg_start = bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
                     else: 
@@ -8164,6 +8200,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             f"⚡ Acesso automático!"
                         )
 
+                    # 🔥 LÓGICA DE MÍDIA ATUALIZADA NO FINAL (Se houver mídia no PIX/BUMP)
+                    # NOTA: O fluxo original apenas enviava a msg de texto do PIX. 
+                    # Mas se você quiser garantir que se por acaso tiver mídia ele leia:
                     bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                     
                 else:
@@ -9247,10 +9286,14 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                         ext = payload.media_url.lower()
                         if ext.endswith(('.mp4', '.mov', '.avi')):
                             bot_sender.send_video(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML")
+                        elif ext.endswith(('.ogg', '.mp3', '.wav')):
+                            bot_sender.send_chat_action(uid, 'record_voice')
+                            time.sleep(2) # Apenas 2s aqui para não atrasar o envio em massa
+                            bot_sender.send_voice(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML")
                         else:
                             bot_sender.send_photo(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML")
                         midia_ok = True
-                    except: pass 
+                    except: pass
                 
                 if not midia_ok:
                     bot_sender.send_message(uid, texto_envio, reply_markup=markup, parse_mode="HTML")
@@ -9565,12 +9608,17 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
             markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"checkout_{plano.id}"))
 
     # 5. Envio (HTML)
+    # 5. Envio (HTML E ÁUDIO)
     try:
         if media:
             try:
                 ext = media.lower()
                 if ext.endswith(('.mp4', '.mov', '.avi')):
                     sender.send_video(payload.user_telegram_id, media, caption=msg, reply_markup=markup, parse_mode="HTML")
+                elif ext.endswith(('.ogg', '.mp3', '.wav')):
+                    sender.send_chat_action(payload.user_telegram_id, 'record_voice')
+                    time.sleep(3)
+                    sender.send_voice(payload.user_telegram_id, media, caption=msg, reply_markup=markup, parse_mode="HTML")
                 else:
                     sender.send_photo(payload.user_telegram_id, media, caption=msg, reply_markup=markup, parse_mode="HTML")
             except:
@@ -12187,7 +12235,68 @@ def obter_ranking(
 
     except Exception as e:
         return {"status": "error", "message": f"Erro ao gerar ranking: {str(e)}"}
+
+# =========================================================
+# 📁 ROTA DE UPLOAD DE MÍDIA (BACKBLAZE B2)
+# =========================================================
+# Configurações do seu Balde Backblaze
+B2_ENDPOINT = "https://s3.us-east-005.backblazeb2.com"
+B2_KEY_ID = "0053eddc50d26a30000000005"
+B2_APP_KEY = "K0057bAugoXm4Vz9IHf8sVBnM4+yBEo"
+B2_BUCKET_NAME = "Zenyx-mid" # <-- ⚠️ ATENÇÃO: Escreva o nome exato do seu balde aqui!
+
+# Inicializa o cliente B2 (Protocolo S3)
+b2_client = boto3.client(
+    's3',
+    endpoint_url=B2_ENDPOINT,
+    aws_access_key_id=B2_KEY_ID,
+    aws_secret_access_key=B2_APP_KEY
+)
+
+@app.post("/api/admin/media/upload")
+async def upload_media(
+    file: UploadFile = File(...),
+    type: str = Form("flow"),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Recebe o arquivo do Frontend (React) e envia direto para o Backblaze B2"""
+    try:
+        # 1. Valida a extensão (Já inclui OGG e MP3 para os nossos áudios humanos!)
+        ext = file.filename.split('.')[-1].lower()
+        allowed_exts = ['jpg', 'jpeg', 'png', 'gif', 'mp4', 'mov', 'avi', 'mp3', 'wav', 'ogg']
         
+        if ext not in allowed_exts:
+            raise HTTPException(status_code=400, detail=f"Formato .{ext} não suportado.")
+
+        # 2. Gera um nome único aleatório para não sobrescrever arquivos com o mesmo nome
+        unique_filename = f"{type}_{uuid.uuid4().hex}.{ext}"
+        
+        # 3. Lê o conteúdo do arquivo enviado pelo usuário
+        file_content = await file.read()
+        
+        # 4. Faz o upload para o Backblaze B2 silenciosamente
+        b2_client.put_object(
+            Bucket=B2_BUCKET_NAME,
+            Key=unique_filename,
+            Body=file_content,
+            ContentType=file.content_type
+        )
+        
+        # 5. Gera a URL pública padrão do S3 no Backblaze
+        # A URL fica no formato: https://{nome-do-balde}.s3.us-east-005.backblazeb2.com/{nome_do_arquivo}
+        endpoint_domain = B2_ENDPOINT.replace("https://", "")
+        public_url = f"https://{B2_BUCKET_NAME}.{endpoint_domain}/{unique_filename}"
+        
+        logger.info(f"✅ Upload B2 concluído com sucesso: {public_url}")
+        
+        # Retorna o link para o Frontend colocar no campo de texto automaticamente
+        return {"status": "success", "url": public_url}
+        
+    except Exception as e:
+        logger.error(f"❌ Erro fatal no upload para o Backblaze: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro interno no upload: {str(e)}")
+
 # =========================================================
 # 🚑 MIGRAÇÃO DE EMERGÊNCIA (CORREÇÃO DE COLUNA)
 # =========================================================
