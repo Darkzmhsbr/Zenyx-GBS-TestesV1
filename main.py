@@ -1530,6 +1530,7 @@ class PlatformUserUpdate(BaseModel):
     full_name: Optional[str] = None
     email: Optional[EmailStr] = None
     pushin_pay_id: Optional[str] = None
+    wiinpay_user_id: Optional[str] = None
     taxa_venda: Optional[int] = None
 
 class Token(BaseModel):
@@ -1739,6 +1740,7 @@ def require_role(allowed_roles: list):
 class SystemConfigSchema(BaseModel):
     default_fee: int = 60
     master_pushin_pay_id: str = ""
+    master_wiinpay_user_id: str = ""
     maintenance_mode: bool = False
 
 class BroadcastSchema(BaseModel):
@@ -2580,6 +2582,15 @@ def registrar_remarketing(
                 "ALTER TABLE bots ADD COLUMN IF NOT EXISTS pushin_token VARCHAR;",
                 "ALTER TABLE order_bump_config ADD COLUMN IF NOT EXISTS autodestruir BOOLEAN DEFAULT FALSE;",
 
+                # --- [CORREÇÃO 10.1] 🆕 MULTI-GATEWAY (WIINPAY + CONTINGÊNCIA) ---
+                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS wiinpay_api_key VARCHAR;",
+                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS gateway_principal VARCHAR DEFAULT 'pushinpay';",
+                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS gateway_fallback VARCHAR;",
+                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS pushinpay_ativo BOOLEAN DEFAULT FALSE;",
+                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS wiinpay_ativo BOOLEAN DEFAULT FALSE;",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS wiinpay_user_id VARCHAR;",
+                "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS gateway_usada VARCHAR;",
+
                 # 👇👇👇 [CORREÇÃO 11] SUPORTE A WEB APP NO FLUXO (CRÍTICO) 👇👇👇
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS start_mode VARCHAR DEFAULT 'padrao';",
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS miniapp_url VARCHAR;",
@@ -3323,6 +3334,383 @@ async def gerar_pix_pushinpay(
     return None
 
 
+# =========================================================
+# 🏢 BUSCAR WIINPAY USER ID DA PLATAFORMA (ZENYX)
+# =========================================================
+def get_plataforma_wiinpay_id(db: Session) -> str:
+    """
+    Retorna o wiinpay_user_id da plataforma Zenyx para receber as taxas via split.
+    Prioridade:
+    1. SystemConfig (master_wiinpay_user_id)
+    2. Primeiro Super Admin com wiinpay_user_id configurado
+    3. None se não encontrar
+    """
+    try:
+        config = db.query(SystemConfig).filter(
+            SystemConfig.key == "master_wiinpay_user_id"
+        ).first()
+        
+        if config and config.value:
+            return config.value
+        
+        from database import User
+        super_admin = db.query(User).filter(
+            User.is_superuser == True,
+            User.wiinpay_user_id.isnot(None)
+        ).first()
+        
+        if super_admin and super_admin.wiinpay_user_id:
+            return super_admin.wiinpay_user_id
+        
+        logger.warning("⚠️ Nenhum wiinpay_user_id da plataforma configurado! Split WiinPay desabilitado.")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar wiinpay_user_id da plataforma: {e}")
+        return None
+
+
+# =========================================================
+# 🔌 INTEGRAÇÃO WIINPAY (DINÂMICA)
+# =========================================================
+async def gerar_pix_wiinpay(
+    valor_float: float, 
+    transaction_id: str, 
+    bot_id: int, 
+    db: Session,
+    user_telegram_id: str = None,      
+    user_first_name: str = None,       
+    plano_nome: str = None,
+    agendar_remarketing: bool = True
+):
+    """
+    Gera PIX via WiinPay com Split automático de taxa para a plataforma.
+    
+    Diferenças em relação à PushinPay:
+    - API Key vai no body (não no header)
+    - Valor em reais (float), não centavos
+    - Mínimo de R$ 3,00
+    - Split usa user_id + value/percentage
+    - Webhook retorna status "PAID" (maiúsculo)
+    - Campos obrigatórios extras: name, email, description
+    """
+    
+    # ======================================================================
+    # 🔥 ETAPA 1: Buscar o Bot e definir API Key
+    # ======================================================================
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot:
+        logger.error(f"❌ [WIINPAY] Bot {bot_id} não encontrado!")
+        return None
+    
+    api_key = bot.wiinpay_api_key
+    if not api_key:
+        logger.error(f"❌ [WIINPAY] Bot {bot_id} sem wiinpay_api_key configurada!")
+        return None
+    
+    logger.info(f"🔍 [WIINPAY DEBUG] Bot ID: {bot_id}")
+    logger.info(f"✅ [WIINPAY DEBUG] USANDO API KEY: {api_key[:15]}...")
+    
+    # ======================================================================
+    # 🔥 ETAPA 2: Validação de valor mínimo
+    # ======================================================================
+    if valor_float < 3.00:
+        logger.error(f"❌ [WIINPAY] Valor R$ {valor_float:.2f} abaixo do mínimo de R$ 3,00!")
+        return None
+    
+    # ======================================================================
+    # 🔥 ETAPA 3: Configurar requisição
+    # ======================================================================
+    url = "https://api-v2.wiinpay.com.br/payment/create"
+    
+    raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
+    clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
+    webhook_url = f"https://{clean_domain}/api/webhooks/wiinpay"
+    
+    # Monta payload WiinPay
+    payload = {
+        "api_key": api_key,
+        "value": round(valor_float, 2),
+        "name": user_first_name or "Cliente",
+        "email": f"cliente_{user_telegram_id or 'anon'}@telegram.bot",
+        "description": f"Pagamento {plano_nome or 'Plano'} - Bot {bot_id}",
+        "webhook_url": webhook_url,
+        "metadata": {
+            "transaction_id": transaction_id,
+            "bot_id": str(bot_id),
+            "user_telegram_id": str(user_telegram_id or ""),
+            "gateway": "wiinpay"
+        }
+    }
+    
+    # ======================================================================
+    # 🔥 ETAPA 4: Lógica de Split (TAXA DA PLATAFORMA)
+    # ======================================================================
+    try:
+        if bot.owner_id:
+            from database import User
+            owner = db.query(User).filter(User.id == bot.owner_id).first()
+            
+            if owner:
+                plataforma_wiinpay_id = get_plataforma_wiinpay_id(db)
+                
+                if plataforma_wiinpay_id:
+                    # Define a taxa
+                    taxa_centavos = owner.taxa_venda
+                    if not taxa_centavos:
+                        try:
+                            cfg_fee = db.query(SystemConfig).filter(SystemConfig.key == "default_fee").first()
+                            taxa_centavos = int(cfg_fee.value) if cfg_fee and cfg_fee.value else 60
+                        except:
+                            taxa_centavos = 60
+                    
+                    # Converte taxa de centavos para reais (WiinPay usa reais)
+                    taxa_reais = taxa_centavos / 100.0
+                    
+                    logger.info(f"🔍 [WIINPAY DEBUG] Checando split:")
+                    logger.info(f"  Valor total: R$ {valor_float:.2f}")
+                    logger.info(f"  Taxa desejada: R$ {taxa_reais:.2f}")
+                    
+                    if taxa_reais >= (valor_float * 0.5):
+                        logger.warning(f"⚠️ [WIINPAY] Taxa muito alta! Split NÃO aplicado.")
+                    else:
+                        payload["split"] = {
+                            "value": round(taxa_reais, 2),
+                            "user_id": plataforma_wiinpay_id
+                        }
+                        logger.info(f"✅ [WIINPAY DEBUG] SPLIT CONFIGURADO!")
+                        logger.info(f"  Split value: R$ {taxa_reais:.2f}")
+                        logger.info(f"  User ID: {plataforma_wiinpay_id}")
+                else:
+                    logger.warning("⚠️ [WIINPAY] WiinPay User ID da plataforma não configurado. PIX SEM split.")
+            else:
+                logger.warning(f"⚠️ [WIINPAY] Owner do bot {bot_id} não encontrado. PIX SEM split.")
+        else:
+            logger.warning(f"⚠️ [WIINPAY] Bot {bot_id} sem owner_id. PIX SEM split.")
+            
+    except Exception as e:
+        logger.error(f"❌ [WIINPAY] Erro ao configurar split: {e}. PIX SEM split.")
+    
+    # ======================================================================
+    # 🔥 ETAPA 5: Envia requisição para WiinPay COM RETRY
+    # ======================================================================
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    max_retries = 3
+    retry_count = 0
+    last_error = None
+    
+    while retry_count < max_retries:
+        try:
+            if retry_count > 0:
+                logger.warning(f"🔄 [WIINPAY] Tentativa {retry_count + 1}/{max_retries}...")
+            else:
+                logger.info(f"📤 [WIINPAY DEBUG] Enviando para WiinPay:")
+                logger.info(f"  URL: {url}")
+                logger.info(f"  Valor: R$ {valor_float:.2f}")
+                logger.info(f"  Split: {payload.get('split', {})}")
+            
+            response = await http_client.post(url, json=payload, headers=headers, timeout=30)
+            
+            if response.status_code in [200, 201]:
+                try:
+                    pix_response = response.json()
+                    
+                    if not pix_response:
+                        raise ValueError("Resposta vazia da API WiinPay")
+                    
+                    # WiinPay pode retornar o ID em diferentes campos
+                    pix_id = pix_response.get('id') or pix_response.get('payment_id') or pix_response.get('txid')
+                    
+                    if not pix_id:
+                        raise ValueError(f"Resposta sem ID do PIX: {pix_response}")
+                    
+                    logger.info(f"✅ [WIINPAY DEBUG] Resposta WiinPay ({response.status_code}):")
+                    logger.info(f"  PIX ID: {pix_id}")
+                    logger.info(f"✅ [WIINPAY] PIX gerado com sucesso! ID: {pix_id}")
+                    
+                    # Agenda remarketing se solicitado
+                    if agendar_remarketing and user_telegram_id:
+                        try:
+                            chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
+                            if chat_id_int:
+                                cancelar_remarketing(chat_id_int)
+                                schedule_remarketing_and_alternating(
+                                    bot_id=bot_id,
+                                    chat_id=chat_id_int,
+                                    payment_message_id=0,
+                                    user_info={
+                                        'first_name': user_first_name or "Cliente",
+                                        'plano': plano_nome or "Plano",
+                                        'valor': valor_float
+                                    }
+                                )
+                                logger.info(f"📧 [WIINPAY REMARKETING] Ciclo iniciado para {user_first_name}")
+                        except Exception as e:
+                            logger.error(f"❌ [WIINPAY] Erro ao agendar remarketing: {e}")
+                    
+                    return pix_response
+                    
+                except (ValueError, KeyError, json.JSONDecodeError) as validation_error:
+                    logger.error(f"❌ [WIINPAY] Resposta inválida: {validation_error}")
+                    logger.error(f"   Resposta: {response.text[:500]}")
+                    return None
+                    
+            elif response.status_code == 429:
+                wait_time = 5 * (retry_count + 1)
+                logger.warning(f"⚠️ [WIINPAY] Rate Limit (429). Aguardando {wait_time}s...")
+                await asyncio.sleep(wait_time)
+                retry_count += 1
+                continue
+                
+            elif response.status_code in [401, 403]:
+                logger.error(f"❌ [WIINPAY] Erro de autenticação ({response.status_code}): API Key inválida")
+                logger.error(f"   Resposta: {response.text}")
+                return None
+                
+            else:
+                logger.error(f"❌ [WIINPAY] Erro ({response.status_code}): {response.text}")
+                if retry_count < max_retries - 1:
+                    wait_time = 2 ** retry_count
+                    await asyncio.sleep(wait_time)
+                    retry_count += 1
+                    continue
+                else:
+                    return None
+                    
+        except httpx.TimeoutException as timeout_err:
+            last_error = timeout_err
+            logger.error(f"⏱️ [WIINPAY] Timeout (tentativa {retry_count + 1}/{max_retries})")
+            if retry_count < max_retries - 1:
+                await asyncio.sleep(2 ** retry_count)
+                retry_count += 1
+                continue
+            else:
+                return None
+                
+        except Exception as e:
+            last_error = e
+            logger.error(f"❌ [WIINPAY] Erro inesperado: {type(e).__name__} - {str(e)}")
+            if retry_count < max_retries - 1:
+                await asyncio.sleep(2 ** retry_count)
+                retry_count += 1
+                continue
+            else:
+                return None
+    
+    logger.error(f"❌ [WIINPAY] Falha definitiva após {max_retries} tentativas")
+    return None
+
+
+# =========================================================
+# 🔄 ORQUESTRADOR MULTI-GATEWAY COM CONTINGÊNCIA
+# =========================================================
+async def gerar_pix_gateway(
+    valor_float: float,
+    transaction_id: str,
+    bot_id: int,
+    db: Session,
+    user_telegram_id: str = None,
+    user_first_name: str = None,
+    plano_nome: str = None,
+    agendar_remarketing: bool = True
+):
+    """
+    Orquestrador que decide qual gateway usar e implementa fallback automático.
+    
+    Lógica:
+    1. Tenta a gateway_principal do bot
+    2. Se falhar e houver gateway_fallback configurada, tenta a segunda
+    3. Retorna o resultado + qual gateway foi usada
+    
+    Returns:
+        tuple: (pix_response, gateway_usada) ou (None, None)
+    """
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot:
+        logger.error(f"❌ [GATEWAY] Bot {bot_id} não encontrado!")
+        return None, None
+    
+    # Define ordem de tentativa
+    principal = bot.gateway_principal or "pushinpay"
+    fallback = bot.gateway_fallback
+    
+    # Verifica quais gateways estão ativas
+    gateways_disponiveis = []
+    
+    if principal == "pushinpay" and bot.pushinpay_ativo and bot.pushin_token:
+        gateways_disponiveis.append("pushinpay")
+    elif principal == "wiinpay" and bot.wiinpay_ativo and bot.wiinpay_api_key:
+        gateways_disponiveis.append("wiinpay")
+    
+    # Adiciona fallback se diferente da principal e ativa
+    if fallback and fallback != principal:
+        if fallback == "pushinpay" and bot.pushinpay_ativo and bot.pushin_token:
+            gateways_disponiveis.append("pushinpay")
+        elif fallback == "wiinpay" and bot.wiinpay_ativo and bot.wiinpay_api_key:
+            gateways_disponiveis.append("wiinpay")
+    
+    # Se nenhuma gateway multi está ativa, fallback para comportamento legado (pushinpay com token)
+    if not gateways_disponiveis:
+        if bot.pushin_token:
+            gateways_disponiveis = ["pushinpay"]
+            logger.warning(f"⚠️ [GATEWAY] Nenhuma gateway explicitamente ativa. Fallback legado PushinPay.")
+        else:
+            logger.error(f"❌ [GATEWAY] Nenhuma gateway disponível para bot {bot_id}!")
+            return None, None
+    
+    logger.info(f"🔄 [GATEWAY] Bot {bot_id}: Ordem de tentativa = {gateways_disponiveis}")
+    
+    # Tenta cada gateway na ordem
+    for gw in gateways_disponiveis:
+        try:
+            if gw == "pushinpay":
+                logger.info(f"📤 [GATEWAY] Tentando PushinPay...")
+                result = await gerar_pix_pushinpay(
+                    valor_float=valor_float,
+                    transaction_id=transaction_id,
+                    bot_id=bot_id,
+                    db=db,
+                    user_telegram_id=user_telegram_id,
+                    user_first_name=user_first_name,
+                    plano_nome=plano_nome,
+                    agendar_remarketing=agendar_remarketing
+                )
+                if result:
+                    logger.info(f"✅ [GATEWAY] PushinPay respondeu com sucesso!")
+                    return result, "pushinpay"
+                else:
+                    logger.warning(f"⚠️ [GATEWAY] PushinPay falhou. Tentando próxima...")
+                    
+            elif gw == "wiinpay":
+                logger.info(f"📤 [GATEWAY] Tentando WiinPay...")
+                result = await gerar_pix_wiinpay(
+                    valor_float=valor_float,
+                    transaction_id=transaction_id,
+                    bot_id=bot_id,
+                    db=db,
+                    user_telegram_id=user_telegram_id,
+                    user_first_name=user_first_name,
+                    plano_nome=plano_nome,
+                    agendar_remarketing=agendar_remarketing
+                )
+                if result:
+                    logger.info(f"✅ [GATEWAY] WiinPay respondeu com sucesso!")
+                    return result, "wiinpay"
+                else:
+                    logger.warning(f"⚠️ [GATEWAY] WiinPay falhou. Tentando próxima...")
+                    
+        except Exception as e:
+            logger.error(f"❌ [GATEWAY] Erro ao tentar {gw}: {e}")
+            continue
+    
+    logger.error(f"❌ [GATEWAY] TODAS as gateways falharam para bot {bot_id}!")
+    return None, None
+
+
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
 def notificar_admin_principal(bot_db: BotModel, mensagem: str):
     """
@@ -3418,11 +3806,183 @@ def save_pushin_token(bot_id: int, data: IntegrationUpdate, db: Session = Depend
         return {"status": "erro", "msg": "Token muito curto ou inválido."}
 
     bot.pushin_token = token_limpo
+    bot.pushinpay_ativo = True  # 🆕 Ativa automaticamente ao salvar
+    
+    # 🆕 Se não tem gateway principal definida, define PushinPay como principal
+    if not bot.gateway_principal or bot.gateway_principal == "":
+        bot.gateway_principal = "pushinpay"
+    
     db.commit()
     
     logger.info(f"🔑 Token PushinPay atualizado para o BOT {bot.nome}: {token_limpo[:5]}...")
     
-    return {"status": "conectado", "msg": f"Integração salva para {bot.nome}!"}
+    return {"status": "conectado", "msg": f"Integração PushinPay salva para {bot.nome}!"}
+
+# =========================================================
+# 🔌 ROTAS DE INTEGRAÇÃO WIINPAY (POR BOT)
+# =========================================================
+
+@app.get("/api/admin/integrations/wiinpay/{bot_id}")
+def get_wiinpay_status(bot_id: int, db: Session = Depends(get_db)):
+    """Retorna status da integração WiinPay para um bot específico."""
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    
+    if not bot:
+        return {"status": "erro", "msg": "Bot não encontrado"}
+    
+    api_key = bot.wiinpay_api_key
+
+    if not api_key:
+        return {"status": "desconectado", "token_mask": ""}
+    
+    mask = f"{api_key[:8]}...{api_key[-6:]}" if len(api_key) > 14 else "****"
+    return {
+        "status": "conectado", 
+        "token_mask": mask,
+        "ativo": bot.wiinpay_ativo
+    }
+
+@app.post("/api/admin/integrations/wiinpay/{bot_id}")
+def save_wiinpay_token(bot_id: int, data: IntegrationUpdate, db: Session = Depends(get_db)):
+    """Salva API Key da WiinPay para um bot específico."""
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
+    api_key_limpa = data.token.strip()
+    
+    if len(api_key_limpa) < 10:
+        return {"status": "erro", "msg": "API Key muito curta ou inválida."}
+
+    bot.wiinpay_api_key = api_key_limpa
+    bot.wiinpay_ativo = True  # Ativa automaticamente ao salvar
+    
+    # Se não tem gateway principal, define WiinPay
+    if not bot.gateway_principal or bot.gateway_principal == "":
+        bot.gateway_principal = "wiinpay"
+    # Se já tem principal (pushinpay), define wiinpay como fallback
+    elif bot.gateway_principal == "pushinpay" and not bot.gateway_fallback:
+        bot.gateway_fallback = "wiinpay"
+    
+    db.commit()
+    
+    logger.info(f"🔑 [WIINPAY] API Key salva para BOT {bot.nome}: {api_key_limpa[:8]}...")
+    
+    return {"status": "conectado", "msg": f"Integração WiinPay salva para {bot.nome}!"}
+
+# =========================================================
+# 🔄 ROTAS DE CONFIGURAÇÃO MULTI-GATEWAY (POR BOT)
+# =========================================================
+
+class GatewayConfigUpdate(BaseModel):
+    gateway_principal: Optional[str] = None   # "pushinpay" ou "wiinpay"
+    gateway_fallback: Optional[str] = None    # "pushinpay", "wiinpay" ou None
+    pushinpay_ativo: Optional[bool] = None
+    wiinpay_ativo: Optional[bool] = None
+
+@app.get("/api/admin/integrations/gateway-config/{bot_id}")
+def get_gateway_config(bot_id: int, db: Session = Depends(get_db)):
+    """Retorna configuração completa de gateways de um bot."""
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
+    return {
+        "bot_id": bot.id,
+        "bot_nome": bot.nome,
+        "gateway_principal": bot.gateway_principal or "pushinpay",
+        "gateway_fallback": bot.gateway_fallback,
+        "pushinpay": {
+            "ativo": bot.pushinpay_ativo or False,
+            "configurado": bool(bot.pushin_token),
+            "token_mask": f"{bot.pushin_token[:4]}...{bot.pushin_token[-4:]}" if bot.pushin_token and len(bot.pushin_token) > 8 else ""
+        },
+        "wiinpay": {
+            "ativo": bot.wiinpay_ativo or False,
+            "configurado": bool(bot.wiinpay_api_key),
+            "token_mask": f"{bot.wiinpay_api_key[:8]}...{bot.wiinpay_api_key[-6:]}" if bot.wiinpay_api_key and len(bot.wiinpay_api_key) > 14 else ""
+        }
+    }
+
+@app.put("/api/admin/integrations/gateway-config/{bot_id}")
+def update_gateway_config(bot_id: int, config: GatewayConfigUpdate, db: Session = Depends(get_db)):
+    """Atualiza configuração de gateways (principal, fallback, ativar/pausar)."""
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
+    if config.gateway_principal is not None:
+        if config.gateway_principal not in ["pushinpay", "wiinpay"]:
+            raise HTTPException(status_code=400, detail="Gateway principal inválida. Use 'pushinpay' ou 'wiinpay'.")
+        bot.gateway_principal = config.gateway_principal
+        
+    if config.gateway_fallback is not None:
+        if config.gateway_fallback not in ["pushinpay", "wiinpay", ""]:
+            raise HTTPException(status_code=400, detail="Gateway fallback inválida.")
+        bot.gateway_fallback = config.gateway_fallback if config.gateway_fallback != "" else None
+        
+    if config.pushinpay_ativo is not None:
+        if config.pushinpay_ativo and not bot.pushin_token:
+            raise HTTPException(status_code=400, detail="Não é possível ativar PushinPay sem token configurado.")
+        bot.pushinpay_ativo = config.pushinpay_ativo
+        
+    if config.wiinpay_ativo is not None:
+        if config.wiinpay_ativo and not bot.wiinpay_api_key:
+            raise HTTPException(status_code=400, detail="Não é possível ativar WiinPay sem API Key configurada.")
+        bot.wiinpay_ativo = config.wiinpay_ativo
+    
+    db.commit()
+    
+    logger.info(f"⚙️ [GATEWAY] Config atualizada para bot {bot.nome}: principal={bot.gateway_principal}, fallback={bot.gateway_fallback}")
+    
+    return {
+        "status": "success", 
+        "msg": f"Configuração de gateways atualizada para {bot.nome}!",
+        "gateway_principal": bot.gateway_principal,
+        "gateway_fallback": bot.gateway_fallback,
+        "pushinpay_ativo": bot.pushinpay_ativo,
+        "wiinpay_ativo": bot.wiinpay_ativo
+    }
+
+# =========================================================
+# 🔌 ROTA PARA EDITAR TOKEN/API KEY DE GATEWAY EXISTENTE
+# =========================================================
+
+@app.put("/api/admin/integrations/pushinpay/{bot_id}")
+def update_pushin_token(bot_id: int, data: IntegrationUpdate, db: Session = Depends(get_db)):
+    """Permite editar o token PushinPay de um bot já configurado."""
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
+    token_limpo = data.token.strip()
+    if len(token_limpo) < 10:
+        return {"status": "erro", "msg": "Token muito curto ou inválido."}
+
+    old_mask = f"{bot.pushin_token[:4]}..." if bot.pushin_token else "nenhum"
+    bot.pushin_token = token_limpo
+    db.commit()
+    
+    logger.info(f"🔄 Token PushinPay EDITADO para BOT {bot.nome}: {old_mask} → {token_limpo[:5]}...")
+    return {"status": "conectado", "msg": f"Token PushinPay atualizado para {bot.nome}!"}
+
+@app.put("/api/admin/integrations/wiinpay/{bot_id}")
+def update_wiinpay_token(bot_id: int, data: IntegrationUpdate, db: Session = Depends(get_db)):
+    """Permite editar a API Key WiinPay de um bot já configurado."""
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
+    api_key_limpa = data.token.strip()
+    if len(api_key_limpa) < 10:
+        return {"status": "erro", "msg": "API Key muito curta ou inválida."}
+
+    old_mask = f"{bot.wiinpay_api_key[:8]}..." if bot.wiinpay_api_key else "nenhum"
+    bot.wiinpay_api_key = api_key_limpa
+    db.commit()
+    
+    logger.info(f"🔄 [WIINPAY] API Key EDITADA para BOT {bot.nome}: {old_mask} → {api_key_limpa[:8]}...")
+    return {"status": "conectado", "msg": f"API Key WiinPay atualizada para {bot.nome}!"}
 
 # --- MODELOS ---
 class BotCreate(BaseModel):
@@ -4349,6 +4909,8 @@ def update_own_profile(
     # O membro só pode atualizar o ID de recebimento, não a taxa!
     if user_data.pushin_pay_id is not None:
         user.pushin_pay_id = user_data.pushin_pay_id
+    if user_data.wiinpay_user_id is not None:
+        user.wiinpay_user_id = user_data.wiinpay_user_id
         
     db.commit()
     db.refresh(user)
@@ -6361,6 +6923,130 @@ async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: in
         logger.info(f"🚫 {offer_type.upper()} cancelado para {chat_id}")
     except Exception as e:
         logger.error(f"❌ Erro enviar_oferta_upsell_downsell ({offer_type}): {e}", exc_info=True)
+
+# =========================================================
+# 💳 WEBHOOK PIX (WIINPAY) - Recebe confirmação de pagamento da WiinPay
+# =========================================================
+@app.post("/api/webhooks/wiinpay")
+async def webhook_wiinpay(request: Request, db: Session = Depends(get_db)):
+    """
+    Webhook de pagamento da WiinPay.
+    A WiinPay envia status "PAID" (maiúsculo).
+    O transaction_id vem dentro de metadata.
+    """
+    print("🔔 WEBHOOK WIINPAY CHEGOU!")
+    
+    try:
+        body_bytes = await request.body()
+        body_str = body_bytes.decode("utf-8")
+        
+        logger.info(f"📩 [WIINPAY WEBHOOK] Payload recebido: {body_str[:500]}")
+        
+        try:
+            data = json.loads(body_str)
+            if isinstance(data, list):
+                data = data[0]
+        except:
+            logger.error(f"❌ [WIINPAY WEBHOOK] Payload inválido: {body_str[:200]}")
+            return {"status": "ignored"}
+        
+        # WiinPay retorna status "PAID" (maiúsculo)
+        status_pix = str(data.get("status", "")).lower()
+        
+        if status_pix not in ["paid", "approved", "completed", "succeeded"]:
+            logger.info(f"ℹ️ [WIINPAY WEBHOOK] Status ignorado: {data.get('status')}")
+            return {"status": "ignored"}
+        
+        # Buscar transaction_id no metadata (onde guardamos na criação)
+        metadata = data.get("metadata", {})
+        tx_id_from_metadata = metadata.get("transaction_id") if isinstance(metadata, dict) else None
+        
+        # Tenta múltiplas formas de encontrar o ID
+        raw_tx_id = tx_id_from_metadata or data.get("id") or data.get("payment_id") or data.get("external_reference")
+        tx_id = str(raw_tx_id).lower() if raw_tx_id else None
+        
+        if not tx_id:
+            logger.warning(f"⚠️ [WIINPAY WEBHOOK] Sem ID de transação no payload")
+            return {"status": "ignored"}
+        
+        logger.info(f"🔍 [WIINPAY WEBHOOK] Buscando pedido com tx_id: {tx_id}")
+        
+        # Buscar pedido
+        pedido = db.query(Pedido).filter(
+            (Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)
+        ).first()
+        
+        if not pedido:
+            logger.warning(f"⚠️ [WIINPAY WEBHOOK] Pedido {tx_id} não encontrado")
+            return {"status": "ok", "msg": "Order not found"}
+        
+        if pedido.status in ["approved", "paid", "active"]:
+            logger.info(f"ℹ️ [WIINPAY WEBHOOK] Pedido {tx_id} já aprovado anteriormente")
+            return {"status": "ok", "msg": "Already paid"}
+        
+        # Marca a gateway usada
+        pedido.gateway_usada = "wiinpay"
+        
+        logger.info(f"✅ [WIINPAY WEBHOOK] Pagamento confirmado! Redirecionando para processamento padrão...")
+        
+        # Redireciona para o webhook_pix genérico passando o payload como se fosse padronizado
+        # Fazemos isso criando um request fake com o mesmo formato
+        from starlette.requests import Request as StarletteRequest
+        from starlette.datastructures import Headers
+        
+        # Padroniza o payload para o formato que webhook_pix espera
+        standardized = {
+            "id": tx_id,
+            "status": "paid",
+            "metadata": metadata
+        }
+        
+        # Atualiza direto no banco (para não depender do redirecionamento)
+        # O processamento completo segue no webhook_pix padrão que já existe
+        # Mas aqui vamos repassar para ele
+        
+        db.commit()
+        
+        # Chama diretamente o webhook_pix com os dados padronizados
+        # Criando um mock de Request
+        import io
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/webhook/pix",
+            "headers": [(b"content-type", b"application/json")],
+        }
+        body_standardized = json.dumps(standardized).encode("utf-8")
+        
+        class FakeReceive:
+            def __init__(self, body):
+                self._body = body
+                self._sent = False
+            async def __call__(self):
+                if not self._sent:
+                    self._sent = True
+                    return {"type": "http.request", "body": self._body}
+                return {"type": "http.disconnect"}
+        
+        fake_request = Request(scope, receive=FakeReceive(body_standardized))
+        
+        result = await webhook_pix(fake_request, db)
+        logger.info(f"✅ [WIINPAY WEBHOOK] Processamento concluído: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ [WIINPAY WEBHOOK] Erro: {e}", exc_info=True)
+        # Registra para retry
+        try:
+            registrar_webhook_para_retry(
+                webhook_type='wiinpay',
+                payload=body_str if 'body_str' in dir() else "{}",
+                reference_id=tx_id if 'tx_id' in dir() else None,
+                db=db
+            )
+        except:
+            pass
+        return {"status": "error"}
 
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
@@ -11589,6 +12275,8 @@ def update_user_financials(
         user.email = user_data.email
     if user_data.pushin_pay_id is not None:
         user.pushin_pay_id = user_data.pushin_pay_id
+    if user_data.wiinpay_user_id is not None:
+        user.wiinpay_user_id = user_data.wiinpay_user_id
     # 👑 Só o Admin pode mudar a taxa que o membro paga
     if user_data.taxa_venda is not None:
         user.taxa_venda = user_data.taxa_venda
@@ -12026,6 +12714,7 @@ def get_global_config(
     return {
         "default_fee": int(config_map.get("default_fee", "60")),
         "master_pushin_pay_id": config_map.get("master_pushin_pay_id", ""),
+        "master_wiinpay_user_id": config_map.get("master_wiinpay_user_id", ""),
         "maintenance_mode": config_map.get("maintenance_mode", "false") == "true"
     }
 
@@ -12050,6 +12739,7 @@ def update_global_config(
     try:
         upsert("default_fee", config.default_fee)
         upsert("master_pushin_pay_id", config.master_pushin_pay_id)
+        upsert("master_wiinpay_user_id", config.master_wiinpay_user_id)
         upsert("maintenance_mode", "true" if config.maintenance_mode else "false")
         db.commit()
         

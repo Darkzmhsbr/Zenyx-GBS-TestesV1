@@ -56,9 +56,10 @@ class User(Base):
     created_at = Column(DateTime, default=now_brazil)
     updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
     
-    # 🆕 NOVOS CAMPOS FINANCEIROS
-    pushin_pay_id = Column(String, nullable=True) # ID da conta do membro na Pushin
-    taxa_venda = Column(Integer, default=60)      # Taxa em centavos (Padrão: 60)
+    # 🆕 CAMPOS FINANCEIROS (MULTI-GATEWAY)
+    pushin_pay_id = Column(String, nullable=True)   # ID da conta do membro na PushinPay
+    wiinpay_user_id = Column(String, nullable=True)  # ID da conta do membro na WiinPay
+    taxa_venda = Column(Integer, default=60)         # Taxa em centavos (Padrão: 60)
 
     # RELACIONAMENTO: Um usuário possui vários bots
     bots = relationship("Bot", back_populates="owner")
@@ -97,8 +98,17 @@ class Bot(Base):
     
     status = Column(String, default="ativo")
     
-    # Token Individual por Bot
+    # Token Individual por Bot (PUSHIN PAY)
     pushin_token = Column(String, nullable=True) 
+    
+    # 🆕 MULTI-GATEWAY: WiinPay
+    wiinpay_api_key = Column(String, nullable=True)   # Chave API do usuário na WiinPay
+    
+    # 🆕 MULTI-GATEWAY: Controle de Gateways
+    gateway_principal = Column(String, default="pushinpay")  # "pushinpay" ou "wiinpay"
+    gateway_fallback = Column(String, nullable=True)          # Gateway de contingência
+    pushinpay_ativo = Column(Boolean, default=False)          # Gateway PushinPay ativa para este bot
+    wiinpay_ativo = Column(Boolean, default=False)            # Gateway WiinPay ativa para este bot
 
     created_at = Column(DateTime, default=now_brazil)
     
@@ -323,7 +333,7 @@ class WebhookRetry(Base):
     __tablename__ = "webhook_retry"
     
     id = Column(Integer, primary_key=True, index=True)
-    webhook_type = Column(String(50))
+    webhook_type = Column(String(50))  # "pushinpay" ou "wiinpay"
     payload = Column(Text)
     attempts = Column(Integer, default=0)
     max_attempts = Column(Integer, default=5)
@@ -455,6 +465,9 @@ class Pedido(Base):
     txid = Column(String, unique=True, index=True) 
     qr_code = Column(Text, nullable=True)
     transaction_id = Column(String, nullable=True)
+    
+    # 🆕 MULTI-GATEWAY: Qual gateway processou este pagamento
+    gateway_usada = Column(String, nullable=True)  # "pushinpay" ou "wiinpay"
     
     data_aprovacao = Column(DateTime, nullable=True)
     data_expiracao = Column(DateTime, nullable=True)
