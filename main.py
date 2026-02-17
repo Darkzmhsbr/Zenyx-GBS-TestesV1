@@ -3122,18 +3122,17 @@ async def gerar_pix_wiinpay(
             owner = db.query(User).filter(User.id == bot.owner_id).first()
             
             if owner:
-                # Vamos buscar a ID da plataforma WiinPay diretamente na tabela de configurações (SystemConfig)
-                # ou na tabela do usuário Master, dependendo de como você salvou.
-                # Assumindo que você salva isso na tabela SystemConfig com a chave "wiinpay_user_id"
                 from database import SystemConfig
                 
-                cfg_wiinpay_id = db.query(SystemConfig).filter(SystemConfig.key == "wiinpay_user_id").first()
+                # 🎯 SOLUÇÃO DEFINITIVA: Buscando com a chave EXATA do seu banco de dados
+                cfg_wiinpay_id = db.query(SystemConfig).filter(SystemConfig.key == "master_wiinpay_user_id").first()
                 plataforma_wiinpay_id = cfg_wiinpay_id.value if cfg_wiinpay_id else None
                 
-                # Fallback: Se não achar no SystemConfig, tentamos pegar do dono do bot ID 1 (você, Master)
+                # Fallback de segurança: Puxando direto do Super Admin na tabela Users
                 if not plataforma_wiinpay_id:
                     master_user = db.query(User).filter(User.id == 1).first()
-                    plataforma_wiinpay_id = getattr(master_user, 'wiinpay_user_id', None)
+                    if master_user:
+                        plataforma_wiinpay_id = getattr(master_user, 'wiinpay_user_id', None)
                 
                 if plataforma_wiinpay_id:
                     # ⚠️ PROTEÇÃO: Se o owner do bot TEM wiinpay_user_id e é O MESMO da plataforma,
