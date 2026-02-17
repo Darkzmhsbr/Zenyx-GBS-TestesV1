@@ -3005,18 +3005,18 @@ def get_plataforma_pushin_id(db: Session) -> str:
     """
     Retorna o pushin_pay_id da plataforma Zenyx para receber as taxas.
     Prioridade:
-    1. SystemConfig (pushin_plataforma_id)
-    2. Primeiro Super Admin encontrado
+    1. SystemConfig (master_pushin_pay_id OU pushin_plataforma_id)
+    2. Primeiro Super Admin com pushin_pay_id
     3. None se não encontrar
     """
     try:
-        # 1. Tenta buscar da SystemConfig
-        config = db.query(SystemConfig).filter(
-            SystemConfig.key == "pushin_plataforma_id"  # ✅ CORRIGIDO: key ao invés de chave
-        ).first()
-        
-        if config and config.value:  # ✅ CORRIGIDO: value ao invés de valor
-            return config.value
+        # 1. Tenta buscar da SystemConfig (ambas as keys possíveis)
+        for key_name in ["master_pushin_pay_id", "pushin_plataforma_id"]:
+            config = db.query(SystemConfig).filter(
+                SystemConfig.key == key_name
+            ).first()
+            if config and config.value and config.value.strip():
+                return config.value.strip()
         
         # 2. Busca o primeiro Super Admin com pushin_pay_id configurado
         from database import User
@@ -8404,7 +8404,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     mytx = str(uuid.uuid4())
                     
                     # Passamos agendar_remarketing=False para NÃO reiniciar o ciclo de mensagens
-                    pix = await gerar_pix_pushinpay(
+                    pix, _gw_usada = await gerar_pix_gateway(
                         valor_float=preco_promo,
                         transaction_id=mytx,
                         bot_id=bot_db.id,
@@ -8433,7 +8433,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             status="pending",
                             tem_order_bump=False,
                             created_at=now_brazil(),
-                            tracking_id=track_id_pedido
+                            tracking_id=track_id_pedido,
+                            gateway_usada=_gw_usada,
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -8576,7 +8577,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     mytx = str(uuid.uuid4())
                     
                     # 🔥 NÃO REINICIA O CICLO DE REMARKETING
-                    pix = await gerar_pix_pushinpay(
+                    pix, _gw_usada = await gerar_pix_gateway(
                         valor_float=valor_final,
                         transaction_id=mytx,
                         bot_id=bot_db.id,
@@ -8606,7 +8607,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             tem_order_bump=False,
                             created_at=now_brazil(),
                             tracking_id=track_id_pedido,
-                            origem='disparo_auto'
+                            origem='disparo_auto',
+                            gateway_usada=_gw_usada,
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -8706,7 +8708,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     mytx = str(uuid.uuid4())
                     
                     # Gera PIX com remarketing integrado
-                    pix = await gerar_pix_pushinpay(
+                    pix, _gw_usada = await gerar_pix_gateway(
                         valor_float=plano.preco_atual,
                         transaction_id=mytx,
                         bot_id=bot_db.id,
@@ -8734,7 +8736,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             status="pending",
                             tem_order_bump=False,
                             created_at=now_brazil(),
-                            tracking_id=track_id_pedido
+                            tracking_id=track_id_pedido,
+                            gateway_usada=_gw_usada,
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -8812,7 +8815,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 mytx = str(uuid.uuid4())
 
                 # Gera PIX com remarketing integrado
-                pix = await gerar_pix_pushinpay(
+                pix, _gw_usada = await gerar_pix_gateway(
                     valor_float=valor_final,
                     transaction_id=mytx,
                     bot_id=bot_db.id,
@@ -8840,7 +8843,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         status="pending",
                         tem_order_bump=aceitou,
                         created_at=now_brazil(),
-                        tracking_id=track_id_pedido
+                        tracking_id=track_id_pedido,
+                        gateway_usada=_gw_usada,
                     )
                     db.add(novo_pedido)
                     db.commit()
@@ -8960,7 +8964,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     try:
                         # 🔥 NÃO REINICIA O CICLO DE REMARKETING
-                        pix = await gerar_pix_pushinpay(
+                        pix, _gw_usada = await gerar_pix_gateway(
                             valor_float=preco_final,
                             transaction_id=mytx,
                             bot_id=bot_db.id,
@@ -9001,7 +9005,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             tem_order_bump=False, 
                             created_at=now_brazil(), 
                             tracking_id=_track_id_rmkt,
-                            origem='remarketing'
+                            origem='remarketing',
+                            gateway_usada=_gw_usada,
                         )
                         db.add(novo_pedido)
                         
@@ -9091,7 +9096,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     preco_upsell = round(float(upsell_cfg.preco), 2)
                     
                     try:
-                        pix = await gerar_pix_pushinpay(
+                        pix, _gw_usada = await gerar_pix_gateway(
                             valor_float=preco_upsell,
                             transaction_id=mytx,
                             bot_id=bot_db.id,
@@ -9127,7 +9132,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             created_at=now_brazil(),
                             status_funil='fundo',
                             origem='upsell',
-                            tracking_id=(db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first() or type('', (), {'tracking_id': None})).tracking_id
+                            tracking_id=(db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first() or type('', (), {'tracking_id': None})).tracking_id,
+                            gateway_usada=_gw_usada
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -9192,7 +9198,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     preco_downsell = round(float(downsell_cfg.preco), 2)
                     
                     try:
-                        pix = await gerar_pix_pushinpay(
+                        pix, _gw_usada = await gerar_pix_gateway(
                             valor_float=preco_downsell,
                             transaction_id=mytx,
                             bot_id=bot_db.id,
@@ -9228,7 +9234,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             created_at=now_brazil(),
                             status_funil='fundo',
                             origem='downsell',
-                            tracking_id=(db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first() or type('', (), {'tracking_id': None})).tracking_id
+                            tracking_id=(db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first() or type('', (), {'tracking_id': None})).tracking_id,
+                            gateway_usada=_gw_usada
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -12744,6 +12751,8 @@ def update_global_config(
         db.commit()
         
         logger.info(f"⚙️ Config global atualizada por {current_user.username}")
+        logger.info(f"  master_pushin_pay_id: {config.master_pushin_pay_id}")
+        logger.info(f"  master_wiinpay_user_id: {config.master_wiinpay_user_id}")
         return {"message": "Configurações salvas com sucesso!"}
     except Exception as e:
         db.rollback()
