@@ -14092,3 +14092,65 @@ async def migrate_canal_notificacao(db: Session = Depends(get_db)):
             "message": f"❌ Erro geral: {str(e)}",
             "detalhes": str(e)
         }
+
+# ============================================================
+# 🔧 MIGRAÇÃO: MULTI-GATEWAY (WIINPAY + CONTINGÊNCIA)
+# ============================================================
+@app.get("/migrate-multi-gateway")
+async def migrate_multi_gateway(db: Session = Depends(get_db)):
+    """
+    Migração: Adiciona todas as colunas do sistema multi-gateway.
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-multi-gateway
+    """
+    try:
+        from sqlalchemy import text
+        
+        resultados = []
+        
+        comandos = [
+            ("bots", "wiinpay_api_key", "ALTER TABLE bots ADD COLUMN wiinpay_api_key VARCHAR;"),
+            ("bots", "gateway_principal", "ALTER TABLE bots ADD COLUMN gateway_principal VARCHAR DEFAULT 'pushinpay';"),
+            ("bots", "gateway_fallback", "ALTER TABLE bots ADD COLUMN gateway_fallback VARCHAR;"),
+            ("bots", "pushinpay_ativo", "ALTER TABLE bots ADD COLUMN pushinpay_ativo BOOLEAN DEFAULT FALSE;"),
+            ("bots", "wiinpay_ativo", "ALTER TABLE bots ADD COLUMN wiinpay_ativo BOOLEAN DEFAULT FALSE;"),
+            ("users", "wiinpay_user_id", "ALTER TABLE users ADD COLUMN wiinpay_user_id VARCHAR;"),
+            ("pedidos", "gateway_usada", "ALTER TABLE pedidos ADD COLUMN gateway_usada VARCHAR;"),
+        ]
+        
+        for tabela, coluna, sql in comandos:
+            try:
+                db.execute(text(sql))
+                db.commit()
+                resultados.append(f"✅ {tabela}.{coluna} criada com sucesso!")
+            except Exception as e:
+                db.rollback()
+                if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                    resultados.append(f"ℹ️ {tabela}.{coluna} já existe")
+                else:
+                    resultados.append(f"❌ {tabela}.{coluna}: {str(e)}")
+        
+        # Verificação final
+        try:
+            check = db.execute(text("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'bots' AND column_name IN 
+                ('wiinpay_api_key', 'gateway_principal', 'gateway_fallback', 'pushinpay_ativo', 'wiinpay_ativo')
+            """))
+            cols_bots = [r[0] for r in check.fetchall()]
+            resultados.append(f"✅ Verificação bots: {cols_bots}")
+        except:
+            pass
+        
+        return {
+            "status": "success",
+            "message": "✅ Migração Multi-Gateway concluída!",
+            "resultados": resultados
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"❌ Erro geral: {str(e)}",
+            "detalhes": str(e)
+        }
