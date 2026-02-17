@@ -3127,47 +3127,53 @@ async def gerar_pix_pushinpay(
                 plataforma_id = get_plataforma_pushin_id(db)
                 
                 if plataforma_id:
-                    # Define a taxa: 1) User personalizada, 2) Config Global, 3) Padrão 60
-                    taxa_centavos = owner.taxa_venda
-                    if not taxa_centavos:
-                        try:
-                            cfg_fee = db.query(SystemConfig).filter(SystemConfig.key == "default_fee").first()
-                            taxa_centavos = int(cfg_fee.value) if cfg_fee and cfg_fee.value else 60
-                        except:
-                            taxa_centavos = 60
-                    
-                    # 🔥 CALCULA TAXA DA PUSHINPAY (aproximadamente 3%)
-                    taxa_pushinpay_estimada = int(valor_centavos * 0.03)
-                    valor_disponivel_estimado = valor_centavos - taxa_pushinpay_estimada
-                    
-                    # 🔥 LOG DEBUG 2
-                    logger.info(f"🔍 [DEBUG] Checando split:")
-                    logger.info(f"  Valor total: R$ {valor_centavos/100:.2f} ({valor_centavos} centavos)")
-                    logger.info(f"  Taxa PushinPay estimada (~3%): R$ {taxa_pushinpay_estimada/100:.2f}")
-                    logger.info(f"  Valor disponível estimado: R$ {valor_disponivel_estimado/100:.2f}")
-                    logger.info(f"  Sua taxa desejada: R$ {taxa_centavos/100:.2f} ({taxa_centavos} centavos)")
-                    logger.info(f"  Percentual da sua taxa: {(taxa_centavos/valor_centavos)*100:.1f}%")
-                    
-                    # 🔥 VALIDAÇÃO: Sua taxa não pode ser maior que o valor disponível
-                    if taxa_centavos >= valor_disponivel_estimado:
-                        logger.warning(f"⚠️ [DEBUG] Taxa ({taxa_centavos}) >= Valor Disponível Estimado ({valor_disponivel_estimado}).")
-                        logger.warning(f"   💡 SUGESTÃO: Use valores ≥ R$ 2,00 para garantir que o split funcione.")
-                        logger.warning(f"   Split NÃO será aplicado nesta venda.")
+                    # ⚠️ PROTEÇÃO: Se o pushin_pay_id do owner é O MESMO da plataforma,
+                    # significa que o bot pertence à plataforma — não cobra taxa de si mesmo.
+                    owner_pushin_id = getattr(owner, 'pushin_pay_id', None)
+                    if owner_pushin_id and owner_pushin_id.strip() == plataforma_id.strip():
+                        logger.info(f"ℹ️ [DEBUG] Owner é a própria plataforma. PIX SEM split (mesma conta).")
                     else:
-                        # ✅ Monta o split_rules
-                        payload["split_rules"] = [
-                            {
-                                "value": taxa_centavos,
-                                "account_id": plataforma_id,
-                                "charge_processing_fee": False
-                            }
-                        ]
+                        # Define a taxa: 1) User personalizada, 2) Config Global, 3) Padrão 60
+                        taxa_centavos = owner.taxa_venda
+                        if not taxa_centavos:
+                            try:
+                                cfg_fee = db.query(SystemConfig).filter(SystemConfig.key == "default_fee").first()
+                                taxa_centavos = int(cfg_fee.value) if cfg_fee and cfg_fee.value else 60
+                            except:
+                                taxa_centavos = 60
                         
-                        # 🔥 LOG DEBUG 3
-                        logger.info(f"✅ [DEBUG] SPLIT CONFIGURADO!")
-                        logger.info(f"  Split value: {taxa_centavos} centavos")
-                        logger.info(f"  Account ID: {plataforma_id}")
-                        logger.info(f"  Usuário receberá (estimado): R$ {(valor_disponivel_estimado - taxa_centavos)/100:.2f}")
+                        # 🔥 CALCULA TAXA DA PUSHINPAY (aproximadamente 3%)
+                        taxa_pushinpay_estimada = int(valor_centavos * 0.03)
+                        valor_disponivel_estimado = valor_centavos - taxa_pushinpay_estimada
+                        
+                        # 🔥 LOG DEBUG 2
+                        logger.info(f"🔍 [DEBUG] Checando split:")
+                        logger.info(f"  Valor total: R$ {valor_centavos/100:.2f} ({valor_centavos} centavos)")
+                        logger.info(f"  Taxa PushinPay estimada (~3%): R$ {taxa_pushinpay_estimada/100:.2f}")
+                        logger.info(f"  Valor disponível estimado: R$ {valor_disponivel_estimado/100:.2f}")
+                        logger.info(f"  Sua taxa desejada: R$ {taxa_centavos/100:.2f} ({taxa_centavos} centavos)")
+                        logger.info(f"  Percentual da sua taxa: {(taxa_centavos/valor_centavos)*100:.1f}%")
+                        
+                        # 🔥 VALIDAÇÃO: Sua taxa não pode ser maior que o valor disponível
+                        if taxa_centavos >= valor_disponivel_estimado:
+                            logger.warning(f"⚠️ [DEBUG] Taxa ({taxa_centavos}) >= Valor Disponível Estimado ({valor_disponivel_estimado}).")
+                            logger.warning(f"   💡 SUGESTÃO: Use valores ≥ R$ 2,00 para garantir que o split funcione.")
+                            logger.warning(f"   Split NÃO será aplicado nesta venda.")
+                        else:
+                            # ✅ Monta o split_rules
+                            payload["split_rules"] = [
+                                {
+                                    "value": taxa_centavos,
+                                    "account_id": plataforma_id,
+                                    "charge_processing_fee": False
+                                }
+                            ]
+                            
+                            # 🔥 LOG DEBUG 3
+                            logger.info(f"✅ [DEBUG] SPLIT CONFIGURADO!")
+                            logger.info(f"  Split value: {taxa_centavos} centavos")
+                            logger.info(f"  Account ID: {plataforma_id}")
+                            logger.info(f"  Usuário receberá (estimado): R$ {(valor_disponivel_estimado - taxa_centavos)/100:.2f}")
                 else:
                     logger.warning("⚠️ [DEBUG] Pushin Pay ID da plataforma não configurado. Gerando PIX SEM split.")
             else:
@@ -3455,32 +3461,39 @@ async def gerar_pix_wiinpay(
                 plataforma_wiinpay_id = get_plataforma_wiinpay_id(db)
                 
                 if plataforma_wiinpay_id:
-                    # Define a taxa
-                    taxa_centavos = owner.taxa_venda
-                    if not taxa_centavos:
-                        try:
-                            cfg_fee = db.query(SystemConfig).filter(SystemConfig.key == "default_fee").first()
-                            taxa_centavos = int(cfg_fee.value) if cfg_fee and cfg_fee.value else 60
-                        except:
-                            taxa_centavos = 60
-                    
-                    # Converte taxa de centavos para reais (WiinPay usa reais)
-                    taxa_reais = taxa_centavos / 100.0
-                    
-                    logger.info(f"🔍 [WIINPAY DEBUG] Checando split:")
-                    logger.info(f"  Valor total: R$ {valor_float:.2f}")
-                    logger.info(f"  Taxa desejada: R$ {taxa_reais:.2f}")
-                    
-                    if taxa_reais >= (valor_float * 0.5):
-                        logger.warning(f"⚠️ [WIINPAY] Taxa muito alta! Split NÃO aplicado.")
+                    # ⚠️ PROTEÇÃO: Se o owner do bot TEM wiinpay_user_id e é O MESMO da plataforma,
+                    # significa que a API Key do bot pertence à mesma conta que receberia o split.
+                    # A WiinPay rejeita split para a mesma conta (422).
+                    owner_wiinpay_id = getattr(owner, 'wiinpay_user_id', None)
+                    if owner_wiinpay_id and owner_wiinpay_id.strip() == plataforma_wiinpay_id.strip():
+                        logger.info(f"ℹ️ [WIINPAY] Owner é a própria plataforma. PIX SEM split (mesma conta).")
                     else:
-                        payload["split"] = {
-                            "value": round(taxa_reais, 2),
-                            "user_id": plataforma_wiinpay_id
-                        }
-                        logger.info(f"✅ [WIINPAY DEBUG] SPLIT CONFIGURADO!")
-                        logger.info(f"  Split value: R$ {taxa_reais:.2f}")
-                        logger.info(f"  User ID: {plataforma_wiinpay_id}")
+                        # Define a taxa
+                        taxa_centavos = owner.taxa_venda
+                        if not taxa_centavos:
+                            try:
+                                cfg_fee = db.query(SystemConfig).filter(SystemConfig.key == "default_fee").first()
+                                taxa_centavos = int(cfg_fee.value) if cfg_fee and cfg_fee.value else 60
+                            except:
+                                taxa_centavos = 60
+                        
+                        # Converte taxa de centavos para reais (WiinPay usa reais)
+                        taxa_reais = taxa_centavos / 100.0
+                        
+                        logger.info(f"🔍 [WIINPAY DEBUG] Checando split:")
+                        logger.info(f"  Valor total: R$ {valor_float:.2f}")
+                        logger.info(f"  Taxa desejada: R$ {taxa_reais:.2f}")
+                        
+                        if taxa_reais >= (valor_float * 0.5):
+                            logger.warning(f"⚠️ [WIINPAY] Taxa muito alta! Split NÃO aplicado.")
+                        else:
+                            payload["split"] = {
+                                "value": round(taxa_reais, 2),
+                                "user_id": plataforma_wiinpay_id
+                            }
+                            logger.info(f"✅ [WIINPAY DEBUG] SPLIT CONFIGURADO!")
+                            logger.info(f"  Split value: R$ {taxa_reais:.2f}")
+                            logger.info(f"  User ID: {plataforma_wiinpay_id}")
                 else:
                     logger.warning("⚠️ [WIINPAY] WiinPay User ID da plataforma não configurado. PIX SEM split.")
             else:
