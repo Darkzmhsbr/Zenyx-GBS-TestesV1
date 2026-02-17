@@ -546,6 +546,10 @@ async def verificar_vencimentos():
     """
     Job agendado para verificar e processar vencimentos de assinaturas.
     Executa a cada 12 horas.
+    
+    Verifica AMBOS os campos: data_expiracao e custom_expiration.
+    Remove do canal VIP principal E dos grupos extras (BotGroup).
+    Protege admins contra remoção.
     """
     try:
         logger.info("🔄 [JOB] Iniciando verificação de vencimentos...")
@@ -553,10 +557,16 @@ async def verificar_vencimentos():
         db = SessionLocal()
         
         try:
-            # Buscar pedidos ativos que venceram
+            agora = now_brazil()
+            
+            # Buscar pedidos ativos/aprovados que venceram
+            # Verifica custom_expiration (prioridade) OU data_expiracao
             pedidos_vencidos = db.query(Pedido).filter(
-                Pedido.status == 'ativo',
-                Pedido.validade < now_brazil()
+                Pedido.status.in_(['approved', 'active', 'paid']),
+                or_(
+                    and_(Pedido.custom_expiration != None, Pedido.custom_expiration < agora),
+                    and_(Pedido.custom_expiration == None, Pedido.data_expiracao != None, Pedido.data_expiracao < agora)
+                )
             ).all()
             
             if not pedidos_vencidos:
@@ -565,55 +575,114 @@ async def verificar_vencimentos():
             
             logger.info(f"📋 [JOB] {len(pedidos_vencidos)} vencimentos encontrados")
             
+            removidos = 0
+            erros = 0
+            
             # Processar cada vencimento
             for pedido in pedidos_vencidos:
                 try:
-                    # Atualizar status do pedido
-                    pedido.status = 'vencido'
-                    pedido.updated_at = now_brazil()
+                    # Buscar o bot associado
+                    bot_data = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
+                    if not bot_data or not bot_data.token:
+                        pedido.status = 'expired'
+                        db.commit()
+                        continue
                     
-                    # Remover do grupo Telegram (se configurado)
-                    if pedido.grupo_id and pedido.user and pedido.user.telegram_id:
+                    # 🔥 Proteção: Admin nunca é removido
+                    eh_admin_principal = (
+                        bot_data.admin_principal_id and 
+                        str(pedido.telegram_id) == str(bot_data.admin_principal_id)
+                    )
+                    eh_admin_extra = db.query(BotAdmin).filter(
+                        BotAdmin.telegram_id == str(pedido.telegram_id),
+                        BotAdmin.bot_id == bot_data.id
+                    ).first()
+                    
+                    if eh_admin_principal or eh_admin_extra:
+                        logger.info(f"👑 [JOB] Ignorando remoção de Admin: {pedido.telegram_id}")
+                        continue
+                    
+                    # Conectar no Telegram
+                    tb = telebot.TeleBot(bot_data.token, threaded=False)
+                    
+                    # === REMOÇÃO DO CANAL VIP PRINCIPAL ===
+                    if bot_data.id_canal_vip:
                         try:
-                            # Buscar bot associado ao grupo
-                            bot_config = db.query(BotModel).filter(
-                                BotModel.grupo_telegram_id == pedido.grupo_id
-                            ).first()
+                            raw_id = str(bot_data.id_canal_vip).strip()
+                            canal_id = int(raw_id)
                             
-                            if bot_config and bot_config.token:
-                                # Criar instância do TeleBot
-                                bot = TeleBot(bot_config.token)
-                                
-                                # Remover usuário do grupo
-                                bot.ban_chat_member(
-                                    chat_id=int(pedido.grupo_id),
-                                    user_id=int(pedido.user.telegram_id)
-                                )
-                                bot.unban_chat_member(
-                                    chat_id=int(pedido.grupo_id),
-                                    user_id=int(pedido.user.telegram_id)
-                                )
-                                
-                                logger.info(
-                                    f"👋 [JOB] Usuário {pedido.user.nome} "
-                                    f"removido do grupo"
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                f"⚠️  [JOB] Erro ao remover do grupo: {str(e)}"
-                            )
+                            tb.ban_chat_member(canal_id, int(pedido.telegram_id))
+                            time.sleep(0.5)
+                            tb.unban_chat_member(canal_id, int(pedido.telegram_id))
+                            
+                            logger.info(f"👋 [JOB] Usuário {pedido.first_name} ({pedido.telegram_id}) removido do canal VIP (Bot: {bot_data.nome})")
+                        except Exception as e_kick:
+                            err_msg = str(e_kick).lower()
+                            if "participant_id_invalid" in err_msg or "user not found" in err_msg or "user_not_participant" in err_msg:
+                                logger.info(f"ℹ️ [JOB] Usuário {pedido.telegram_id} já havia saído do canal VIP.")
+                            else:
+                                logger.warning(f"⚠️ [JOB] Erro ao remover {pedido.telegram_id} do canal VIP: {e_kick}")
+                    
+                    # === REMOÇÃO DOS GRUPOS EXTRAS (BotGroup) ===
+                    if pedido.plano_id:
+                        try:
+                            grupos_extras = db.query(BotGroup).filter(
+                                BotGroup.bot_id == bot_data.id,
+                                BotGroup.is_active == True
+                            ).all()
+                            
+                            for grupo in grupos_extras:
+                                # Verificar se o plano do pedido está nos planos vinculados ao grupo
+                                plan_ids = grupo.plan_ids if grupo.plan_ids else []
+                                if pedido.plano_id in plan_ids:
+                                    try:
+                                        grupo_id = int(str(grupo.group_id).strip())
+                                        tb.ban_chat_member(grupo_id, int(pedido.telegram_id))
+                                        time.sleep(0.3)
+                                        tb.unban_chat_member(grupo_id, int(pedido.telegram_id))
+                                        logger.info(f"👋 [JOB] Usuário {pedido.telegram_id} removido do grupo extra '{grupo.title}'")
+                                    except Exception as e_grupo:
+                                        err_msg = str(e_grupo).lower()
+                                        if "participant_id_invalid" in err_msg or "user not found" in err_msg or "user_not_participant" in err_msg:
+                                            pass  # Já saiu, sem problema
+                                        else:
+                                            logger.warning(f"⚠️ [JOB] Erro ao remover do grupo '{grupo.title}': {e_grupo}")
+                        except Exception as e_grupos:
+                            logger.warning(f"⚠️ [JOB] Erro ao processar grupos extras: {e_grupos}")
+                    
+                    # === ATUALIZAR STATUS ===
+                    pedido.status = 'expired'
+                    
+                    # Sincronizar Lead
+                    lead = db.query(Lead).filter(
+                        Lead.bot_id == pedido.bot_id, 
+                        Lead.user_id == str(pedido.telegram_id)
+                    ).first()
+                    if lead:
+                        lead.status = 'expired'
                     
                     db.commit()
-                    logger.info(f"✅ [JOB] Pedido #{pedido.id} marcado como vencido")
+                    removidos += 1
+                    
+                    # Avisar o usuário no privado
+                    try:
+                        tb.send_message(
+                            int(pedido.telegram_id),
+                            "🚫 <b>Seu plano venceu!</b>\n\nPara renovar, digite /start",
+                            parse_mode="HTML"
+                        )
+                    except:
+                        pass
+                    
+                    logger.info(f"✅ [JOB] Pedido #{pedido.id} marcado como expired")
                     
                 except Exception as e:
-                    logger.error(
-                        f"❌ [JOB] Erro ao processar pedido #{pedido.id}: {str(e)}"
-                    )
+                    logger.error(f"❌ [JOB] Erro ao processar pedido #{pedido.id}: {str(e)}")
                     db.rollback()
+                    erros += 1
                     continue
             
-            logger.info("✅ [JOB] Verificação de vencimentos concluída")
+            logger.info(f"✅ [JOB] Verificação concluída: {removidos} removidos, {erros} erros")
             
         finally:
             db.close()
@@ -2693,14 +2762,16 @@ def registrar_remarketing(
     except Exception as e:
         logger.error(f"❌ Falha no reparo do banco: {e}")
 
-    # 3. Inicia o Agendador (Scheduler)
+    # 3. Inicia o Agendador (Scheduler) - Jobs já registrados no nível do módulo
     try:
-        # Se você usa scheduler, inicia aqui
         if 'scheduler' in globals():
-            scheduler.add_job(verificar_vencimentos, 'interval', hours=12)
-            scheduler.add_job(executar_remarketing, 'interval', minutes=30) 
-            scheduler.start()
-            logger.info("⏰ [STARTUP] Agendador de tarefas iniciado.")
+            # Jobs já adicionados (verificar_vencimentos, webhook_retry, cleanup_remarketing)
+            # Apenas adiciona o remarketing se existir a função
+            try:
+                scheduler.add_job(executar_remarketing, 'interval', minutes=30, id='executar_remarketing', replace_existing=True)
+            except Exception:
+                pass
+            logger.info("⏰ [STARTUP] Agendador de tarefas configurado.")
     except Exception as e:
         logger.error(f"❌ [STARTUP] Erro no Scheduler: {e}")
 
@@ -2751,7 +2822,7 @@ def verificar_expiracao_massa():
             
             try:
                 # Conecta no Telegram deste bot específico
-                tb = telebot.TeleBot(bot_data.token)
+                tb = telebot.TeleBot(bot_data.token, threaded=False)
                 
                 # Tratamento ROBUSTO do ID do canal
                 try: 
@@ -2763,12 +2834,20 @@ def verificar_expiracao_massa():
                 
                 agora = now_brazil()
                 
-                # Busca usuários vencidos
+                # Busca usuários vencidos - verifica AMBOS os campos
                 vencidos = db.query(Pedido).filter(
                     Pedido.bot_id == bot_data.id,
                     Pedido.status.in_(['paid', 'approved', 'active']),
-                    Pedido.custom_expiration != None, 
-                    Pedido.custom_expiration < agora
+                    or_(
+                        and_(Pedido.custom_expiration != None, Pedido.custom_expiration < agora),
+                        and_(Pedido.custom_expiration == None, Pedido.data_expiracao != None, Pedido.data_expiracao < agora)
+                    )
+                ).all()
+                
+                # Pré-carregar grupos extras do bot (uma vez por bot, evita N+1 queries)
+                grupos_extras = db.query(BotGroup).filter(
+                    BotGroup.bot_id == bot_data.id,
+                    BotGroup.is_active == True
                 ).all()
                 
                 for u in vencidos:
@@ -2792,15 +2871,43 @@ def verificar_expiracao_massa():
                     try:
                         logger.info(f"💀 Removendo usuário vencido: {u.first_name} (Bot: {bot_data.nome})")
                         
-                        # 1. Kick Suave
+                        # 1. Kick Suave do Canal VIP Principal
                         tb.ban_chat_member(canal_id, int(u.telegram_id))
+                        time.sleep(0.5)
                         tb.unban_chat_member(canal_id, int(u.telegram_id))
                         
-                        # 2. Atualiza Status
+                        # 2. Kick dos Grupos Extras (BotGroup) vinculados ao plano
+                        if u.plano_id and grupos_extras:
+                            for grupo in grupos_extras:
+                                plan_ids = grupo.plan_ids if grupo.plan_ids else []
+                                if u.plano_id in plan_ids:
+                                    try:
+                                        grupo_id = int(str(grupo.group_id).strip())
+                                        tb.ban_chat_member(grupo_id, int(u.telegram_id))
+                                        time.sleep(0.3)
+                                        tb.unban_chat_member(grupo_id, int(u.telegram_id))
+                                        logger.info(f"👋 Removido de grupo extra '{grupo.title}': {u.telegram_id}")
+                                    except Exception as e_g:
+                                        err_g = str(e_g).lower()
+                                        if "participant_id_invalid" in err_g or "user not found" in err_g or "user_not_participant" in err_g:
+                                            pass
+                                        else:
+                                            logger.warning(f"⚠️ Erro ao remover do grupo '{grupo.title}': {e_g}")
+                        
+                        # 3. Atualiza Status
                         u.status = 'expired'
+                        
+                        # 4. Sincronizar Lead
+                        lead = db.query(Lead).filter(
+                            Lead.bot_id == u.bot_id,
+                            Lead.user_id == str(u.telegram_id)
+                        ).first()
+                        if lead:
+                            lead.status = 'expired'
+                        
                         db.commit()
                         
-                        # 3. Avisa o usuário
+                        # 5. Avisa o usuário
                         try: 
                             tb.send_message(
                                 int(u.telegram_id), 
@@ -2812,7 +2919,7 @@ def verificar_expiracao_massa():
                         
                     except Exception as e_kick:
                         err_msg = str(e_kick).lower()
-                        if "participant_id_invalid" in err_msg or "user not found" in err_msg:
+                        if "participant_id_invalid" in err_msg or "user not found" in err_msg or "user_not_participant" in err_msg:
                             logger.info(f"Usuário {u.telegram_id} já havia saído. Marcando expired.")
                             u.status = 'expired'
                             db.commit()
@@ -13215,11 +13322,13 @@ def cron_check_expired(db: Session = Depends(get_db)):
     logger.info("💀 Iniciando verificação de vencidos...")
     now = now_brazil()
     
-    # 1. Busca pedidos aprovados que JÁ venceram (data_expiracao < agora)
+    # 1. Busca pedidos aprovados que JÁ venceram
     vencidos = db.query(Pedido).filter(
-        Pedido.status.in_(['approved', 'active']), # Apenas ativos
-        Pedido.data_expiracao != None,
-        Pedido.data_expiracao < now
+        Pedido.status.in_(['approved', 'active', 'paid']),
+        or_(
+            and_(Pedido.custom_expiration != None, Pedido.custom_expiration < now),
+            and_(Pedido.custom_expiration == None, Pedido.data_expiracao != None, Pedido.data_expiracao < now)
+        )
     ).all()
     
     removidos = 0
@@ -13228,36 +13337,82 @@ def cron_check_expired(db: Session = Depends(get_db)):
     for pedido in vencidos:
         try:
             bot_data = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
-            if not bot_data: continue
+            if not bot_data or not bot_data.token: 
+                pedido.status = 'expired'
+                db.commit()
+                removidos += 1
+                continue
+            
+            # 🔥 Proteção: Admin nunca é removido
+            eh_admin_principal = (
+                bot_data.admin_principal_id and 
+                str(pedido.telegram_id) == str(bot_data.admin_principal_id)
+            )
+            eh_admin_extra = db.query(BotAdmin).filter(
+                BotAdmin.telegram_id == str(pedido.telegram_id),
+                BotAdmin.bot_id == bot_data.id
+            ).first()
+            
+            if eh_admin_principal or eh_admin_extra:
+                logger.info(f"👑 Ignorando remoção de Admin: {pedido.telegram_id}")
+                continue
             
             # Conecta no Telegram (Sem threads para evitar erro)
             tb = telebot.TeleBot(bot_data.token, threaded=False)
             
-            # Identifica o Canal
-            canal_id = bot_data.id_canal_vip
-            if str(canal_id).replace("-","").isdigit(): canal_id = int(str(canal_id).strip())
-            
-            # --- AÇÃO DE REMOÇÃO ---
-            try:
-                # Banir (Kick) e Desbanir (Kick remove do grupo, Unban permite voltar pagando)
-                tb.ban_chat_member(canal_id, int(pedido.telegram_id))
-                time.sleep(1) # Espera 1s para o Telegram processar
-                tb.unban_chat_member(canal_id, int(pedido.telegram_id))
+            # === REMOÇÃO DO CANAL VIP PRINCIPAL ===
+            if bot_data.id_canal_vip:
+                canal_id = bot_data.id_canal_vip
+                if str(canal_id).replace("-","").isdigit(): canal_id = int(str(canal_id).strip())
                 
-                # Avisa o usuário no privado
                 try:
-                    tb.send_message(int(pedido.telegram_id), "🚫 <b>Seu acesso expirou!</b>\n\nObrigado por ter ficado conosco. Renove seu plano para voltar!", parse_mode="HTML")
-                except: pass
-                
-                logger.info(f"💀 Usuário {pedido.first_name} ({pedido.telegram_id}) removido do bot {bot_data.nome}")
-            except Exception as e_kick:
-                logger.warning(f"⚠️ Erro ao remover {pedido.telegram_id} (Talvez já saiu): {e_kick}")
+                    tb.ban_chat_member(canal_id, int(pedido.telegram_id))
+                    time.sleep(0.5)
+                    tb.unban_chat_member(canal_id, int(pedido.telegram_id))
+                    logger.info(f"💀 Usuário {pedido.first_name} ({pedido.telegram_id}) removido do bot {bot_data.nome}")
+                except Exception as e_kick:
+                    err_msg = str(e_kick).lower()
+                    if "participant_id_invalid" in err_msg or "user not found" in err_msg or "user_not_participant" in err_msg:
+                        logger.info(f"ℹ️ Usuário {pedido.telegram_id} já havia saído do canal VIP.")
+                    else:
+                        logger.warning(f"⚠️ Erro ao remover {pedido.telegram_id}: {e_kick}")
+            
+            # === REMOÇÃO DOS GRUPOS EXTRAS (BotGroup) ===
+            if pedido.plano_id:
+                try:
+                    grupos_extras = db.query(BotGroup).filter(
+                        BotGroup.bot_id == bot_data.id,
+                        BotGroup.is_active == True
+                    ).all()
+                    
+                    for grupo in grupos_extras:
+                        plan_ids = grupo.plan_ids if grupo.plan_ids else []
+                        if pedido.plano_id in plan_ids:
+                            try:
+                                grupo_id = int(str(grupo.group_id).strip())
+                                tb.ban_chat_member(grupo_id, int(pedido.telegram_id))
+                                time.sleep(0.3)
+                                tb.unban_chat_member(grupo_id, int(pedido.telegram_id))
+                                logger.info(f"👋 Removido de grupo extra '{grupo.title}': {pedido.telegram_id}")
+                            except Exception as e_g:
+                                err_g = str(e_g).lower()
+                                if "participant_id_invalid" in err_g or "user not found" in err_g or "user_not_participant" in err_g:
+                                    pass
+                                else:
+                                    logger.warning(f"⚠️ Erro ao remover do grupo '{grupo.title}': {e_g}")
+                except Exception as e_grupos:
+                    logger.warning(f"⚠️ Erro ao processar grupos extras: {e_grupos}")
+            
+            # Avisa o usuário no privado
+            try:
+                tb.send_message(int(pedido.telegram_id), "🚫 <b>Seu acesso expirou!</b>\n\nObrigado por ter ficado conosco. Renove seu plano para voltar!", parse_mode="HTML")
+            except: pass
             
             # Atualiza status no Pedido
             pedido.status = 'expired'
             
             # Atualiza status no Lead (Sincronia)
-            lead = db.query(Lead).filter(Lead.bot_id == pedido.bot_id, Lead.user_id == pedido.telegram_id).first()
+            lead = db.query(Lead).filter(Lead.bot_id == pedido.bot_id, Lead.user_id == str(pedido.telegram_id)).first()
             if lead:
                 lead.status = 'expired'
             
@@ -13266,6 +13421,7 @@ def cron_check_expired(db: Session = Depends(get_db)):
             
         except Exception as e:
             logger.error(f"❌ Erro ao processar vencido {pedido.id}: {e}")
+            db.rollback()
             erros += 1
 
     return {
@@ -13401,164 +13557,7 @@ def debug_users_list(db: Session = Depends(get_db)):
     except Exception as e:
         return {"erro_fatal": str(e)}
 
-# =========================================================
-# 🚑 ROTA DE EMERGÊNCIA V2 (SEM O CAMPO 'ROLE')
-# =========================================================
-@app.get("/api/admin/fix-account-emergency")
-def fix_admin_account_emergency(db: Session = Depends(get_db)):
-    try:
-        # SEU ID DA PUSHIN PAY (FIXO)
-        MY_PUSHIN_ID = "9D4FA0F6-5B3A-4A36-ABA3-E55ACDF5794E"
-        USERNAME_ALVO = "AdminZenyx" 
-        
-        # 1. Tenta achar o usuário
-        user = db.query(User).filter(User.username == USERNAME_ALVO).first()
-        
-        if user:
-            # CENÁRIO A: Atualiza APENAS o ID e o Superuser
-            msg_anterior = f"ID anterior: {getattr(user, 'pushin_pay_id', 'Não existe')}"
-            
-            user.pushin_pay_id = MY_PUSHIN_ID
-            user.is_superuser = True
-            # REMOVIDO: user.role = "admin" (Isso causava o erro!)
-            
-            db.commit()
-            return {
-                "status": "restored", 
-                "msg": f"✅ Usuário {USERNAME_ALVO} corrigido!",
-                "detail": f"{msg_anterior} -> Novo ID: {MY_PUSHIN_ID}"
-            }
-        
-        else:
-            # CENÁRIO B: Recria o usuário (Sem o campo role)
-            from passlib.context import CryptContext
-            pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-            hashed_password = pwd_context.hash("123456")
-            
-            new_user = User(
-                username=USERNAME_ALVO,
-                email="admin@zenyx.com",
-                hashed_password=hashed_password,
-                is_active=True,
-                is_superuser=True,
-                # role="admin", <--- REMOVIDO DAQUI TAMBÉM
-                pushin_pay_id=MY_PUSHIN_ID,
-                created_at=now_brazil()
-            )
-            db.add(new_user)
-            db.commit()
-            return {
-                "status": "created", 
-                "msg": f"⚠️ Usuário {USERNAME_ALVO} RECRIADO.",
-                "info": "Senha temporária: 123456"
-            }
 
-    except Exception as e:
-        return {"status": "error", "msg": str(e)}
-
-# =========================================================
-# 🕵️‍♂️ RAIO-X BLINDADO (SEM ACESSAR 'ROLE')
-# =========================================================
-@app.get("/api/admin/debug-users-list")
-def debug_users_list(db: Session = Depends(get_db)):
-    try:
-        # 1. Conexão
-        db_url = str(engine.url)
-        host_info = db_url.split("@")[-1]
-        
-        # 2. Busca Usuários
-        users = db.query(User).all()
-        
-        lista_users = []
-        for u in users:
-            # 🔥 TÉCNICA SEGURA: Converte o objeto para Dicionário
-            # Isso pega apenas as colunas que REALMENTE existem no banco
-            dados_usuario = {}
-            for key, value in u.__dict__.items():
-                if not key.startswith('_'): # Ignora campos internos do SQLAlchemy
-                    dados_usuario[key] = value
-            
-            lista_users.append(dados_usuario)
-            
-        return {
-            "CONEXAO": host_info,
-            "TOTAL": len(users),
-            "DADOS_REAIS": lista_users
-        }
-    except Exception as e:
-        return {"erro_fatal": str(e)}
-
-# =========================================================
-# 💀 CRON JOB: REMOVEDOR DE USUÁRIOS VENCIDOS
-# =========================================================
-@app.get("/cron/check-expired")
-def cron_check_expired(db: Session = Depends(get_db)):
-    """
-    Roda periodicamente para remover usuários com acesso vencido.
-    Deve ser chamado por um Cron Job externo (ex: Railway Cron ou EasyCron).
-    """
-    logger.info("💀 Iniciando verificação de vencidos...")
-    now = now_brazil()
-    
-    # 1. Busca pedidos aprovados que JÁ venceram (data_expiracao < agora)
-    vencidos = db.query(Pedido).filter(
-        Pedido.status.in_(['approved', 'active']), # Apenas ativos
-        Pedido.data_expiracao != None,
-        Pedido.data_expiracao < now
-    ).all()
-    
-    removidos = 0
-    erros = 0
-    
-    for pedido in vencidos:
-        try:
-            bot_data = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
-            if not bot_data: continue
-            
-            # Conecta no Telegram (Sem threads para evitar erro)
-            tb = telebot.TeleBot(bot_data.token, threaded=False)
-            
-            # Identifica o Canal
-            canal_id = bot_data.id_canal_vip
-            if str(canal_id).replace("-","").isdigit(): canal_id = int(str(canal_id).strip())
-            
-            # --- AÇÃO DE REMOÇÃO ---
-            try:
-                # Banir (Kick) e Desbanir (Kick remove do grupo, Unban permite voltar pagando)
-                tb.ban_chat_member(canal_id, int(pedido.telegram_id))
-                time.sleep(1) # Espera 1s para o Telegram processar
-                tb.unban_chat_member(canal_id, int(pedido.telegram_id))
-                
-                # Avisa o usuário no privado
-                try:
-                    tb.send_message(int(pedido.telegram_id), "🚫 <b>Seu acesso expirou!</b>\n\nObrigado por ter ficado conosco. Renove seu plano para voltar!", parse_mode="HTML")
-                except: pass
-                
-                logger.info(f"💀 Usuário {pedido.first_name} ({pedido.telegram_id}) removido do bot {bot_data.nome}")
-            except Exception as e_kick:
-                logger.warning(f"⚠️ Erro ao remover {pedido.telegram_id} (Talvez já saiu): {e_kick}")
-            
-            # Atualiza status no Pedido
-            pedido.status = 'expired'
-            
-            # Atualiza status no Lead (Sincronia)
-            lead = db.query(Lead).filter(Lead.bot_id == pedido.bot_id, Lead.user_id == pedido.telegram_id).first()
-            if lead:
-                lead.status = 'expired'
-            
-            removidos += 1
-            db.commit()
-            
-        except Exception as e:
-            logger.error(f"❌ Erro ao processar vencido {pedido.id}: {e}")
-            erros += 1
-
-    return {
-        "status": "completed", 
-        "total_analisado": len(vencidos),
-        "removidos_sucesso": removidos, 
-        "erros": erros
-    }
 # =========================================================
 # 🧹 FAXINA GERAL: REMOVE DUPLICATAS E CORRIGE DATAS
 # =========================================================
