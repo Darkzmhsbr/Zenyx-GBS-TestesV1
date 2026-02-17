@@ -3584,6 +3584,19 @@ async def gerar_pix_wiinpay(
                 logger.error(f"   Resposta: {response.text}")
                 return None
                 
+            elif response.status_code == 422:
+                # ⚠️ PROTEÇÃO AUTOMÁTICA: Se o erro é "mesma conta de split",
+                # remove o split e retenta UMA VEZ sem split
+                resp_text = response.text or ""
+                if "mesma conta" in resp_text.lower() and "split" in payload:
+                    logger.warning(f"⚠️ [WIINPAY] Split rejeitado (mesma conta). Retentando SEM split...")
+                    del payload["split"]
+                    retry_count = max_retries - 1  # Só mais uma tentativa
+                    continue
+                else:
+                    logger.error(f"❌ [WIINPAY] Erro 422: {resp_text}")
+                    return None
+                
             else:
                 logger.error(f"❌ [WIINPAY] Erro ({response.status_code}): {response.text}")
                 if retry_count < max_retries - 1:
