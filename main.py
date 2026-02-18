@@ -14675,3 +14675,30 @@ async def migrate_miniapp_v2(db: Session = Depends(get_db)):
             "status": "error",
             "message": f"❌ Erro crítico: {str(e)}"
         }
+
+# ============================================================
+# 🔒 MIGRAÇÃO: PROTEÇÃO DE CONTEÚDO (BOTS)
+# ============================================================
+@app.get("/migrate-protect-content")
+async def migrate_protect_content(db: Session = Depends(get_db)):
+    """
+    Migração para a coluna protect_content na tabela bots.
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-protect-content
+    """
+    try:
+        from sqlalchemy import text
+        
+        db.execute(text("ALTER TABLE bots ADD COLUMN IF NOT EXISTS protect_content BOOLEAN DEFAULT FALSE;"))
+        db.commit()
+        
+        return {
+            "status": "success",
+            "message": "✅ Coluna 'protect_content' criada/verificada na tabela bots!"
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"❌ Erro: {str(e)}"
+        }
