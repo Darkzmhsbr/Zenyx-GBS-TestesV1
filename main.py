@@ -4301,14 +4301,15 @@ class CategoryCreate(BaseModel):
     id: Optional[int] = None
     bot_id: int
     title: str
-    slug: Optional[str] = None  # <--- GARANTINDO O SLUG AQUI
+    slug: Optional[str] = None
     description: Optional[str] = None
     cover_image: Optional[str] = None
     banner_mob_url: Optional[str] = None
     theme_color: Optional[str] = "#c333ff"
     is_direct_checkout: bool = False
     is_hacker_mode: bool = False
-    content_json: Optional[str] = "[]"
+    content_json: Optional[List[dict]] = None
+    
     # --- VISUAL RICO ---
     bg_color: Optional[str] = "#000000"
     banner_desk_url: Optional[str] = None
@@ -4318,9 +4319,11 @@ class CategoryCreate(BaseModel):
     model_desc: Optional[str] = None
     footer_banner_url: Optional[str] = None
     deco_lines_url: Optional[str] = None
+    
     # --- NOVAS CORES ---
     model_name_color: Optional[str] = "#ffffff"
     model_desc_color: Optional[str] = "#cccccc"
+    
     # --- MINI APP V2: SEPARADOR, PAGINAÇÃO, FORMATO ---
     items_per_page: Optional[int] = None
     separator_enabled: Optional[bool] = False
@@ -4330,6 +4333,10 @@ class CategoryCreate(BaseModel):
     separator_btn_url: Optional[str] = None
     separator_logo_url: Optional[str] = None
     model_img_shape: Optional[str] = "square"
+
+    # --- 🆕 NOVO: CORES DOS TEXTOS ---
+    separator_text_color: Optional[str] = '#ffffff'
+    separator_btn_text_color: Optional[str] = '#ffffff'
 
 # --- MODELO DE PERFIL ---
 class ProfileUpdate(BaseModel):
@@ -14210,17 +14217,20 @@ async def migrate_multi_gateway(db: Session = Depends(get_db)):
 # ============================================================
 # 🔧 MIGRAÇÃO: MINI APP V2 (SEPARADORES E PAGINAÇÃO)
 # ============================================================
+# ============================================================
+# 🔧 MIGRAÇÃO: MINI APP V2 (SEPARADORES E PAGINAÇÃO)
+# ============================================================
 @app.get("/migrate-miniapp-v2")
 async def migrate_miniapp_v2(db: Session = Depends(get_db)):
     """
     Migração EXCLUSIVA para as novas colunas do Mini App.
-    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-miniapp-v2
+    Acesse UMA VEZ: https://SEU-DOMINIO.app/migrate-miniapp-v2
     """
     try:
         from sqlalchemy import text
         resultados = []
         
-        # Lista EXCLUSIVA das novas colunas do Mini App
+        # Lista EXCLUSIVA das colunas do Mini App (Atualizada com Cores de Texto)
         comandos_miniapp = [
             ("miniapp_categories", "items_per_page", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS items_per_page INTEGER DEFAULT NULL;"),
             ("miniapp_categories", "separator_enabled", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_enabled BOOLEAN DEFAULT FALSE;"),
@@ -14229,7 +14239,11 @@ async def migrate_miniapp_v2(db: Session = Depends(get_db)):
             ("miniapp_categories", "separator_btn_text", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_btn_text VARCHAR DEFAULT NULL;"),
             ("miniapp_categories", "separator_btn_url", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_btn_url VARCHAR DEFAULT NULL;"),
             ("miniapp_categories", "separator_logo_url", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_logo_url VARCHAR DEFAULT NULL;"),
-            ("miniapp_categories", "model_img_shape", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_img_shape VARCHAR DEFAULT 'square';")
+            ("miniapp_categories", "model_img_shape", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_img_shape VARCHAR DEFAULT 'square';"),
+            
+            # 🆕 NOVAS COLUNAS DE COR DE TEXTO
+            ("miniapp_categories", "separator_text_color", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_text_color VARCHAR DEFAULT '#ffffff';"),
+            ("miniapp_categories", "separator_btn_text_color", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_btn_text_color VARCHAR DEFAULT '#ffffff';")
         ]
         
         for tabela, coluna, sql in comandos_miniapp:
@@ -14247,7 +14261,7 @@ async def migrate_miniapp_v2(db: Session = Depends(get_db)):
         
         return {
             "status": "success",
-            "message": "✅ Migração do Mini App V2 concluída!",
+            "message": "✅ Migração do Mini App V2 concluída (Com Cores de Texto)!",
             "log": resultados
         }
         

@@ -573,43 +573,56 @@ class MiniAppConfig(Base):
 # 2. Categorias e Conteúdo
 class MiniAppCategory(Base):
     __tablename__ = "miniapp_categories"
-    id = Column(Integer, primary_key=True, index=True)
-    bot_id = Column(Integer, ForeignKey("bots.id"))
-    slug = Column(String)
-    title = Column(String)
-    description = Column(String)
-    cover_image = Column(String) # cardImg
-    banner_mob_url = Column(String)
     
-    # --- NOVOS CAMPOS VISUAL RICO ---
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey('bots.id', ondelete='CASCADE'), nullable=False, index=True)
+    slug = Column(String, nullable=False, index=True) 
+    
+    # Dados da Categoria (Vitrine)
+    title = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    cover_image = Column(String, nullable=True)
+    banner_mob_url = Column(String, nullable=True)
     bg_color = Column(String, default="#000000")
+    
+    # Novos campos (Atualização Visual)
     banner_desk_url = Column(String, nullable=True)
     video_preview_url = Column(String, nullable=True)
+    
+    # Modelo / Personagem
     model_img_url = Column(String, nullable=True)
     model_name = Column(String, nullable=True)
     model_desc = Column(String, nullable=True)
+    
+    # Footer / Decorativos
     footer_banner_url = Column(String, nullable=True)
     deco_lines_url = Column(String, nullable=True)
     
-    # NOVAS CORES DE TEXTO
+    # Cores Textos
     model_name_color = Column(String, default="#ffffff")
     model_desc_color = Column(String, default="#cccccc")
-    # --------------------
+    theme_color = Column(String, default="#00ff88")
     
-    theme_color = Column(String, default="#c333ff")
+    # Configurações Avançadas
     is_direct_checkout = Column(Boolean, default=False)
     is_hacker_mode = Column(Boolean, default=False)
-    content_json = Column(Text)
     
-    # --- MINI APP V2: SEPARADOR, PAGINAÇÃO, FORMATO ---
-    items_per_page = Column(Integer, nullable=True)              # Paginação (None = sem paginação)
-    separator_enabled = Column(Boolean, default=False)           # Ativa barra separadora entre itens
-    separator_color = Column(String, default="#ffffff")           # Cor da barra separadora
-    separator_text = Column(String, nullable=True)               # Texto acima da barra
-    separator_btn_text = Column(String, nullable=True)           # Texto do botão CTA na barra
-    separator_btn_url = Column(String, nullable=True)            # Link do botão CTA
-    separator_logo_url = Column(String, nullable=True)           # Logo na barra separadora
-    model_img_shape = Column(String, default="square")           # "square" ou "circle"
+    # JSON para Itens (Produtos)
+    content_json = Column(JSON, default=[])
+
+    # --- ATUALIZAÇÃO RECENTE (Separadores, Paginação, etc) ---
+    items_per_page = Column(Integer, default=None)
+    separator_enabled = Column(Boolean, default=False)
+    separator_color = Column(String, default='#333333')
+    separator_text = Column(String, default=None)
+    separator_btn_text = Column(String, default=None)
+    separator_btn_url = Column(String, default=None)
+    separator_logo_url = Column(String, default=None)
+    model_img_shape = Column(String, default='square')
+
+    # --- 🆕 NOVO: CORES DOS TEXTOS DO SEPARADOR ---
+    separator_text_color = Column(String, default='#ffffff')     # Cor do texto da barra
+    separator_btn_text_color = Column(String, default='#ffffff') # Cor do texto do botão
     
     bot = relationship("Bot", back_populates="miniapp_categories")
 
@@ -873,6 +886,6 @@ class BotGroup(Base):
     bot = relationship("Bot", back_populates="bot_groups")
     owner = relationship("User")
     
-    
+
     def __repr__(self):
         return f"<BotGroup(id={self.id}, bot_id={self.bot_id}, title='{self.title}', group_id='{self.group_id}', active={self.is_active})>"
