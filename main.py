@@ -4334,9 +4334,10 @@ class CategoryCreate(BaseModel):
     separator_logo_url: Optional[str] = None
     model_img_shape: Optional[str] = "square"
 
-    # --- 🆕 NOVO: CORES DOS TEXTOS ---
+    # --- 🆕 NOVO: CORES DOS TEXTOS + NEON ---
     separator_text_color: Optional[str] = '#ffffff'
     separator_btn_text_color: Optional[str] = '#ffffff'
+    separator_is_neon: Optional[bool] = False
 
 # --- MODELO DE PERFIL ---
 class ProfileUpdate(BaseModel):
@@ -6871,9 +6872,10 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
             categoria.separator_logo_url = data.separator_logo_url
             categoria.model_img_shape = data.model_img_shape
 
-            # 🔥 CORREÇÃO: SALVANDO AS CORES DO TEXTO DA BARRA E BOTÃO
+            # 🔥 CORREÇÃO: SALVANDO AS CORES DO TEXTO DA BARRA E BOTÃO + NEON
             categoria.separator_text_color = data.separator_text_color
             categoria.separator_btn_text_color = data.separator_btn_text_color
+            categoria.separator_is_neon = data.separator_is_neon
             
             db.commit()
             db.refresh(categoria)
@@ -6911,9 +6913,10 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
                 separator_btn_url=data.separator_btn_url,
                 separator_logo_url=data.separator_logo_url,
                 model_img_shape=data.model_img_shape,
-                # 🔥 CORREÇÃO: SALVANDO AS CORES DO TEXTO DA BARRA E BOTÃO
+                # 🔥 CORREÇÃO: SALVANDO AS CORES DO TEXTO DA BARRA E BOTÃO + NEON
                 separator_text_color=data.separator_text_color,
-                separator_btn_text_color=data.separator_btn_text_color
+                separator_btn_text_color=data.separator_btn_text_color,
+                separator_is_neon=data.separator_is_neon
             )
             db.add(nova_cat)
             db.commit()
@@ -14238,7 +14241,7 @@ async def migrate_miniapp_v2(db: Session = Depends(get_db)):
         from sqlalchemy import text
         resultados = []
         
-        # Lista EXCLUSIVA das colunas do Mini App (Atualizada com Cores de Texto)
+        # Lista EXCLUSIVA das colunas do Mini App (Atualizada com Cores de Texto e NEON)
         comandos_miniapp = [
             ("miniapp_categories", "items_per_page", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS items_per_page INTEGER DEFAULT NULL;"),
             ("miniapp_categories", "separator_enabled", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_enabled BOOLEAN DEFAULT FALSE;"),
@@ -14251,7 +14254,10 @@ async def migrate_miniapp_v2(db: Session = Depends(get_db)):
             
             # 🆕 NOVAS COLUNAS DE COR DE TEXTO
             ("miniapp_categories", "separator_text_color", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_text_color VARCHAR DEFAULT '#ffffff';"),
-            ("miniapp_categories", "separator_btn_text_color", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_btn_text_color VARCHAR DEFAULT '#ffffff';")
+            ("miniapp_categories", "separator_btn_text_color", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_btn_text_color VARCHAR DEFAULT '#ffffff';"),
+            
+            # 🆕 NOVO: EFEITO NEON
+            ("miniapp_categories", "separator_is_neon", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_is_neon BOOLEAN DEFAULT FALSE;")
         ]
         
         for tabela, coluna, sql in comandos_miniapp:
@@ -14269,7 +14275,7 @@ async def migrate_miniapp_v2(db: Session = Depends(get_db)):
         
         return {
             "status": "success",
-            "message": "✅ Migração do Mini App V2 concluída (Com Cores de Texto)!",
+            "message": "✅ Migração do Mini App V2 concluída (Com Cores e Neon)!",
             "log": resultados
         }
         

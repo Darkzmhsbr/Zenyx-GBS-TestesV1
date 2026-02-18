@@ -571,6 +571,7 @@ class MiniAppConfig(Base):
     bot = relationship("Bot", back_populates="miniapp_config")
 
 # 2. Categorias e Conteúdo
+# 2. Categorias e Conteúdo
 class MiniAppCategory(Base):
     __tablename__ = "miniapp_categories"
     
@@ -620,9 +621,10 @@ class MiniAppCategory(Base):
     separator_logo_url = Column(String, default=None)
     model_img_shape = Column(String, default='square')
 
-    # --- 🆕 NOVO: CORES DOS TEXTOS DO SEPARADOR ---
+    # --- 🆕 NOVO: CORES DOS TEXTOS + NEON ---
     separator_text_color = Column(String, default='#ffffff')     # Cor do texto da barra
     separator_btn_text_color = Column(String, default='#ffffff') # Cor do texto do botão
+    separator_is_neon = Column(Boolean, default=False)           # Efeito Neon/Glow na barra
     
     bot = relationship("Bot", back_populates="miniapp_categories")
 
