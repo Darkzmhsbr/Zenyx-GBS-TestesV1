@@ -6782,6 +6782,7 @@ def switch_bot_mode(bot_id: int, dados: BotModeUpdate, db: Session = Depends(get
 
 
 # 2. Salvar Configuração Global
+# 2. Salvar Configuração Global
 @app.post("/api/admin/bots/{bot_id}/miniapp/config")
 def save_miniapp_config(
     bot_id: int, 
@@ -6869,6 +6870,10 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
             categoria.separator_btn_url = data.separator_btn_url
             categoria.separator_logo_url = data.separator_logo_url
             categoria.model_img_shape = data.model_img_shape
+
+            # 🔥 CORREÇÃO: SALVANDO AS CORES DO TEXTO DA BARRA E BOTÃO
+            categoria.separator_text_color = data.separator_text_color
+            categoria.separator_btn_text_color = data.separator_btn_text_color
             
             db.commit()
             db.refresh(categoria)
@@ -6883,10 +6888,6 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
                 description=data.description,
                 cover_image=data.cover_image,
                 banner_mob_url=data.banner_mob_url,
-                theme_color=data.theme_color,
-                is_direct_checkout=data.is_direct_checkout,
-                is_hacker_mode=data.is_hacker_mode,
-                content_json=data.content_json,
                 bg_color=data.bg_color,
                 banner_desk_url=data.banner_desk_url,
                 video_preview_url=data.video_preview_url,
@@ -6897,7 +6898,11 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
                 deco_lines_url=data.deco_lines_url,
                 model_name_color=data.model_name_color,
                 model_desc_color=data.model_desc_color,
-                # Mini App V2: Separador, Paginação, Formato
+                theme_color=data.theme_color,
+                is_direct_checkout=data.is_direct_checkout,
+                is_hacker_mode=data.is_hacker_mode,
+                content_json=data.content_json,
+                # Campos Mini App V2
                 items_per_page=data.items_per_page,
                 separator_enabled=data.separator_enabled,
                 separator_color=data.separator_color,
@@ -6905,7 +6910,10 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
                 separator_btn_text=data.separator_btn_text,
                 separator_btn_url=data.separator_btn_url,
                 separator_logo_url=data.separator_logo_url,
-                model_img_shape=data.model_img_shape
+                model_img_shape=data.model_img_shape,
+                # 🔥 CORREÇÃO: SALVANDO AS CORES DO TEXTO DA BARRA E BOTÃO
+                separator_text_color=data.separator_text_color,
+                separator_btn_text_color=data.separator_btn_text_color
             )
             db.add(nova_cat)
             db.commit()
