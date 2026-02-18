@@ -11418,6 +11418,267 @@ def dashboard_stats(
         raise HTTPException(status_code=500, detail=f"Erro ao buscar estatísticas: {str(e)}")
 
 # =========================================================
+# 📊 ESTATÍSTICAS AVANÇADAS (PÁGINA DEDICADA)
+# =========================================================
+@app.get("/api/admin/statistics")
+def advanced_statistics(
+    bot_id: Optional[int] = None,
+    period: Optional[str] = "30d",  # 7d, 30d, 90d, all
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Estatísticas avançadas com métricas detalhadas.
+    Receita, Ticket Médio, LTV, Vendas por Plano, 
+    Taxa de Conversão, Picos de Desempenho.
+    """
+    try:
+        tz_br = timezone('America/Sao_Paulo')
+        agora = now_brazil()
+
+        # --- PERÍODO ---
+        if period == "7d":
+            start = agora - timedelta(days=7)
+        elif period == "90d":
+            start = agora - timedelta(days=90)
+        elif period == "all":
+            start = datetime(2020, 1, 1, tzinfo=tz_br)
+        else:
+            start = agora - timedelta(days=30)
+        
+        end = agora
+
+        # --- FILTRAR BOTS DO USUÁRIO ---
+        is_super = current_user.is_superuser
+        
+        if bot_id:
+            bots_ids = [bot_id]
+        elif is_super:
+            bots_ids = []  # Todos
+        else:
+            user_bots = db.query(BotModel.id).filter(BotModel.owner_id == current_user.id).all()
+            bots_ids = [b.id for b in user_bots]
+
+        if not is_super and not bots_ids:
+            return _empty_statistics()
+
+        # ============================================
+        # 📦 QUERIES BASE
+        # ============================================
+        def apply_bot_filter(query):
+            if bots_ids:
+                return query.filter(Pedido.bot_id.in_(bots_ids))
+            return query
+
+        # Vendas aprovadas no período
+        q_vendas = apply_bot_filter(
+            db.query(Pedido).filter(
+                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.data_aprovacao >= start,
+                Pedido.data_aprovacao <= end
+            )
+        )
+        vendas = q_vendas.all()
+
+        # Vendas pendentes no período
+        q_pendentes = apply_bot_filter(
+            db.query(Pedido).filter(
+                Pedido.status == 'pending',
+                Pedido.created_at >= start,
+                Pedido.created_at <= end
+            )
+        )
+        pendentes = q_pendentes.all()
+
+        # Todas as vendas aprovadas (para LTV)
+        q_all_vendas = apply_bot_filter(
+            db.query(Pedido).filter(
+                Pedido.status.in_(['approved', 'paid', 'active'])
+            )
+        )
+        todas_vendas = q_all_vendas.all()
+
+        # Leads no período
+        q_leads = db.query(Lead).filter(
+            Lead.created_at >= start,
+            Lead.created_at <= end
+        )
+        if bots_ids:
+            q_leads = q_leads.filter(Lead.bot_id.in_(bots_ids))
+        total_leads = q_leads.count()
+
+        # Usuários ativos (assinatura não expirada)
+        q_ativos = apply_bot_filter(
+            db.query(Pedido).filter(
+                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.data_expiracao > agora
+            )
+        )
+        total_ativos = q_ativos.count()
+
+        # ============================================
+        # 💰 MÉTRICAS PRINCIPAIS
+        # ============================================
+        is_super_split = is_super and current_user.pushin_pay_id
+        taxa_centavos = current_user.taxa_venda or 60
+
+        if is_super_split and not bot_id:
+            receita_total = len(vendas) * taxa_centavos
+            receita_pendentes = len(pendentes) * taxa_centavos
+        else:
+            receita_total = sum(int((p.valor or 0) * 100) for p in vendas)
+            receita_pendentes = sum(int((p.valor or 0) * 100) for p in pendentes)
+
+        total_vendas = len(vendas)
+        total_pendentes = len(pendentes)
+        total_geradas = total_vendas + total_pendentes
+
+        # Ticket Médio
+        ticket_medio = int(receita_total / total_vendas) if total_vendas > 0 else 0
+
+        # LTV Médio (Receita Histórica / Usuários Únicos)
+        if is_super_split and not bot_id:
+            receita_historica = len(todas_vendas) * taxa_centavos
+        else:
+            receita_historica = sum(int((p.valor or 0) * 100) for p in todas_vendas)
+        
+        usuarios_unicos = len(set(p.telegram_id for p in todas_vendas if p.telegram_id))
+        ltv_medio = int(receita_historica / usuarios_unicos) if usuarios_unicos > 0 else 0
+
+        # Taxa de Conversão
+        taxa_conversao = round((total_vendas / total_leads) * 100, 2) if total_leads > 0 else 0
+
+        # ============================================
+        # 📈 GRÁFICO: RECEITA POR DIA
+        # ============================================
+        chart_receita = []
+        current_date = start
+        while current_date <= end:
+            day_start = current_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = current_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+            
+            vendas_dia = [v for v in vendas if v.data_aprovacao and day_start <= v.data_aprovacao <= day_end]
+            
+            if is_super_split and not bot_id:
+                valor = round(len(vendas_dia) * (taxa_centavos / 100), 2)
+            else:
+                valor = round(sum((v.valor or 0) for v in vendas_dia), 2)
+            
+            chart_receita.append({
+                "date": current_date.strftime("%d/%m"),
+                "value": valor
+            })
+            current_date += timedelta(days=1)
+
+        # ============================================
+        # 🥇 TOP PLANOS MAIS VENDIDOS
+        # ============================================
+        planos_count = {}
+        for v in vendas:
+            nome = v.plano_nome or "Sem Plano"
+            if nome not in planos_count:
+                planos_count[nome] = {"count": 0, "revenue": 0}
+            planos_count[nome]["count"] += 1
+            if is_super_split and not bot_id:
+                planos_count[nome]["revenue"] += taxa_centavos
+            else:
+                planos_count[nome]["revenue"] += int((v.valor or 0) * 100)
+
+        top_planos = sorted(
+            [{"name": k, "count": v["count"], "revenue": v["revenue"]} for k, v in planos_count.items()],
+            key=lambda x: x["count"], reverse=True
+        )[:10]
+
+        # ============================================
+        # 🕐 PICOS: HORÁRIOS COM MAIS VENDAS
+        # ============================================
+        horas_count = {}
+        for v in vendas:
+            if v.data_aprovacao:
+                h = v.data_aprovacao.hour
+                horas_count[h] = horas_count.get(h, 0) + 1
+        
+        top_horas = sorted(
+            [{"hour": f"{h:02d}:00", "count": c} for h, c in horas_count.items()],
+            key=lambda x: x["count"], reverse=True
+        )[:5]
+
+        # ============================================
+        # 📅 PICOS: DIAS DA SEMANA COM MAIS VENDAS
+        # ============================================
+        dias_semana_map = {0: "Segunda", 1: "Terça", 2: "Quarta", 3: "Quinta", 4: "Sexta", 5: "Sábado", 6: "Domingo"}
+        dias_count = {}
+        for v in vendas:
+            if v.data_aprovacao:
+                d = v.data_aprovacao.weekday()
+                dias_count[d] = dias_count.get(d, 0) + 1
+        
+        top_dias = sorted(
+            [{"day": dias_semana_map.get(d, "?"), "count": c} for d, c in dias_count.items()],
+            key=lambda x: x["count"], reverse=True
+        )[:5]
+
+        # ============================================
+        # 🍩 GRÁFICO DONUT: TAXA DE CONVERSÃO
+        # ============================================
+        donut_conversao = {
+            "convertidas": total_vendas,
+            "pendentes": total_pendentes,
+            "perdidas": max(0, total_leads - total_geradas)
+        }
+
+        # ============================================
+        # 📊 RETORNO FINAL
+        # ============================================
+        return {
+            "metricas": {
+                "receita_total": receita_total,
+                "ticket_medio": ticket_medio,
+                "total_usuarios": total_ativos,
+                "ltv_medio": ltv_medio,
+                "total_vendas": total_vendas,
+                "total_pendentes": total_pendentes,
+                "receita_pendentes": receita_pendentes,
+                "total_geradas": total_geradas,
+                "taxa_conversao": taxa_conversao,
+                "total_leads": total_leads
+            },
+            "chart_receita": chart_receita,
+            "top_planos": top_planos,
+            "top_horas": top_horas,
+            "top_dias": top_dias,
+            "donut_conversao": donut_conversao,
+            "periodo": {
+                "inicio": start.strftime("%d/%m/%Y"),
+                "fim": end.strftime("%d/%m/%Y"),
+                "label": period
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Erro ao buscar estatísticas avançadas: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Erro nas estatísticas: {str(e)}")
+
+def _empty_statistics():
+    """Retorna objeto vazio para usuários sem bots"""
+    return {
+        "metricas": {
+            "receita_total": 0, "ticket_medio": 0, "total_usuarios": 0,
+            "ltv_medio": 0, "total_vendas": 0, "total_pendentes": 0,
+            "receita_pendentes": 0, "total_geradas": 0, "taxa_conversao": 0,
+            "total_leads": 0
+        },
+        "chart_receita": [],
+        "top_planos": [],
+        "top_horas": [],
+        "top_dias": [],
+        "donut_conversao": {"convertidas": 0, "pendentes": 0, "perdidas": 0},
+        "periodo": {"inicio": "", "fim": "", "label": "30d"}
+    }
+
+# =========================================================
 # 💸 WEBHOOK DE PAGAMENTO (BLINDADO E TAGARELA)
 # =========================================================
 @app.post("/api/webhook")
