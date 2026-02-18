@@ -822,6 +822,8 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
     ✅ CORRETO: Envia UMA mensagem e vai EDITANDO o conteúdo dela (alternância visual)
     - Envia mensagem 1 → aguarda → EDITA para mensagem 2 → aguarda → EDITA para mensagem 3
     - NO FINAL (se configurado): APAGA a última mensagem
+    
+    🔥 V2: Tratamento robusto para mensagens deletadas/usuário bloqueado
     """
     try:
         bot_alt = TeleBot(token, threaded=False)
@@ -845,10 +847,21 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
             logger.error(f"❌ [ALTERNATING] Primeira mensagem está vazia!")
             return
         
-        sent_msg = bot_alt.send_message(chat_id, texto_primeira)
-        mensagem_id = sent_msg.message_id
+        try:
+            sent_msg = bot_alt.send_message(chat_id, texto_primeira)
+            mensagem_id = sent_msg.message_id
+        except ApiTelegramException as e:
+            if "blocked" in str(e).lower() or "403" in str(e):
+                logger.warning(f"🚫 [ALTERNATING] Usuário {chat_id} bloqueou o bot. Abortando.")
+            else:
+                logger.error(f"❌ [ALTERNATING] Erro ao enviar primeira mensagem: {e}")
+            return
         
         logger.info(f"📤 [ALTERNATING] Mensagem inicial enviada (ID: {mensagem_id})")
+        
+        # 🔥 Contador de falhas consecutivas para evitar loop infinito
+        falhas_consecutivas = 0
+        MAX_FALHAS = 3
         
         # ✅ LOOP DE ALTERNÂNCIA (editar a mesma mensagem)
         mensagem_index = 1  # Começar da segunda mensagem
@@ -886,17 +899,47 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
                     text=texto_atual
                 )
                 
+                falhas_consecutivas = 0  # Reset no sucesso
                 logger.info(f"✏️ [ALTERNATING] Mensagem editada para conteúdo {mensagem_index + 1}/{total_mensagens} | Tempo restante: {tempo_restante:.0f}s")
                 
+            except ApiTelegramException as e:
+                err_str = str(e).lower()
+                
+                # 🔥 Usuário bloqueou o bot — parar imediatamente
+                if "blocked" in err_str or "403" in err_str:
+                    logger.warning(f"🚫 [ALTERNATING] Usuário {chat_id} bloqueou o bot. Parando.")
+                    mensagem_id = None  # Não tentar deletar
+                    break
+                
+                # 🔥 Mensagem deletada pelo usuário — tentar enviar nova
+                if "message to edit not found" in err_str or "message is not modified" in err_str:
+                    logger.warning(f"⚠️ [ALTERNATING] Mensagem {mensagem_id} não existe mais. Tentando reenviar...")
+                    try:
+                        sent_msg = bot_alt.send_message(chat_id, texto_atual)
+                        mensagem_id = sent_msg.message_id
+                        falhas_consecutivas = 0
+                        logger.info(f"📤 [ALTERNATING] Nova mensagem enviada (ID: {mensagem_id})")
+                    except ApiTelegramException as e2:
+                        if "blocked" in str(e2).lower() or "403" in str(e2):
+                            logger.warning(f"🚫 [ALTERNATING] Usuário bloqueou o bot ao reenviar. Parando.")
+                            mensagem_id = None
+                            break
+                        falhas_consecutivas += 1
+                        logger.error(f"❌ [ALTERNATING] Falha ao reenviar ({falhas_consecutivas}/{MAX_FALHAS}): {e2}")
+                else:
+                    falhas_consecutivas += 1
+                    logger.error(f"❌ [ALTERNATING] Erro ao editar ({falhas_consecutivas}/{MAX_FALHAS}): {e}")
+                
+                # 🔥 Muitas falhas consecutivas — parar para não ficar em loop
+                if falhas_consecutivas >= MAX_FALHAS:
+                    logger.error(f"🛑 [ALTERNATING] {MAX_FALHAS} falhas consecutivas. Abortando para chat {chat_id}.")
+                    break
+                    
             except Exception as e:
-                logger.error(f"❌ [ALTERNATING] Erro ao editar mensagem: {e}")
-                # Se falhar edição, pode ser porque a mensagem foi apagada - então enviar nova
-                try:
-                    sent_msg = bot_alt.send_message(chat_id, texto_atual)
-                    mensagem_id = sent_msg.message_id
-                    logger.info(f"📤 [ALTERNATING] Nova mensagem enviada após erro de edição (ID: {mensagem_id})")
-                except:
-                    logger.error(f"❌ [ALTERNATING] Falha crítica ao enviar nova mensagem")
+                falhas_consecutivas += 1
+                logger.error(f"❌ [ALTERNATING] Erro inesperado ({falhas_consecutivas}/{MAX_FALHAS}): {e}")
+                if falhas_consecutivas >= MAX_FALHAS:
+                    logger.error(f"🛑 [ALTERNATING] {MAX_FALHAS} falhas consecutivas. Abortando.")
                     break
             
             # ✅ AVANÇAR PARA A PRÓXIMA MENSAGEM NO CICLO
@@ -1121,6 +1164,12 @@ async def send_remarketing_job(
                 except:
                     pass
                 logger.error(f"❌ [REMARKETING] Erro no envio Telegram: {e_send}")
+                # 🔥 Classifica erros para logs mais limpos
+                err_remarketing = str(e_send).lower()
+                if "blocked" in err_remarketing or "403" in err_remarketing:
+                    logger.info(f"🚫 [REMARKETING] Usuário {chat_id} bloqueou o bot. Ignorando.")
+                elif "chat not found" in err_remarketing:
+                    logger.info(f"ℹ️ [REMARKETING] Chat {chat_id} não encontrado. Ignorando.")
 
         except Exception as e_db:
             logger.error(f"❌ [REMARKETING] Erro de Banco/Lógica: {e_db}")
@@ -1319,6 +1368,7 @@ async def delayed_delete_message(token: str, chat_id: int, message_id: int, dela
     """
     Aguarda X segundos e apaga a mensagem especificada.
     Usado para a auto-destruição da última mensagem alternante.
+    🔥 V2: Trata mensagem já deletada/usuário bloqueado sem logar como erro
     """
     try:
         if delay > 0:
@@ -1327,6 +1377,14 @@ async def delayed_delete_message(token: str, chat_id: int, message_id: int, dela
         bot_del = TeleBot(token, threaded=False)
         bot_del.delete_message(chat_id, message_id)
         logger.info(f"💣 Mensagem {message_id} destruída com sucesso.")
+    except ApiTelegramException as e:
+        err_str = str(e).lower()
+        if "message to delete not found" in err_str or "message can't be deleted" in err_str:
+            logger.info(f"ℹ️ Mensagem {message_id} já foi deletada (pelo usuário ou Telegram).")
+        elif "blocked" in err_str or "403" in err_str:
+            logger.info(f"ℹ️ Não foi possível deletar mensagem {message_id} — usuário bloqueou o bot.")
+        else:
+            logger.error(f"❌ Erro ao destruir mensagem {message_id}: {e}")
     except Exception as e:
         logger.error(f"❌ Erro ao destruir mensagem {message_id}: {e}")
 
@@ -8330,6 +8388,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     # if sent_msg_start and flow and flow.autodestruir_1:
                     #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg_start.message_id, 5)
 
+                except ApiTelegramException as e_envio:
+                    err_str = str(e_envio).lower()
+                    if "blocked" in err_str or "403" in err_str:
+                        logger.info(f"🚫 Usuário {chat_id} bloqueou o bot no /start")
+                    else:
+                        logger.error(f"❌ ERRO AO ENVIAR MENSAGEM START: {e_envio}")
+                        try: bot_temp.send_message(chat_id, msg_txt, reply_markup=mk)
+                        except: pass
                 except Exception as e_envio:
                     logger.error(f"❌ ERRO AO ENVIAR MENSAGEM START: {e_envio}")
                     try: bot_temp.send_message(chat_id, msg_txt, reply_markup=mk)
@@ -9459,8 +9525,16 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 except Exception as e:
                     logger.error(f"❌ Erro downsell_decline_: {e}")
 
+    except ApiTelegramException as e:
+        err_str = str(e).lower()
+        if "blocked" in err_str or "403" in err_str:
+            logger.info(f"🚫 Webhook: Usuário bloqueou o bot (403)")
+        elif "chat not found" in err_str or "400" in err_str:
+            logger.warning(f"⚠️ Webhook: Chat não encontrado ou mensagem inválida: {e}")
+        else:
+            logger.error(f"❌ Erro no webhook (Telegram): {e}")
     except Exception as e:
-        logger.error(f"Erro no webhook: {e}")
+        logger.error(f"❌ Erro no webhook: {e}")
 
     return {"status": "ok"}
 
