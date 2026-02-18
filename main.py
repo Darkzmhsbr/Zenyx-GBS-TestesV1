@@ -8219,7 +8219,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     code = parts[1]
                     tl = db.query(TrackingLink).filter(TrackingLink.codigo == code).first()
                     if tl: 
-                        tl.clicks += 1
+                        # 🔥 CORREÇÃO: Não contabiliza clique no /start para links de remarketing (rmkt_)
+                        # O clique de remarketing é contabilizado quando o usuário clica no botão da oferta
+                        if not code.startswith("rmkt_"):
+                            tl.clicks += 1
                         track_id = tl.id
                         db.commit()
 
@@ -9189,6 +9192,13 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 logger.info(f"📊 Clique contabilizado para campanha {campanha_uuid}")
                             else:
                                 logger.warning(f"⚠️ Tabela RemarketingCampaign sem coluna 'clicks'. Analytics ignorado para {campanha_uuid}")
+                            
+                            # 🔥 CORREÇÃO: Também contabiliza clique no TrackingLink vinculado
+                            if _track_id_rmkt:
+                                _tl_rmkt = db.query(TrackingLink).filter(TrackingLink.id == _track_id_rmkt).first()
+                                if _tl_rmkt:
+                                    _tl_rmkt.clicks = (_tl_rmkt.clicks or 0) + 1
+                                    logger.info(f"📊 Clique contabilizado no TrackingLink #{_track_id_rmkt}")
                         except Exception as e_click:
                             logger.warning(f"⚠️ Erro não fatal ao contar clique: {e_click}")
                         
