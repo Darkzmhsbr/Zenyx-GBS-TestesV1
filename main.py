@@ -334,23 +334,32 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
         # Prepara mensagem
         mensagem = config.message_text or "🔥 OFERTA ESPECIAL! Não perca essa chance!"
         
+        # 🔒 Carrega flag de proteção
+        _protect_auto = False
+        try:
+            db_temp = SessionLocal()
+            bot_data = db_temp.query(BotModel).filter(BotModel.id == bot_id).first()
+            _protect_auto = getattr(bot_data, 'protect_content', False) or False
+            db_temp.close()
+        except: pass
+        
         # Envia mídia se configurado
         message_id = None
         try:
             if config.media_url and config.media_type:
                 # 🔥 LÓGICA ATUALIZADA COM SUPORTE A ÁUDIO
                 if config.media_type == 'photo':
-                    msg = bot_instance.send_photo(chat_id, config.media_url, caption=mensagem, parse_mode='HTML')
+                    msg = bot_instance.send_photo(chat_id, config.media_url, caption=mensagem, parse_mode='HTML', protect_content=_protect_auto)
                 elif config.media_type == 'video':
-                    msg = bot_instance.send_video(chat_id, config.media_url, caption=mensagem, parse_mode='HTML')
+                    msg = bot_instance.send_video(chat_id, config.media_url, caption=mensagem, parse_mode='HTML', protect_content=_protect_auto)
                 elif config.media_type == 'audio' or config.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
                     bot_instance.send_chat_action(chat_id, 'record_voice')
                     time.sleep(3) # Simula o tempo de gravação
-                    msg = bot_instance.send_voice(chat_id, config.media_url, caption=mensagem, parse_mode='HTML')
+                    msg = bot_instance.send_voice(chat_id, config.media_url, caption=mensagem, parse_mode='HTML', protect_content=_protect_auto)
                 else:
-                    msg = bot_instance.send_message(chat_id, mensagem, parse_mode='HTML')
+                    msg = bot_instance.send_message(chat_id, mensagem, parse_mode='HTML', protect_content=_protect_auto)
             else:
-                msg = bot_instance.send_message(chat_id, mensagem, parse_mode='HTML')
+                msg = bot_instance.send_message(chat_id, mensagem, parse_mode='HTML', protect_content=_protect_auto)
             
             message_id = msg.message_id
             
@@ -2728,6 +2737,9 @@ def registrar_remarketing(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS wiinpay_user_id VARCHAR;",
                 "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS gateway_usada VARCHAR;",
 
+                # 🔒 PROTEÇÃO DE CONTEÚDO
+                "ALTER TABLE bots ADD COLUMN IF NOT EXISTS protect_content BOOLEAN DEFAULT FALSE;",
+
                 # 👇👇👇 [CORREÇÃO 11] SUPORTE A WEB APP NO FLUXO (CRÍTICO) 👇👇👇
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS start_mode VARCHAR DEFAULT 'padrao';",
                 "ALTER TABLE bot_flows ADD COLUMN IF NOT EXISTS miniapp_url VARCHAR;",
@@ -4172,6 +4184,7 @@ class BotCreate(BaseModel):
     admin_principal_id: Optional[str] = None
     suporte_username: Optional[str] = None
     id_canal_notificacao: Optional[str] = None  # ✅ Canal de Notificações
+    protect_content: Optional[bool] = False     # 🔒 Proteção de Conteúdo
 
 # Novo modelo para Atualização
 class BotUpdate(BaseModel):
@@ -4181,6 +4194,7 @@ class BotUpdate(BaseModel):
     admin_principal_id: Optional[str] = None
     suporte_username: Optional[str] = None
     id_canal_notificacao: Optional[str] = None  # ✅ Canal de Notificações
+    protect_content: Optional[bool] = None      # 🔒 Proteção de Conteúdo
 
 # Modelo para Criar Admin
 class BotAdminCreate(BaseModel):
@@ -5167,6 +5181,7 @@ def criar_bot(
         admin_principal_id=bot_data.admin_principal_id,
         suporte_username=bot_data.suporte_username,
         id_canal_notificacao=bot_data.id_canal_notificacao,  # ✅ Canal de Notificações
+        protect_content=getattr(bot_data, 'protect_content', False),  # 🔒 Proteção de Conteúdo
         owner_id=current_user.id,
         status="ativo"
     )
@@ -5321,6 +5336,11 @@ def update_bot(
     if dados.id_canal_notificacao is not None and dados.id_canal_notificacao != bot_db.id_canal_notificacao:
         changes["canal_notificacao"] = {"old": bot_db.id_canal_notificacao, "new": dados.id_canal_notificacao}
         bot_db.id_canal_notificacao = dados.id_canal_notificacao if dados.id_canal_notificacao.strip() else None
+    
+    # 🔒 Proteção de Conteúdo
+    if dados.protect_content is not None and dados.protect_content != getattr(bot_db, 'protect_content', False):
+        changes["protect_content"] = {"old": getattr(bot_db, 'protect_content', False), "new": dados.protect_content}
+        bot_db.protect_content = dados.protect_content
     
     # 2. LÓGICA DE TROCA DE TOKEN (MANTIDA INTACTA)
     if dados.token and dados.token != old_token:
@@ -5640,6 +5660,7 @@ def listar_bots(
             "admin_principal_id": bot.admin_principal_id,
             "suporte_username": bot.suporte_username,
             "id_canal_notificacao": bot.id_canal_notificacao,  # ✅ Canal de Notificações
+            "protect_content": getattr(bot, 'protect_content', False),  # 🔒 Proteção de Conteúdo
             "status": bot.status,
             "leads": leads_count,
             "revenue": revenue,
@@ -7970,6 +7991,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
     bot_db = db.query(BotModel).filter(BotModel.token == token).first()
     if not bot_db or bot_db.status == "pausado": return {"status": "ignored"}
 
+    # 🔒 Flag de proteção de conteúdo — aplicada em todos os envios de mídia/mensagem do vendedor
+    _protect = getattr(bot_db, 'protect_content', False) or False
+
     try:
         body = await req.json()
         update = telebot.types.Update.de_json(body)
@@ -8370,15 +8394,15 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     if media:
                         media_low = media.lower()
                         if media_low.endswith(('.mp4', '.mov', '.avi')): 
-                            sent_msg_start = bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
+                            sent_msg_start = bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                         elif media_low.endswith(('.ogg', '.mp3', '.wav')):
                             bot_temp.send_chat_action(chat_id, 'record_voice')
                             time.sleep(3)
-                            sent_msg_start = bot_temp.send_voice(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
+                            sent_msg_start = bot_temp.send_voice(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                         else: 
-                            sent_msg_start = bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML")
+                            sent_msg_start = bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                     else: 
-                        sent_msg_start = bot_temp.send_message(chat_id, msg_txt, reply_markup=mk, parse_mode="HTML")
+                        sent_msg_start = bot_temp.send_message(chat_id, msg_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                     
                     logger.info("✅ Menu enviado com sucesso!")
 
@@ -8534,14 +8558,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     try:
                         if target_step.msg_media:
                             if target_step.msg_media.lower().endswith(('.mp4', '.mov')):
-                                sent_msg = bot_temp.send_video(chat_id, target_step.msg_media, caption=target_step.msg_texto, reply_markup=mk, parse_mode="HTML")
+                                sent_msg = bot_temp.send_video(chat_id, target_step.msg_media, caption=target_step.msg_texto, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                             else:
-                                sent_msg = bot_temp.send_photo(chat_id, target_step.msg_media, caption=target_step.msg_texto, reply_markup=mk, parse_mode="HTML")
+                                sent_msg = bot_temp.send_photo(chat_id, target_step.msg_media, caption=target_step.msg_texto, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                         else:
-                            sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto, reply_markup=mk, parse_mode="HTML")
+                            sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                     except:
                         # Fallback caso falhe HTML ou Mídia
-                        sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk)
+                        sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk, protect_content=_protect)
 
                     # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão (via callback linha 6256-6260)
                     # Motivo: Timer automático deletava mensagem ANTES do usuário clicar, parando o fluxo
@@ -8935,13 +8959,13 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     try:
                         if bump.msg_media:
                             if bump.msg_media.lower().endswith(('.mp4','.mov')):
-                                bot_temp.send_video(chat_id, bump.msg_media, caption=txt_bump, reply_markup=mk, parse_mode="HTML")
+                                bot_temp.send_video(chat_id, bump.msg_media, caption=txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                             else:
-                                bot_temp.send_photo(chat_id, bump.msg_media, caption=txt_bump, reply_markup=mk, parse_mode="HTML")
+                                bot_temp.send_photo(chat_id, bump.msg_media, caption=txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                         else:
-                            bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML")
+                            bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                     except:
-                        bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML")
+                        bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                 else:
                     # PIX DIRETO (SEM ORDER BUMP)
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>PIX</b>...", parse_mode="HTML")
@@ -10223,6 +10247,9 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         blocked_count = 0
         batch_size = 10  # Atualiza DB a cada 10 envios
 
+        # 🔒 Carrega flag de proteção para o bot
+        _protect_rmkt = getattr(bot_db, 'protect_content', False) or False
+
         for idx, uid in enumerate(lista_final_ids):
             if not uid or len(uid) < 5: continue
             try:
@@ -10233,18 +10260,18 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                     try:
                         ext = payload.media_url.lower()
                         if ext.endswith(('.mp4', '.mov', '.avi')):
-                            bot_sender.send_video(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML")
+                            bot_sender.send_video(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
                         elif ext.endswith(('.ogg', '.mp3', '.wav')):
                             bot_sender.send_chat_action(uid, 'record_voice')
                             time.sleep(2) # Apenas 2s aqui para não atrasar o envio em massa
-                            bot_sender.send_voice(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML")
+                            bot_sender.send_voice(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
                         else:
-                            bot_sender.send_photo(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML")
+                            bot_sender.send_photo(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
                         midia_ok = True
                     except: pass
                 
                 if not midia_ok:
-                    bot_sender.send_message(uid, texto_envio, reply_markup=markup, parse_mode="HTML")
+                    bot_sender.send_message(uid, texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
                 
                 sent_count += 1
                 time.sleep(0.04)

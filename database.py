@@ -110,6 +110,13 @@ class Bot(Base):
     pushinpay_ativo = Column(Boolean, default=False)          # Gateway PushinPay ativa para este bot
     wiinpay_ativo = Column(Boolean, default=False)            # Gateway WiinPay ativa para este bot
 
+    # 🔒 PROTEÇÃO DE CONTEÚDO (Telegram protect_content)
+    # Quando ativo, todas as mídias e mensagens enviadas pelo bot ficam protegidas:
+    # - Não podem ser encaminhadas
+    # - Não podem ser salvas/baixadas
+    # - Texto não pode ser copiado
+    protect_content = Column(Boolean, default=False)
+
     created_at = Column(DateTime, default=now_brazil)
     
     # 🆕 RELACIONAMENTO COM USUÁRIO (OWNER)
