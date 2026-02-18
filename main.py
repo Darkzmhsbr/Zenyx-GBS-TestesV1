@@ -5422,6 +5422,426 @@ def update_bot(
     logger.info(f"✅ Bot atualizado: {bot_db.nome} (Owner: {current_user.username})")
     return {"status": "ok", "msg": "Bot atualizado com sucesso"}
 
+# ============================================================
+# 🔁 CLONAR BOT (COPIA TODAS AS CONFIGURAÇÕES)
+# ============================================================
+class CloneBotRequest(BaseModel):
+    nome: str
+    token: str
+    id_canal_vip: str
+
+@app.post("/api/admin/bots/{bot_id}/clone")
+def clonar_bot(
+    bot_id: int,
+    dados: CloneBotRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Clona um bot existente com todas as configurações.
+    O usuário fornece NOVO token e canal VIP.
+    
+    ✅ O que é copiado:
+    - BotFlow + BotFlowStep (mensagens, mídias, botões)
+    - PlanoConfig (planos e preços)
+    - OrderBumpConfig + UpsellConfig + DownsellConfig
+    - MiniAppConfig + MiniAppCategory (loja)
+    - RemarketingConfig + AlternatingMessages
+    - CanalFreeConfig
+    - BotGroup (canais extras)
+    - protect_content flag
+    
+    ❌ O que NÃO é copiado:
+    - Leads, Pedidos (novo bot começa zerado)
+    - TrackingLinks, RemarketingCampaigns (histórico)
+    - Token, Canal VIP (definidos pelo usuário)
+    """
+    # 1. Verifica se o bot original pertence ao usuário
+    bot_original = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # 2. Verifica se o token já está em uso
+    token_existente = db.query(BotModel).filter(BotModel.token == dados.token).first()
+    if token_existente:
+        raise HTTPException(status_code=409, detail="Este token já está sendo usado por outro bot.")
+    
+    # 3. Valida o token no Telegram
+    try:
+        new_tb = telebot.TeleBot(dados.token)
+        bot_info = new_tb.get_me()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Token inválido: {str(e)}")
+    
+    # 4. Cria o novo bot
+    novo_bot = BotModel(
+        nome=dados.nome,
+        token=dados.token,
+        username=bot_info.username,
+        id_canal_vip=dados.id_canal_vip,
+        admin_principal_id=bot_original.admin_principal_id,
+        suporte_username=bot_original.suporte_username,
+        id_canal_notificacao=None,  # Não clona canal de notificação
+        protect_content=getattr(bot_original, 'protect_content', False),
+        gateway_principal=bot_original.gateway_principal,
+        gateway_fallback=bot_original.gateway_fallback,
+        pushin_token=bot_original.pushin_token,
+        pushinpay_ativo=bot_original.pushinpay_ativo,
+        wiinpay_api_key=bot_original.wiinpay_api_key,
+        wiinpay_ativo=bot_original.wiinpay_ativo,
+        owner_id=current_user.id,
+        status="ativo"
+    )
+    db.add(novo_bot)
+    db.commit()
+    db.refresh(novo_bot)
+    
+    novo_id = novo_bot.id
+    erros = []
+    
+    # =======================================
+    # 5. CLONAR FLUXO (BotFlow)
+    # =======================================
+    try:
+        flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+        if flow:
+            novo_flow = BotFlow(
+                bot_id=novo_id,
+                start_mode=flow.start_mode,
+                miniapp_url=flow.miniapp_url,
+                miniapp_btn_text=flow.miniapp_btn_text,
+                msg_boas_vindas=flow.msg_boas_vindas,
+                media_url=flow.media_url,
+                btn_text_1=flow.btn_text_1,
+                autodestruir_1=flow.autodestruir_1,
+                mostrar_planos_1=flow.mostrar_planos_1,
+                buttons_config=flow.buttons_config,
+                button_mode=flow.button_mode,
+                msg_2_texto=flow.msg_2_texto,
+                msg_2_media=flow.msg_2_media,
+                mostrar_planos_2=flow.mostrar_planos_2,
+                buttons_config_2=flow.buttons_config_2,
+                msg_pix=flow.msg_pix
+            )
+            db.add(novo_flow)
+    except Exception as e:
+        erros.append(f"Fluxo: {str(e)}")
+    
+    # =======================================
+    # 6. CLONAR STEPS (BotFlowStep)
+    # =======================================
+    try:
+        steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
+        for step in steps:
+            novo_step = BotFlowStep(
+                bot_id=novo_id,
+                step_order=step.step_order,
+                msg_texto=step.msg_texto,
+                msg_media=step.msg_media,
+                btn_texto=step.btn_texto,
+                buttons_config=step.buttons_config,
+                autodestruir=step.autodestruir,
+                mostrar_botao=step.mostrar_botao,
+                delay_seconds=step.delay_seconds
+            )
+            db.add(novo_step)
+    except Exception as e:
+        erros.append(f"Steps: {str(e)}")
+    
+    # =======================================
+    # 7. CLONAR PLANOS (PlanoConfig)
+    # =======================================
+    try:
+        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
+        for plano in planos:
+            novo_plano = PlanoConfig(
+                bot_id=novo_id,
+                nome_exibicao=plano.nome_exibicao,
+                descricao=plano.descricao,
+                preco_atual=plano.preco_atual,
+                preco_cheio=plano.preco_cheio,
+                dias_duracao=plano.dias_duracao,
+                is_lifetime=plano.is_lifetime,
+                key_id=f"clone_{novo_id}_{plano.id}_{uuid.uuid4().hex[:8]}",
+                id_canal_destino=plano.id_canal_destino
+            )
+            db.add(novo_plano)
+    except Exception as e:
+        erros.append(f"Planos: {str(e)}")
+    
+    # =======================================
+    # 8. CLONAR ORDER BUMP
+    # =======================================
+    try:
+        bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
+        if bump:
+            novo_bump = OrderBumpConfig(
+                bot_id=novo_id,
+                ativo=bump.ativo,
+                nome_produto=bump.nome_produto,
+                preco=bump.preco,
+                link_acesso=bump.link_acesso,
+                autodestruir=bump.autodestruir,
+                msg_texto=bump.msg_texto,
+                msg_media=bump.msg_media,
+                btn_aceitar=bump.btn_aceitar,
+                btn_recusar=bump.btn_recusar
+            )
+            db.add(novo_bump)
+    except Exception as e:
+        erros.append(f"OrderBump: {str(e)}")
+    
+    # =======================================
+    # 9. CLONAR UPSELL
+    # =======================================
+    try:
+        upsell = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
+        if upsell:
+            novo_upsell = UpsellConfig(
+                bot_id=novo_id,
+                ativo=upsell.ativo,
+                nome_produto=upsell.nome_produto,
+                preco=upsell.preco,
+                link_acesso=upsell.link_acesso,
+                delay_minutos=upsell.delay_minutos,
+                msg_texto=upsell.msg_texto,
+                msg_media=upsell.msg_media,
+                btn_aceitar=upsell.btn_aceitar,
+                btn_recusar=upsell.btn_recusar,
+                autodestruir=upsell.autodestruir
+            )
+            db.add(novo_upsell)
+    except Exception as e:
+        erros.append(f"Upsell: {str(e)}")
+    
+    # =======================================
+    # 10. CLONAR DOWNSELL
+    # =======================================
+    try:
+        downsell = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
+        if downsell:
+            novo_downsell = DownsellConfig(
+                bot_id=novo_id,
+                ativo=downsell.ativo,
+                nome_produto=downsell.nome_produto,
+                preco=downsell.preco,
+                link_acesso=downsell.link_acesso,
+                delay_minutos=downsell.delay_minutos,
+                msg_texto=downsell.msg_texto,
+                msg_media=downsell.msg_media,
+                btn_aceitar=downsell.btn_aceitar,
+                btn_recusar=downsell.btn_recusar,
+                autodestruir=downsell.autodestruir
+            )
+            db.add(novo_downsell)
+    except Exception as e:
+        erros.append(f"Downsell: {str(e)}")
+    
+    # =======================================
+    # 11. CLONAR MINI APP CONFIG
+    # =======================================
+    try:
+        miniapp = db.query(MiniAppConfig).filter(MiniAppConfig.bot_id == bot_id).first()
+        if miniapp:
+            novo_miniapp = MiniAppConfig(
+                bot_id=novo_id,
+                logo_url=miniapp.logo_url,
+                background_type=miniapp.background_type,
+                background_value=miniapp.background_value,
+                hero_video_url=miniapp.hero_video_url,
+                hero_title=miniapp.hero_title,
+                hero_subtitle=miniapp.hero_subtitle,
+                hero_btn_text=miniapp.hero_btn_text,
+                enable_popup=miniapp.enable_popup,
+                popup_video_url=miniapp.popup_video_url,
+                popup_text=miniapp.popup_text,
+                footer_text=miniapp.footer_text
+            )
+            db.add(novo_miniapp)
+    except Exception as e:
+        erros.append(f"MiniApp: {str(e)}")
+    
+    # =======================================
+    # 12. CLONAR MINI APP CATEGORIES
+    # =======================================
+    try:
+        categorias = db.query(MiniAppCategory).filter(MiniAppCategory.bot_id == bot_id).all()
+        for cat in categorias:
+            nova_cat = MiniAppCategory(
+                bot_id=novo_id,
+                slug=cat.slug,
+                title=cat.title,
+                description=cat.description,
+                cover_image=cat.cover_image,
+                banner_mob_url=cat.banner_mob_url,
+                bg_color=cat.bg_color,
+                banner_desk_url=cat.banner_desk_url,
+                video_preview_url=cat.video_preview_url,
+                model_img_url=cat.model_img_url,
+                model_name=cat.model_name,
+                model_desc=cat.model_desc,
+                footer_banner_url=cat.footer_banner_url,
+                deco_lines_url=cat.deco_lines_url,
+                model_name_color=cat.model_name_color,
+                model_desc_color=cat.model_desc_color,
+                theme_color=cat.theme_color,
+                is_direct_checkout=cat.is_direct_checkout,
+                is_hacker_mode=cat.is_hacker_mode,
+                content_json=cat.content_json,
+                items_per_page=cat.items_per_page,
+                separator_enabled=cat.separator_enabled,
+                separator_color=cat.separator_color,
+                separator_text=cat.separator_text,
+                separator_btn_text=cat.separator_btn_text,
+                separator_btn_url=cat.separator_btn_url,
+                separator_logo_url=cat.separator_logo_url,
+                model_img_shape=cat.model_img_shape,
+                separator_text_color=cat.separator_text_color,
+                separator_btn_text_color=cat.separator_btn_text_color,
+                separator_is_neon=cat.separator_is_neon,
+                separator_neon_color=cat.separator_neon_color
+            )
+            db.add(nova_cat)
+    except Exception as e:
+        erros.append(f"MiniApp Categories: {str(e)}")
+    
+    # =======================================
+    # 13. CLONAR REMARKETING CONFIG
+    # =======================================
+    try:
+        rmkt = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
+        if rmkt:
+            novo_rmkt = RemarketingConfig(
+                bot_id=novo_id,
+                is_active=False,  # Começa desativado por segurança
+                message_text=rmkt.message_text,
+                media_url=rmkt.media_url,
+                media_type=rmkt.media_type,
+                delay_minutes=rmkt.delay_minutes,
+                auto_destruct_enabled=rmkt.auto_destruct_enabled,
+                auto_destruct_seconds=rmkt.auto_destruct_seconds,
+                auto_destruct_after_click=rmkt.auto_destruct_after_click,
+                promo_values=rmkt.promo_values
+            )
+            db.add(novo_rmkt)
+    except Exception as e:
+        erros.append(f"RemarketingConfig: {str(e)}")
+    
+    # =======================================
+    # 14. CLONAR ALTERNATING MESSAGES
+    # =======================================
+    try:
+        alt = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).first()
+        if alt:
+            novo_alt = AlternatingMessages(
+                bot_id=novo_id,
+                is_active=False,  # Começa desativado
+                messages=alt.messages,
+                rotation_interval_seconds=alt.rotation_interval_seconds,
+                stop_before_remarketing_seconds=alt.stop_before_remarketing_seconds,
+                auto_destruct_final=alt.auto_destruct_final,
+                max_duration_minutes=alt.max_duration_minutes,
+                last_message_auto_destruct=alt.last_message_auto_destruct,
+                last_message_destruct_seconds=alt.last_message_destruct_seconds
+            )
+            db.add(novo_alt)
+    except Exception as e:
+        erros.append(f"AlternatingMessages: {str(e)}")
+    
+    # =======================================
+    # 15. CLONAR CANAL FREE CONFIG
+    # =======================================
+    try:
+        cfree = db.query(CanalFreeConfig).filter(CanalFreeConfig.bot_id == bot_id).first()
+        if cfree:
+            novo_cfree = CanalFreeConfig(
+                bot_id=novo_id,
+                canal_id=None,  # Usuário precisa configurar
+                canal_name=None,
+                is_active=False,  # Desativado por segurança
+                message_text=cfree.message_text,
+                media_url=cfree.media_url,
+                media_type=cfree.media_type,
+                buttons=cfree.buttons,
+                delay_seconds=cfree.delay_seconds
+            )
+            db.add(novo_cfree)
+    except Exception as e:
+        erros.append(f"CanalFree: {str(e)}")
+    
+    # =======================================
+    # 16. CLONAR GRUPOS/CANAIS (BotGroup)
+    # =======================================
+    try:
+        grupos = db.query(BotGroup).filter(BotGroup.bot_id == bot_id).all()
+        for grupo in grupos:
+            novo_grupo = BotGroup(
+                bot_id=novo_id,
+                owner_id=current_user.id,
+                title=grupo.title,
+                group_id=grupo.group_id,
+                link=grupo.link,
+                plan_ids=grupo.plan_ids,
+                is_active=grupo.is_active
+            )
+            db.add(novo_grupo)
+    except Exception as e:
+        erros.append(f"BotGroups: {str(e)}")
+    
+    # =======================================
+    # 17. COMMIT FINAL + WEBHOOK
+    # =======================================
+    db.commit()
+    
+    # Configura webhook no Telegram
+    try:
+        public_url = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+        if public_url.startswith("https://"):
+            public_url = public_url.replace("https://", "")
+        if public_url.endswith("/"):
+            public_url = public_url[:-1]
+        
+        webhook_url = f"https://{public_url}/webhook/{dados.token}"
+        new_tb.remove_webhook()
+        time.sleep(0.5)
+        new_tb.set_webhook(url=webhook_url)
+        logger.info(f"🔗 Webhook clone definido: {webhook_url}")
+    except Exception as e:
+        erros.append(f"Webhook: {str(e)}")
+    
+    # Configura menu do bot
+    try:
+        configurar_menu_bot(dados.token)
+    except:
+        pass
+    
+    # 📋 AUDITORIA
+    log_action(
+        db=db,
+        user_id=current_user.id,
+        username=current_user.username,
+        action="bot_cloned",
+        resource_type="bot",
+        resource_id=novo_id,
+        description=f"Clonou bot '{bot_original.nome}' (ID: {bot_id}) → '{dados.nome}' (ID: {novo_id})",
+        details={"original_bot_id": bot_id, "erros": erros if erros else None},
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent")
+    )
+    
+    logger.info(f"🔁 Bot clonado: '{bot_original.nome}' → '{dados.nome}' (ID: {novo_id}) | Erros: {len(erros)}")
+    
+    return {
+        "status": "ok",
+        "msg": f"Bot '{dados.nome}' clonado com sucesso!",
+        "novo_bot_id": novo_id,
+        "erros": erros if erros else None,
+        "itens_copiados": [
+            "Fluxo de mensagens", "Steps", "Planos", "Order Bump",
+            "Upsell", "Downsell", "Mini App", "Categorias", 
+            "Remarketing", "Mensagens Alternantes", "Canal Free", "Grupos"
+        ]
+    }
+
 @app.delete("/api/admin/bots/{bot_id}")
 def deletar_bot(
     bot_id: int,
