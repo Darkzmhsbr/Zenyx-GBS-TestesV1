@@ -14144,6 +14144,7 @@ async def migrate_canal_notificacao(db: Session = Depends(get_db)):
             "detalhes": str(e)
         }
 
+
 # ============================================================
 # 🔧 MIGRAÇÃO: MULTI-GATEWAY (WIINPAY + CONTINGÊNCIA)
 # ============================================================

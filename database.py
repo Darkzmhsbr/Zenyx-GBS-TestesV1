@@ -873,5 +873,6 @@ class BotGroup(Base):
     bot = relationship("Bot", back_populates="bot_groups")
     owner = relationship("User")
     
+    
     def __repr__(self):
         return f"<BotGroup(id={self.id}, bot_id={self.bot_id}, title='{self.title}', group_id='{self.group_id}', active={self.is_active})>"
