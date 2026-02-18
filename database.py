@@ -625,6 +625,7 @@ class MiniAppCategory(Base):
     separator_text_color = Column(String, default='#ffffff')     # Cor do texto da barra
     separator_btn_text_color = Column(String, default='#ffffff') # Cor do texto do botão
     separator_is_neon = Column(Boolean, default=False)           # Efeito Neon/Glow na barra
+    separator_neon_color = Column(String, default=None)            # Cor personalizada do Neon/Glow
     
     bot = relationship("Bot", back_populates="miniapp_categories")
 

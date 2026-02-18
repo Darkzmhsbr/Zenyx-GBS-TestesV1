@@ -4338,6 +4338,7 @@ class CategoryCreate(BaseModel):
     separator_text_color: Optional[str] = '#ffffff'
     separator_btn_text_color: Optional[str] = '#ffffff'
     separator_is_neon: Optional[bool] = False
+    separator_neon_color: Optional[str] = None
 
 # --- MODELO DE PERFIL ---
 class ProfileUpdate(BaseModel):
@@ -6876,6 +6877,7 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
             categoria.separator_text_color = data.separator_text_color
             categoria.separator_btn_text_color = data.separator_btn_text_color
             categoria.separator_is_neon = data.separator_is_neon
+            categoria.separator_neon_color = data.separator_neon_color
             
             db.commit()
             db.refresh(categoria)
@@ -6916,7 +6918,8 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
                 # 🔥 CORREÇÃO: SALVANDO AS CORES DO TEXTO DA BARRA E BOTÃO + NEON
                 separator_text_color=data.separator_text_color,
                 separator_btn_text_color=data.separator_btn_text_color,
-                separator_is_neon=data.separator_is_neon
+                separator_is_neon=data.separator_is_neon,
+                separator_neon_color=data.separator_neon_color
             )
             db.add(nova_cat)
             db.commit()
@@ -14257,7 +14260,8 @@ async def migrate_miniapp_v2(db: Session = Depends(get_db)):
             ("miniapp_categories", "separator_btn_text_color", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_btn_text_color VARCHAR DEFAULT '#ffffff';"),
             
             # 🆕 NOVO: EFEITO NEON
-            ("miniapp_categories", "separator_is_neon", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_is_neon BOOLEAN DEFAULT FALSE;")
+            ("miniapp_categories", "separator_is_neon", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_is_neon BOOLEAN DEFAULT FALSE;"),
+            ("miniapp_categories", "separator_neon_color", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_neon_color VARCHAR DEFAULT NULL;")
         ]
         
         for tabela, coluna, sql in comandos_miniapp:
