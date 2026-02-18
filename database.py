@@ -601,6 +601,16 @@ class MiniAppCategory(Base):
     is_hacker_mode = Column(Boolean, default=False)
     content_json = Column(Text)
     
+    # --- MINI APP V2: SEPARADOR, PAGINAÇÃO, FORMATO ---
+    items_per_page = Column(Integer, nullable=True)              # Paginação (None = sem paginação)
+    separator_enabled = Column(Boolean, default=False)           # Ativa barra separadora entre itens
+    separator_color = Column(String, default="#ffffff")           # Cor da barra separadora
+    separator_text = Column(String, nullable=True)               # Texto acima da barra
+    separator_btn_text = Column(String, nullable=True)           # Texto do botão CTA na barra
+    separator_btn_url = Column(String, nullable=True)            # Link do botão CTA
+    separator_logo_url = Column(String, nullable=True)           # Logo na barra separadora
+    model_img_shape = Column(String, default="square")           # "square" ou "circle"
+    
     bot = relationship("Bot", back_populates="miniapp_categories")
 
 # =========================================================

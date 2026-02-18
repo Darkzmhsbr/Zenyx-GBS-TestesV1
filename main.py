@@ -2647,6 +2647,16 @@ def registrar_remarketing(
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_name_color VARCHAR DEFAULT '#ffffff';",
                 "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_desc_color VARCHAR DEFAULT '#cccccc';",
 
+                # --- [MINI APP V2] SEPARADOR, PAGINAÇÃO, FORMATO E FAKE VIDEO ---
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS items_per_page INTEGER;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_enabled BOOLEAN DEFAULT FALSE;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_color VARCHAR DEFAULT '#ffffff';",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_text VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_btn_text VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_btn_url VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_logo_url VARCHAR;",
+                "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_img_shape VARCHAR DEFAULT 'square';",
+
                 # --- [CORREÇÃO 10] TOKEN PUSHINPAY E ORDER BUMP ---
                 "ALTER TABLE bots ADD COLUMN IF NOT EXISTS pushin_token VARCHAR;",
                 "ALTER TABLE order_bump_config ADD COLUMN IF NOT EXISTS autodestruir BOOLEAN DEFAULT FALSE;",
@@ -4311,6 +4321,15 @@ class CategoryCreate(BaseModel):
     # --- NOVAS CORES ---
     model_name_color: Optional[str] = "#ffffff"
     model_desc_color: Optional[str] = "#cccccc"
+    # --- MINI APP V2: SEPARADOR, PAGINAÇÃO, FORMATO ---
+    items_per_page: Optional[int] = None
+    separator_enabled: Optional[bool] = False
+    separator_color: Optional[str] = "#ffffff"
+    separator_text: Optional[str] = None
+    separator_btn_text: Optional[str] = None
+    separator_btn_url: Optional[str] = None
+    separator_logo_url: Optional[str] = None
+    model_img_shape: Optional[str] = "square"
 
 # --- MODELO DE PERFIL ---
 class ProfileUpdate(BaseModel):
@@ -6834,6 +6853,16 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
             categoria.model_name_color = data.model_name_color
             categoria.model_desc_color = data.model_desc_color
             
+            # Mini App V2: Separador, Paginação, Formato
+            categoria.items_per_page = data.items_per_page
+            categoria.separator_enabled = data.separator_enabled
+            categoria.separator_color = data.separator_color
+            categoria.separator_text = data.separator_text
+            categoria.separator_btn_text = data.separator_btn_text
+            categoria.separator_btn_url = data.separator_btn_url
+            categoria.separator_logo_url = data.separator_logo_url
+            categoria.model_img_shape = data.model_img_shape
+            
             db.commit()
             db.refresh(categoria)
             return categoria
@@ -6860,7 +6889,16 @@ def create_or_update_category(data: CategoryCreate, db: Session = Depends(get_db
                 footer_banner_url=data.footer_banner_url,
                 deco_lines_url=data.deco_lines_url,
                 model_name_color=data.model_name_color,
-                model_desc_color=data.model_desc_color
+                model_desc_color=data.model_desc_color,
+                # Mini App V2: Separador, Paginação, Formato
+                items_per_page=data.items_per_page,
+                separator_enabled=data.separator_enabled,
+                separator_color=data.separator_color,
+                separator_text=data.separator_text,
+                separator_btn_text=data.separator_btn_text,
+                separator_btn_url=data.separator_btn_url,
+                separator_logo_url=data.separator_logo_url,
+                model_img_shape=data.model_img_shape
             )
             db.add(nova_cat)
             db.commit()
