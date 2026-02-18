@@ -14224,7 +14224,7 @@ async def migrate_multi_gateway(db: Session = Depends(get_db)):
 async def migrate_miniapp_v2(db: Session = Depends(get_db)):
     """
     Migração EXCLUSIVA para as novas colunas do Mini App.
-    Acesse UMA VEZ: https://SEU-DOMINIO.app/migrate-miniapp-v2
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-miniapp-v2
     """
     try:
         from sqlalchemy import text
