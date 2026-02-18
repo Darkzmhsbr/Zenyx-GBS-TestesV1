@@ -11557,7 +11557,21 @@ def advanced_statistics(
             day_start = current_date.replace(hour=0, minute=0, second=0, microsecond=0)
             day_end = current_date.replace(hour=23, minute=59, second=59, microsecond=999999)
             
-            vendas_dia = [v for v in vendas if v.data_aprovacao and day_start <= v.data_aprovacao <= day_end]
+            # Garante timezone-aware para comparação segura
+            if day_start.tzinfo is None:
+                day_start = tz_br.localize(day_start)
+            if day_end.tzinfo is None:
+                day_end = tz_br.localize(day_end)
+            
+            vendas_dia = []
+            for v in vendas:
+                if v.data_aprovacao:
+                    da = v.data_aprovacao
+                    # Normaliza para aware se necessário
+                    if da.tzinfo is None:
+                        da = tz_br.localize(da)
+                    if day_start <= da <= day_end:
+                        vendas_dia.append(v)
             
             if is_super_split and not bot_id:
                 valor = round(len(vendas_dia) * (taxa_centavos / 100), 2)
