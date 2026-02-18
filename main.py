@@ -14206,3 +14206,54 @@ async def migrate_multi_gateway(db: Session = Depends(get_db)):
             "message": f"❌ Erro geral: {str(e)}",
             "detalhes": str(e)
         }
+
+# ============================================================
+# 🔧 MIGRAÇÃO: MINI APP V2 (SEPARADORES E PAGINAÇÃO)
+# ============================================================
+@app.get("/migrate-miniapp-v2")
+async def migrate_miniapp_v2(db: Session = Depends(get_db)):
+    """
+    Migração EXCLUSIVA para as novas colunas do Mini App.
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-miniapp-v2
+    """
+    try:
+        from sqlalchemy import text
+        resultados = []
+        
+        # Lista EXCLUSIVA das novas colunas do Mini App
+        comandos_miniapp = [
+            ("miniapp_categories", "items_per_page", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS items_per_page INTEGER DEFAULT NULL;"),
+            ("miniapp_categories", "separator_enabled", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_enabled BOOLEAN DEFAULT FALSE;"),
+            ("miniapp_categories", "separator_color", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_color VARCHAR DEFAULT '#333333';"),
+            ("miniapp_categories", "separator_text", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_text VARCHAR DEFAULT NULL;"),
+            ("miniapp_categories", "separator_btn_text", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_btn_text VARCHAR DEFAULT NULL;"),
+            ("miniapp_categories", "separator_btn_url", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_btn_url VARCHAR DEFAULT NULL;"),
+            ("miniapp_categories", "separator_logo_url", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS separator_logo_url VARCHAR DEFAULT NULL;"),
+            ("miniapp_categories", "model_img_shape", "ALTER TABLE miniapp_categories ADD COLUMN IF NOT EXISTS model_img_shape VARCHAR DEFAULT 'square';")
+        ]
+        
+        for tabela, coluna, sql in comandos_miniapp:
+            try:
+                db.execute(text(sql))
+                db.commit()
+                resultados.append(f"✅ {tabela}.{coluna} verificada/criada.")
+            except Exception as e:
+                db.rollback()
+                # Ignora erros se a coluna já existir
+                if "already exists" in str(e).lower() or "duplicate column" in str(e).lower():
+                    resultados.append(f"ℹ️ {tabela}.{coluna} já existe (Ignorado)")
+                else:
+                    resultados.append(f"❌ {tabela}.{coluna}: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "✅ Migração do Mini App V2 concluída!",
+            "log": resultados
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"❌ Erro crítico: {str(e)}"
+        }
