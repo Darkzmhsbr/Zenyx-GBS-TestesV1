@@ -8421,7 +8421,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         bot_temp = telebot.TeleBot(token, threaded=False)
         message = update.message if update.message else None
         
-        
         # ========================================
         # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
         # ========================================
@@ -8488,57 +8487,57 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                     url=btn['url']
                                 ))
                     
-                    # 🔥 LÓGICA DE MÍDIA ATUALIZADA (SUPORTE A ÁUDIO)
+                    # 🔥 LÓGICA DE MÍDIA ATUALIZADA (SUPORTE A ÁUDIO CORRIGIDO)
                     if config.media_url:
-                            media_low = config.media_url.lower()
-                            
-                            # 1. VÍDEO
-                            if config.media_type == 'video' or media_low.endswith(('.mp4', '.mov', '.avi')):
-                                bot_temp.send_video(
-                                    user_id,
-                                    config.media_url,
-                                    caption=final_message,
-                                    reply_markup=markup,
-                                    parse_mode="HTML"
-                                )
-                            
-                            # 2. ÁUDIO (CORREÇÃO OGG)
-                            elif config.media_type == 'audio' or media_low.endswith(('.ogg', '.mp3', '.wav', '.opus')):
-                                # 🎤 Envia APENAS o áudio (Nota de Voz Pura)
-                                bot_temp.send_chat_action(user_id, 'record_voice')
-                                time.sleep(2) # Pequeno delay para simular gravação
-                                bot_temp.send_voice(
-                                    user_id,
-                                    config.media_url
-                                )
-                                
-                                # 📝 Envia Texto + Botões em mensagem separada logo em seguida
-                                time.sleep(1)
-                                if final_message or (markup and len(markup.keyboard) > 0):
-                                    msg_text_audio = final_message if final_message else "..."
-                                    bot_temp.send_message(
-                                        user_id,
-                                        msg_text_audio,
-                                        reply_markup=markup,
-                                        parse_mode="HTML"
-                                    )
-                                    
-                            # 3. FOTO (Padrão)
-                            else: 
-                                bot_temp.send_photo(
-                                    user_id,
-                                    config.media_url,
-                                    caption=final_message,
-                                    reply_markup=markup,
-                                    parse_mode="HTML"
-                                )
-                        else:
-                            bot_temp.send_message(
+                        media_low = config.media_url.lower()
+                        
+                        # 1. VÍDEO
+                        if config.media_type == 'video' or media_low.endswith(('.mp4', '.mov', '.avi')):
+                            bot_temp.send_video(
                                 user_id,
-                                final_message,
+                                config.media_url,
+                                caption=final_message,
                                 reply_markup=markup,
                                 parse_mode="HTML"
                             )
+                        
+                        # 2. ÁUDIO (CORREÇÃO OGG)
+                        elif config.media_type == 'audio' or media_low.endswith(('.ogg', '.mp3', '.wav', '.opus')):
+                            # 🎤 Envia APENAS o áudio (Nota de Voz Pura)
+                            bot_temp.send_chat_action(user_id, 'record_voice')
+                            time.sleep(2) # Pequeno delay para simular gravação
+                            bot_temp.send_voice(
+                                user_id,
+                                config.media_url
+                            )
+                            
+                            # 📝 Envia Texto + Botões em mensagem separada logo em seguida
+                            time.sleep(1)
+                            if final_message or (markup and len(markup.keyboard) > 0):
+                                msg_text_audio = final_message if final_message else "..."
+                                bot_temp.send_message(
+                                    user_id,
+                                    msg_text_audio,
+                                    reply_markup=markup,
+                                    parse_mode="HTML"
+                                )
+                                
+                        # 3. FOTO (Padrão)
+                        else: 
+                            bot_temp.send_photo(
+                                user_id,
+                                config.media_url,
+                                caption=final_message,
+                                reply_markup=markup,
+                                parse_mode="HTML"
+                            )
+                    else:
+                        bot_temp.send_message(
+                            user_id,
+                            final_message,
+                            reply_markup=markup,
+                            parse_mode="HTML"
+                        )
                     
                     logger.info(f"✅ [CANAL FREE] Mensagem enviada para {user_name}")
                     
@@ -8814,8 +8813,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 callback_data="step_1"
                             ))
 
-                # 🔥 BLOCO DE ENVIO COM LOG
-                # 🔥 BLOCO DE ENVIO COM LOG E ÁUDIO
                 # 🔥 BLOCO DE ENVIO COM LOG E ÁUDIO (CORRIGIDO)
                 try:
                     logger.info(f"📤 Tentando enviar menu para {chat_id}...")
@@ -9029,8 +9026,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     # Motivo: Timer automático deletava mensagem ANTES do usuário clicar, parando o fluxo
                     # A destruição agora acontece corretamente quando o usuário clica no botão do passo anterior
                     # if sent_msg and target_step.autodestruir:
-                    #     tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 20
-                    #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
+                    #      tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 20
+                    #      agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
 
                     # Lógica de Navegação Automática (Recursividade para passos SEM botão)
                     if not target_step.mostrar_botao:
