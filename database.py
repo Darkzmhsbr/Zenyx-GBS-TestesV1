@@ -191,6 +191,10 @@ class OrderBumpConfig(Base):
     msg_texto = Column(Text, default="Gostaria de adicionar este item?")
     msg_media = Column(String, nullable=True)
     
+    # 🔊 ÁUDIO SEPARADO (Combo: áudio + mídia)
+    audio_url = Column(String, nullable=True)           # URL do áudio OGG separado
+    audio_delay_seconds = Column(Integer, default=3)    # Delay entre áudio e mídia+texto
+    
     # Botões
     btn_aceitar = Column(String, default="✅ SIM, ADICIONAR")
     btn_recusar = Column(String, default="❌ NÃO, OBRIGADO")
@@ -219,6 +223,10 @@ class UpsellConfig(Base):
     # Conteúdo da Oferta
     msg_texto = Column(Text, default="🔥 Oferta exclusiva para você!")
     msg_media = Column(String, nullable=True)
+    
+    # 🔊 ÁUDIO SEPARADO (Combo: áudio + mídia)
+    audio_url = Column(String, nullable=True)           # URL do áudio OGG separado
+    audio_delay_seconds = Column(Integer, default=3)    # Delay entre áudio e mídia+texto
     
     # Botões
     btn_aceitar = Column(String, default="✅ QUERO ESSA OFERTA!")
@@ -254,6 +262,10 @@ class DownsellConfig(Base):
     # Conteúdo da Oferta
     msg_texto = Column(Text, default="🎁 Última chance! Oferta especial só para você!")
     msg_media = Column(String, nullable=True)
+    
+    # 🔊 ÁUDIO SEPARADO (Combo: áudio + mídia)
+    audio_url = Column(String, nullable=True)           # URL do áudio OGG separado
+    audio_delay_seconds = Column(Integer, default=3)    # Delay entre áudio e mídia+texto
     
     # Botões
     btn_aceitar = Column(String, default="✅ QUERO ESSA OFERTA!")
@@ -711,6 +723,10 @@ class RemarketingConfig(Base):
     media_url = Column(String(500), nullable=True)
     media_type = Column(String(10), nullable=True)  # 'photo', 'video', None
     
+    # 🔊 ÁUDIO SEPARADO (Combo: áudio + mídia)
+    audio_url = Column(String(500), nullable=True)      # URL do áudio OGG separado
+    audio_delay_seconds = Column(Integer, default=3)    # Delay entre áudio e mídia+texto
+    
     # Timing
     delay_minutes = Column(Integer, default=5)
     
@@ -839,6 +855,10 @@ class CanalFreeConfig(Base):
     message_text = Column(Text, nullable=False)
     media_url = Column(String(500), nullable=True)
     media_type = Column(String(10), nullable=True)  # 'photo', 'video', None
+    
+    # 🔊 ÁUDIO SEPARADO (Combo: áudio + mídia)
+    audio_url = Column(String(500), nullable=True)      # URL do áudio OGG separado
+    audio_delay_seconds = Column(Integer, default=3)    # Delay entre áudio e mídia+texto
     
     # Botões Personalizados (JSON Array)
     buttons = Column(JSON, default=[])

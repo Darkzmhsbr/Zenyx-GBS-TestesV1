@@ -161,28 +161,43 @@ def is_audio_file(url):
 
 def _download_audio_bytes(media_url):
     """
-    Baixa o áudio da URL e retorna (bytes, filename).
+    Baixa o áudio da URL e retorna (bytes, filename, duration_seconds).
+    
     Necessário porque o Telegram só reconhece voice notes quando:
     1. O arquivo é enviado como bytes (não URL)
     2. O Content-Type está correto (audio/ogg)
-    3. Não tem caption nem reply_markup
     
-    Quando enviamos uma URL HTTP do Backblaze/S3, o Telegram faz download
-    mas o Content-Type pode vir como application/octet-stream, fazendo
-    o áudio ser renderizado como arquivo genérico ao invés de voice note.
+    Também detecta a DURAÇÃO do áudio para simular "Enviando áudio..."
+    pelo tempo real da gravação, tornando o envio mais realista.
     """
     try:
         resp = httpx.get(media_url, timeout=30, follow_redirects=True)
         resp.raise_for_status()
+        audio_data = resp.content
+        
         # Extrai extensão da URL
         ext = media_url.split('.')[-1].split('?')[0].lower()
         if ext not in ('ogg', 'mp3', 'wav'):
             ext = 'ogg'
         filename = f"voice_{uuid.uuid4().hex[:8]}.{ext}"
-        return resp.content, filename
+        
+        # 🔊 Detecta duração do áudio usando mutagen
+        duration = 0
+        try:
+            import io
+            from mutagen import File as MutagenFile
+            audio_file = MutagenFile(io.BytesIO(audio_data))
+            if audio_file and audio_file.info:
+                duration = int(audio_file.info.length)
+                logger.info(f"🎙️ Áudio detectado: {duration}s de duração")
+        except Exception as e_dur:
+            logger.warning(f"⚠️ Não foi possível detectar duração do áudio: {e_dur}")
+            duration = 0
+        
+        return audio_data, filename, duration
     except Exception as e:
         logger.error(f"❌ Erro ao baixar áudio de {media_url}: {e}")
-        return None, None
+        return None, None, 0
 
 def enviar_audio_inteligente(bot, chat_id, media_url, texto=None, markup=None, parse_mode="HTML", protect_content=False, delay_pos_audio=2):
     """
@@ -193,22 +208,32 @@ def enviar_audio_inteligente(bot, chat_id, media_url, texto=None, markup=None, p
     2. SEM caption e SEM reply_markup
     3. Texto e botões vão em mensagem SEPARADA depois
     
+    🔊 DURAÇÃO INTELIGENTE: O "Enviando áudio..." é mostrado pelo tempo
+    real da duração do áudio, fazendo parecer gravação em tempo real.
+    
     Retorna: lista de message_ids enviados (para auto-destruição)
     """
     sent_messages = []
     
-    # 1. Simula gravação
+    # 1. Baixa o áudio e detecta duração
+    audio_bytes, filename, duration = _download_audio_bytes(media_url)
+    
+    # 2. Simula gravação pelo tempo real do áudio
     try:
         bot.send_chat_action(chat_id, 'record_voice')
-        time.sleep(3)  # Simula tempo de gravação
+        # Se temos duração real, usa ela (mínimo 2s, máximo 60s para não travar)
+        if duration > 0:
+            wait_time = min(max(duration, 2), 60)
+            logger.info(f"🎙️ Simulando gravação por {wait_time}s (áudio real: {duration}s)")
+        else:
+            wait_time = 3  # Fallback padrão
+        time.sleep(wait_time)
     except:
         pass
     
-    # 2. Baixa o áudio e envia como bytes (garante voice note nativo)
+    # 3. Envia como bytes (garante voice note nativo)
     try:
-        audio_bytes, filename = _download_audio_bytes(media_url)
         if audio_bytes:
-            # Envia como bytes com nome .ogg - Telegram reconhece como voice note
             voice_msg = bot.send_voice(chat_id, audio_bytes, protect_content=protect_content)
             sent_messages.append(voice_msg)
             logger.info(f"🎙️ Voice note enviado com sucesso para {chat_id} ({len(audio_bytes)} bytes)")
@@ -219,14 +244,13 @@ def enviar_audio_inteligente(bot, chat_id, media_url, texto=None, markup=None, p
             sent_messages.append(voice_msg)
     except Exception as e:
         logger.error(f"❌ Erro ao enviar voice: {e}")
-        # Último fallback: envia como audio (não voice) para não perder a mensagem
         try:
             bot.send_audio(chat_id, media_url, protect_content=protect_content)
         except:
             pass
         return sent_messages
     
-    # 3. Se tem texto OU botões, envia em mensagem separada após delay
+    # 4. Se tem texto OU botões, envia em mensagem separada após delay
     if texto or markup:
         time.sleep(delay_pos_audio)
         try:
@@ -235,7 +259,6 @@ def enviar_audio_inteligente(bot, chat_id, media_url, texto=None, markup=None, p
             elif texto:
                 text_msg = bot.send_message(chat_id, texto, parse_mode=parse_mode, protect_content=protect_content)
             elif markup:
-                # Só botões sem texto - usa texto genérico
                 text_msg = bot.send_message(chat_id, "⬇️ Escolha uma opção:", reply_markup=markup, protect_content=protect_content)
             sent_messages.append(text_msg)
         except Exception as e:
@@ -441,14 +464,49 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
         # Envia mídia se configurado
         message_id = None
         try:
-            if config.media_url and config.media_type:
-                # 🔥 LÓGICA ATUALIZADA COM SUPORTE A ÁUDIO
+            # 🔊 COMBO: Se tem audio_url separado, envia áudio primeiro, depois mídia+texto+botões
+            _audio_url_cfg = getattr(config, 'audio_url', None)
+            _audio_delay_cfg = getattr(config, 'audio_delay_seconds', 3) or 3
+            
+            if _audio_url_cfg and _audio_url_cfg.strip():
+                # MODO COMBO: Áudio separado + mídia com legenda e botões
+                logger.info(f"🎙️ Modo combo: áudio separado + mídia para {chat_id}")
+                
+                # Passo 1: Envia áudio sozinho (voice note nativo)
+                audio_combo_bytes, _, _dur_combo = _download_audio_bytes(_audio_url_cfg)
+                bot_instance.send_chat_action(chat_id, 'record_voice')
+                _wait_combo = min(max(_dur_combo, 2), 60) if _dur_combo > 0 else 3
+                time.sleep(_wait_combo)
+                if audio_combo_bytes:
+                    bot_instance.send_voice(chat_id, audio_combo_bytes, protect_content=_protect_auto)
+                else:
+                    bot_instance.send_voice(chat_id, _audio_url_cfg, protect_content=_protect_auto)
+                
+                # Passo 2: Delay configurável entre áudio e mídia
+                time.sleep(_audio_delay_cfg)
+                
+                # Passo 3: Envia mídia (foto/vídeo) + legenda + botões (como mensagem normal)
+                if config.media_url and config.media_type:
+                    if config.media_type == 'photo':
+                        msg = bot_instance.send_photo(chat_id, config.media_url, caption=mensagem, parse_mode='HTML', protect_content=_protect_auto)
+                    elif config.media_type == 'video':
+                        msg = bot_instance.send_video(chat_id, config.media_url, caption=mensagem, parse_mode='HTML', protect_content=_protect_auto)
+                    else:
+                        msg = bot_instance.send_message(chat_id, mensagem, parse_mode='HTML', protect_content=_protect_auto)
+                    message_id = msg.message_id
+                else:
+                    # Só tem áudio + texto (sem mídia extra)
+                    msg = bot_instance.send_message(chat_id, mensagem, parse_mode='HTML', protect_content=_protect_auto)
+                    message_id = msg.message_id
+            
+            elif config.media_url and config.media_type:
+                # MODO NORMAL: Mídia única (foto, vídeo ou áudio)
                 if config.media_type == 'photo':
                     msg = bot_instance.send_photo(chat_id, config.media_url, caption=mensagem, parse_mode='HTML', protect_content=_protect_auto)
                 elif config.media_type == 'video':
                     msg = bot_instance.send_video(chat_id, config.media_url, caption=mensagem, parse_mode='HTML', protect_content=_protect_auto)
                 elif config.media_type == 'audio' or config.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
-                    # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                    # 🔊 ÁUDIO ÚNICO: Envia sozinho sem caption/markup
                     audio_msgs = enviar_audio_inteligente(
                         bot_instance, chat_id, config.media_url,
                         texto=mensagem if mensagem and mensagem.strip() else None,
@@ -1196,9 +1254,10 @@ async def send_remarketing_job(
                 elif media and (mtype == 'audio' or is_audio_file(media)):
                     # 🔊 ÁUDIO: Baixa e envia como bytes para garantir voice note nativo
                     try:
+                        audio_bytes, _fname, _audio_dur = _download_audio_bytes(media)
                         bot.send_chat_action(chat_id, 'record_voice')
-                        await asyncio.sleep(3)
-                        audio_bytes, _fname = _download_audio_bytes(media)
+                        _wait = min(max(_audio_dur, 2), 60) if _audio_dur > 0 else 3
+                        await asyncio.sleep(_wait)
                         if audio_bytes:
                             voice_msg = bot.send_voice(chat_id, audio_bytes)
                         else:
@@ -1533,6 +1592,19 @@ async def enviar_mensagens_alternantes():
             db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS last_message_auto_destruct BOOLEAN DEFAULT FALSE"))
             db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS last_message_destruct_seconds INTEGER DEFAULT 60"))
             db.execute(text("ALTER TABLE alternating_messages ADD COLUMN IF NOT EXISTS max_duration_minutes INTEGER DEFAULT 60"))
+            
+            # 🔊 MIGRAÇÃO: Campos de áudio separado (Combo áudio + mídia)
+            db.execute(text("ALTER TABLE remarketing_config ADD COLUMN IF NOT EXISTS audio_url VARCHAR(500)"))
+            db.execute(text("ALTER TABLE remarketing_config ADD COLUMN IF NOT EXISTS audio_delay_seconds INTEGER DEFAULT 3"))
+            db.execute(text("ALTER TABLE canal_free_config ADD COLUMN IF NOT EXISTS audio_url VARCHAR(500)"))
+            db.execute(text("ALTER TABLE canal_free_config ADD COLUMN IF NOT EXISTS audio_delay_seconds INTEGER DEFAULT 3"))
+            db.execute(text("ALTER TABLE order_bump_config ADD COLUMN IF NOT EXISTS audio_url VARCHAR"))
+            db.execute(text("ALTER TABLE order_bump_config ADD COLUMN IF NOT EXISTS audio_delay_seconds INTEGER DEFAULT 3"))
+            db.execute(text("ALTER TABLE upsell_config ADD COLUMN IF NOT EXISTS audio_url VARCHAR"))
+            db.execute(text("ALTER TABLE upsell_config ADD COLUMN IF NOT EXISTS audio_delay_seconds INTEGER DEFAULT 3"))
+            db.execute(text("ALTER TABLE downsell_config ADD COLUMN IF NOT EXISTS audio_url VARCHAR"))
+            db.execute(text("ALTER TABLE downsell_config ADD COLUMN IF NOT EXISTS audio_delay_seconds INTEGER DEFAULT 3"))
+            logger.info("✅ Migração de audio_url concluída para todas as tabelas")
             db.commit()
         except Exception:
             db.rollback()
@@ -2039,7 +2111,9 @@ def get_auto_remarketing_config(
                 "auto_destruct_enabled": False,
                 "auto_destruct_seconds": 3,
                 "auto_destruct_after_click": True,
-                "promo_values": {}
+                "promo_values": {},
+                "audio_url": None,
+                "audio_delay_seconds": 3
             }
         
         return {
@@ -2054,6 +2128,8 @@ def get_auto_remarketing_config(
             "auto_destruct_seconds": config.auto_destruct_seconds,
             "auto_destruct_after_click": config.auto_destruct_after_click,
             "promo_values": config.promo_values or {},
+            "audio_url": getattr(config, 'audio_url', None),
+            "audio_delay_seconds": getattr(config, 'audio_delay_seconds', 3),
             "created_at": config.created_at.isoformat() if config.created_at else None,
             "updated_at": config.updated_at.isoformat() if config.updated_at else None
         }
@@ -2100,6 +2176,8 @@ def save_auto_remarketing_config(
             config.auto_destruct_seconds = data.get("auto_destruct_seconds", config.auto_destruct_seconds)
             config.auto_destruct_after_click = data.get("auto_destruct_after_click", config.auto_destruct_after_click)
             config.promo_values = data.get("promo_values", config.promo_values)
+            config.audio_url = data.get("audio_url", config.audio_url)
+            config.audio_delay_seconds = data.get("audio_delay_seconds", config.audio_delay_seconds)
             config.updated_at = now_brazil()
         else:
             config = RemarketingConfig(
@@ -2112,7 +2190,9 @@ def save_auto_remarketing_config(
                 auto_destruct_enabled=data.get("auto_destruct_enabled", False),
                 auto_destruct_seconds=data.get("auto_destruct_seconds", 3),
                 auto_destruct_after_click=data.get("auto_destruct_after_click", True),
-                promo_values=data.get("promo_values", {})
+                promo_values=data.get("promo_values", {}),
+                audio_url=data.get("audio_url"),
+                audio_delay_seconds=data.get("audio_delay_seconds", 3)
             )
             db.add(config)
         
@@ -2133,6 +2213,8 @@ def save_auto_remarketing_config(
             "auto_destruct_seconds": config.auto_destruct_seconds,
             "auto_destruct_after_click": config.auto_destruct_after_click,
             "promo_values": config.promo_values,
+            "audio_url": config.audio_url,
+            "audio_delay_seconds": config.audio_delay_seconds,
             "updated_at": config.updated_at.isoformat()
         }
         
@@ -4404,6 +4486,8 @@ class OrderBumpCreate(BaseModel):
     msg_media: Optional[str] = None
     btn_aceitar: Optional[str] = "✅ SIM, ADICIONAR"
     btn_recusar: Optional[str] = "❌ NÃO, OBRIGADO"
+    audio_url: Optional[str] = None          # 🔊 Áudio separado
+    audio_delay_seconds: Optional[int] = 3   # 🔊 Delay entre áudio e mídia
 
 # 🚀 UPSELL/DOWNSELL MODELS
 class UpsellCreate(BaseModel):
@@ -4411,26 +4495,30 @@ class UpsellCreate(BaseModel):
     nome_produto: str = ""
     preco: float = 0.0
     link_acesso: str = ""
-    group_id: Optional[int] = None  # ✅ FASE 2: Referência ao catálogo de Grupos
+    group_id: Optional[int] = None
     delay_minutos: int = 2
     msg_texto: Optional[str] = "🔥 Oferta exclusiva para você!"
     msg_media: Optional[str] = None
     btn_aceitar: Optional[str] = "✅ QUERO ESSA OFERTA!"
     btn_recusar: Optional[str] = "❌ NÃO, OBRIGADO"
     autodestruir: Optional[bool] = False
+    audio_url: Optional[str] = None          # 🔊 Áudio separado
+    audio_delay_seconds: Optional[int] = 3   # 🔊 Delay entre áudio e mídia
 
 class DownsellCreate(BaseModel):
     ativo: bool = False
     nome_produto: str = ""
     preco: float = 0.0
     link_acesso: str = ""
-    group_id: Optional[int] = None  # ✅ FASE 2: Referência ao catálogo de Grupos
+    group_id: Optional[int] = None
     delay_minutos: int = 10
     msg_texto: Optional[str] = "🎁 Última chance! Oferta especial só para você!"
     msg_media: Optional[str] = None
     btn_aceitar: Optional[str] = "✅ QUERO ESSA OFERTA!"
     btn_recusar: Optional[str] = "❌ NÃO, OBRIGADO"
     autodestruir: Optional[bool] = False
+    audio_url: Optional[str] = None          # 🔊 Áudio separado
+    audio_delay_seconds: Optional[int] = 3   # 🔊 Delay entre áudio e mídia
 
 # =========================================================
 # 📦 GRUPOS E CANAIS - PYDANTIC MODELS
@@ -6427,7 +6515,8 @@ def get_order_bump(
         return {
             "ativo": False, "nome_produto": "", "preco": 0.0, "link_acesso": "",
             "msg_texto": "", "msg_media": "", 
-            "btn_aceitar": "✅ SIM, ADICIONAR", "btn_recusar": "❌ NÃO, OBRIGADO"
+            "btn_aceitar": "✅ SIM, ADICIONAR", "btn_recusar": "❌ NÃO, OBRIGADO",
+            "audio_url": None, "audio_delay_seconds": 3
         }
     return bump
 
@@ -6456,6 +6545,8 @@ def save_order_bump(
     bump.msg_media = dados.msg_media
     bump.btn_aceitar = dados.btn_aceitar
     bump.btn_recusar = dados.btn_recusar
+    bump.audio_url = dados.audio_url
+    bump.audio_delay_seconds = dados.audio_delay_seconds
     
     db.commit()
     return {"status": "ok"}
@@ -6471,7 +6562,7 @@ def get_upsell(bot_id: int, db: Session = Depends(get_db)):
             "ativo": False, "nome_produto": "", "preco": 0.0, "link_acesso": "",
             "delay_minutos": 2, "msg_texto": "🔥 Oferta exclusiva para você!", "msg_media": "",
             "btn_aceitar": "✅ QUERO ESSA OFERTA!", "btn_recusar": "❌ NÃO, OBRIGADO",
-            "autodestruir": False
+            "autodestruir": False, "audio_url": None, "audio_delay_seconds": 3
         }
     return config
 
@@ -6500,6 +6591,8 @@ def save_upsell(
     config.btn_aceitar = dados.btn_aceitar
     config.btn_recusar = dados.btn_recusar
     config.autodestruir = dados.autodestruir
+    config.audio_url = dados.audio_url
+    config.audio_delay_seconds = dados.audio_delay_seconds
     
     db.commit()
     return {"status": "ok"}
@@ -6515,7 +6608,7 @@ def get_downsell(bot_id: int, db: Session = Depends(get_db)):
             "ativo": False, "nome_produto": "", "preco": 0.0, "link_acesso": "",
             "delay_minutos": 10, "msg_texto": "🎁 Última chance! Oferta especial só para você!", "msg_media": "",
             "btn_aceitar": "✅ QUERO ESSA OFERTA!", "btn_recusar": "❌ NÃO, OBRIGADO",
-            "autodestruir": False
+            "autodestruir": False, "audio_url": None, "audio_delay_seconds": 3
         }
     return config
 
@@ -6544,6 +6637,8 @@ def save_downsell(
     config.btn_aceitar = dados.btn_aceitar
     config.btn_recusar = dados.btn_recusar
     config.autodestruir = dados.autodestruir
+    config.audio_url = dados.audio_url
+    config.audio_delay_seconds = dados.audio_delay_seconds
     
     db.commit()
     return {"status": "ok"}
@@ -7685,17 +7780,47 @@ async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: in
         msg_texto = config.msg_texto or f"{'🚀' if offer_type == 'upsell' else '🎁'} Oferta especial!"
         
         try:
-            # 🔥 LÓGICA ATUALIZADA COM SUPORTE A ÁUDIO
-            if config.msg_media:
+            # 🔊 COMBO: Se tem audio_url separado, envia áudio primeiro
+            _audio_url_up = getattr(config, 'audio_url', None)
+            _audio_delay_up = getattr(config, 'audio_delay_seconds', 3) or 3
+            
+            if _audio_url_up and _audio_url_up.strip():
+                # MODO COMBO: Áudio + mídia com legenda e botões
+                logger.info(f"🎙️ Modo combo {offer_type}: áudio + mídia para {chat_id}")
+                audio_combo_bytes, _, _dur = _download_audio_bytes(_audio_url_up)
+                tb.send_chat_action(chat_id, 'record_voice')
+                _wait = min(max(_dur, 2), 60) if _dur > 0 else 3
+                await asyncio.sleep(_wait)
+                if audio_combo_bytes:
+                    tb.send_voice(chat_id, audio_combo_bytes)
+                else:
+                    tb.send_voice(chat_id, _audio_url_up)
+                await asyncio.sleep(_audio_delay_up)
+                
+                # Envia mídia + texto + botões
+                if config.msg_media:
+                    media_url = config.msg_media.strip().lower()
+                    if media_url.endswith(('.mp4', '.mov', '.avi')):
+                        tb.send_video(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
+                    elif media_url.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+                        tb.send_photo(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
+                    else:
+                        tb.send_photo(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
+                else:
+                    tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
+            
+            elif config.msg_media:
+                # MODO NORMAL: Mídia única
                 media_url = config.msg_media.strip().lower()
                 if media_url.endswith(('.mp4', '.mov', '.avi')):
                     tb.send_video(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
                 elif media_url.endswith(('.ogg', '.mp3', '.wav')):
-                    # 🔊 ÁUDIO: Baixa e envia como bytes para voice note nativo
+                    # 🔊 ÁUDIO ÚNICO: Baixa e envia como bytes
                     try:
+                        audio_bytes, _fname, _audio_dur = _download_audio_bytes(config.msg_media)
                         tb.send_chat_action(chat_id, 'record_voice')
-                        await asyncio.sleep(3)
-                        audio_bytes, _fname = _download_audio_bytes(config.msg_media)
+                        _wait = min(max(_audio_dur, 2), 60) if _audio_dur > 0 else 3
+                        await asyncio.sleep(_wait)
                         if audio_bytes:
                             tb.send_voice(chat_id, audio_bytes)
                         else:
@@ -8635,8 +8760,32 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                     url=btn['url']
                                 ))
                     
-                    # 🔥 LÓGICA DE MÍDIA ATUALIZADA (SUPORTE A ÁUDIO)
-                    if config.media_url:
+                    # 🔥 LÓGICA DE MÍDIA ATUALIZADA (COMBO ÁUDIO + MÍDIA)
+                    _audio_url_cf = getattr(config, 'audio_url', None)
+                    _audio_delay_cf = getattr(config, 'audio_delay_seconds', 3) or 3
+                    
+                    if _audio_url_cf and _audio_url_cf.strip():
+                        # MODO COMBO: Áudio separado + mídia com legenda e botões
+                        logger.info(f"🎙️ [CANAL FREE] Modo combo: áudio + mídia para {user_id}")
+                        audio_combo_cf, _, _dur_cf = _download_audio_bytes(_audio_url_cf)
+                        bot_temp.send_chat_action(user_id, 'record_voice')
+                        _wt_cf = min(max(_dur_cf, 2), 60) if _dur_cf > 0 else 3
+                        time.sleep(_wt_cf)
+                        if audio_combo_cf:
+                            bot_temp.send_voice(user_id, audio_combo_cf)
+                        else:
+                            bot_temp.send_voice(user_id, _audio_url_cf)
+                        time.sleep(_audio_delay_cf)
+                        
+                        if config.media_url and config.media_type in ('photo', 'video'):
+                            if config.media_type == 'video':
+                                bot_temp.send_video(user_id, config.media_url, caption=final_message, reply_markup=markup, parse_mode="HTML")
+                            else:
+                                bot_temp.send_photo(user_id, config.media_url, caption=final_message, reply_markup=markup, parse_mode="HTML")
+                        else:
+                            bot_temp.send_message(user_id, final_message or "⬇️ Escolha:", reply_markup=markup, parse_mode="HTML")
+                    
+                    elif config.media_url:
                         media_low = config.media_url.lower()
                         if config.media_type == 'video' or media_low.endswith(('.mp4', '.mov', '.avi')):
                             bot_temp.send_video(
@@ -8647,10 +8796,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 parse_mode="HTML"
                             )
                         elif config.media_type == 'audio' or media_low.endswith(('.ogg', '.mp3', '.wav')):
-                            # 🔊 ÁUDIO: Baixa e envia como bytes para voice note nativo
+                            # 🔊 ÁUDIO ÚNICO: Baixa e envia como bytes
+                            audio_bytes_cf, _fname_cf, _audio_dur_cf = _download_audio_bytes(config.media_url)
                             bot_temp.send_chat_action(user_id, 'record_voice')
-                            time.sleep(3)
-                            audio_bytes_cf, _fname_cf = _download_audio_bytes(config.media_url)
+                            _wait_cf = min(max(_audio_dur_cf, 2), 60) if _audio_dur_cf > 0 else 3
+                            time.sleep(_wait_cf)
                             if audio_bytes_cf:
                                 bot_temp.send_voice(user_id, audio_bytes_cf)
                             else:
@@ -10838,7 +10988,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         # 🔊 PRÉ-DOWNLOAD: Se é áudio, baixa UMA vez antes do loop
         _bulk_audio_bytes = None
         if payload.media_url and payload.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
-            _bulk_audio_bytes, _ = _download_audio_bytes(payload.media_url)
+            _bulk_audio_bytes, _, _bulk_audio_dur = _download_audio_bytes(payload.media_url)
             if _bulk_audio_bytes:
                 logger.info(f"🎙️ Áudio pré-baixado para envio em massa ({len(_bulk_audio_bytes)} bytes)")
 
@@ -10856,7 +11006,8 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                         elif ext.endswith(('.ogg', '.mp3', '.wav')):
                             # 🔊 ÁUDIO: Envia bytes pré-baixados como voice note nativo
                             bot_sender.send_chat_action(uid, 'record_voice')
-                            time.sleep(2)
+                            _wait_bulk = min(max(_bulk_audio_dur, 2), 60) if _bulk_audio_dur and _bulk_audio_dur > 0 else 3
+                            time.sleep(_wait_bulk)
                             if _bulk_audio_bytes:
                                 bot_sender.send_voice(uid, _bulk_audio_bytes, protect_content=_protect_rmkt)
                             else:
@@ -11191,9 +11342,10 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
                     sender.send_video(payload.user_telegram_id, media, caption=msg, reply_markup=markup, parse_mode="HTML")
                 elif ext.endswith(('.ogg', '.mp3', '.wav')):
                     # 🔊 ÁUDIO: Baixa e envia como bytes para voice note nativo
+                    audio_bytes_ind, _fname_ind, _audio_dur_ind = _download_audio_bytes(media)
                     sender.send_chat_action(payload.user_telegram_id, 'record_voice')
-                    time.sleep(3)
-                    audio_bytes_ind, _fname_ind = _download_audio_bytes(media)
+                    _wait_ind = min(max(_audio_dur_ind, 2), 60) if _audio_dur_ind > 0 else 3
+                    time.sleep(_wait_ind)
                     if audio_bytes_ind:
                         sender.send_voice(payload.user_telegram_id, audio_bytes_ind)
                     else:
@@ -11380,6 +11532,8 @@ def get_canal_free_config(
             "media_type": config.media_type,
             "buttons": config.buttons or [],
             "delay_seconds": config.delay_seconds,
+            "audio_url": getattr(config, 'audio_url', None),
+            "audio_delay_seconds": getattr(config, 'audio_delay_seconds', 3),
             "created_at": config.created_at.isoformat() if config.created_at else None,
             "updated_at": config.updated_at.isoformat() if config.updated_at else None
         }
@@ -11432,6 +11586,8 @@ def save_canal_free_config(
             config.media_type = data.get("media_type")
             config.buttons = data.get("buttons", [])
             config.delay_seconds = delay_seconds
+            config.audio_url = data.get("audio_url")
+            config.audio_delay_seconds = data.get("audio_delay_seconds", 3)
             config.updated_at = now_brazil()
         else:
             # Criar nova
@@ -11444,7 +11600,9 @@ def save_canal_free_config(
                 media_url=data.get("media_url"),
                 media_type=data.get("media_type"),
                 buttons=data.get("buttons", []),
-                delay_seconds=delay_seconds
+                delay_seconds=delay_seconds,
+                audio_url=data.get("audio_url"),
+                audio_delay_seconds=data.get("audio_delay_seconds", 3)
             )
             db.add(config)
         
@@ -15318,4 +15476,59 @@ async def migrate_protect_content(db: Session = Depends(get_db)):
         return {
             "status": "error",
             "message": f"❌ Erro: {str(e)}"
+        }
+
+# ============================================================
+# 🔒 MIGRAÇÃO: AUDIO FEATURE (COMBO ÁUDIO + MÍDIA)
+# ============================================================
+@app.get("/migrate-audio-features")
+async def migrate_audio_features(db: Session = Depends(get_db)):
+    """
+    Migração para adicionar colunas de áudio separado e delay nas tabelas de configuração.
+    Tabelas afetadas: remarketing_config, canal_free_config, order_bump_config, upsell_config, downsell_config.
+    
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-audio-features
+    """
+    try:
+        from sqlalchemy import text
+        
+        # Lista das tabelas que receberão as novas colunas
+        tabelas = [
+            "remarketing_config",
+            "canal_free_config",
+            "order_bump_config",
+            "upsell_config",
+            "downsell_config"
+        ]
+        
+        log_msgs = []
+        
+        for tabela in tabelas:
+            # 1. Adicionar coluna audio_url (Texto/String)
+            try:
+                db.execute(text(f"ALTER TABLE {tabela} ADD COLUMN IF NOT EXISTS audio_url VARCHAR;"))
+                log_msgs.append(f"✅ {tabela}: audio_url verificado.")
+            except Exception as e:
+                log_msgs.append(f"⚠️ {tabela} (audio_url): {str(e)}")
+
+            # 2. Adicionar coluna audio_delay_seconds (Inteiro, padrão 0)
+            try:
+                db.execute(text(f"ALTER TABLE {tabela} ADD COLUMN IF NOT EXISTS audio_delay_seconds INTEGER DEFAULT 0;"))
+                log_msgs.append(f"✅ {tabela}: audio_delay_seconds verificado.")
+            except Exception as e:
+                log_msgs.append(f"⚠️ {tabela} (audio_delay_seconds): {str(e)}")
+
+        db.commit()
+        
+        return {
+            "status": "success",
+            "message": "Migração de Áudio + Mídia concluída!",
+            "details": log_msgs
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"❌ Erro crítico na migração: {str(e)}"
         }
