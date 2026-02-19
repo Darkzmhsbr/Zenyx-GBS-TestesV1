@@ -199,37 +199,63 @@ def _download_audio_bytes(media_url):
         logger.error(f"❌ Erro ao baixar áudio de {media_url}: {e}")
         return None, None, 0
 
+# ============================================================
+# 🔄 HELPERS: CHAT ACTION EM LOOP (FIX DO TIMEOUT DE 4S)
+# ============================================================
+def _sleep_with_action(bot, chat_id, duration, action='record_voice'):
+    """
+    Mantém a ação (ex: 'gravando áudio') ativa visualmente durante TODO o delay.
+    Renova o status a cada 4 segundos para evitar que o Telegram o remova.
+    """
+    start = time.time()
+    while (time.time() - start) < duration:
+        try:
+            bot.send_chat_action(chat_id, action)
+        except Exception:
+            pass # Ignora erros de conexão/bloqueio durante o loop
+            
+        # Dorme 4s ou o restante do tempo (o que for menor)
+        remaining = duration - (time.time() - start)
+        if remaining <= 0: break
+        time.sleep(min(remaining, 4.0))
+
+async def _async_sleep_with_action(bot, chat_id, duration, action='record_voice'):
+    """
+    Versão ASYNC: Mantém a ação ativa visualmente durante TODO o delay.
+    """
+    start = time.time()
+    while (time.time() - start) < duration:
+        try:
+            # Nota: TeleBot é síncrono, mas em função async não bloqueia o loop se for rápido
+            bot.send_chat_action(chat_id, action)
+        except Exception:
+            pass
+            
+        remaining = duration - (time.time() - start)
+        if remaining <= 0: break
+        await asyncio.sleep(min(remaining, 4.0))
+
 def enviar_audio_inteligente(bot, chat_id, media_url, texto=None, markup=None, parse_mode="HTML", protect_content=False, delay_pos_audio=2):
     """
     Envia áudio OGG como voice note nativo do Telegram.
     
-    REGRA CRÍTICA: Para o Telegram renderizar como bolha de áudio nativa:
-    1. Enviar como BYTES (não URL) para controlar Content-Type
-    2. SEM caption e SEM reply_markup
-    3. Texto e botões vão em mensagem SEPARADA depois
-    
-    🔊 DURAÇÃO INTELIGENTE: O "Enviando áudio..." é mostrado pelo tempo
-    real da duração do áudio, fazendo parecer gravação em tempo real.
-    
-    Retorna: lista de message_ids enviados (para auto-destruição)
+    CORREÇÃO: Usa loop para manter 'Enviando áudio...' ativo por toda a duração.
     """
     sent_messages = []
     
     # 1. Baixa o áudio e detecta duração
     audio_bytes, filename, duration = _download_audio_bytes(media_url)
     
-    # 2. Simula gravação pelo tempo real do áudio
-    try:
-        bot.send_chat_action(chat_id, 'record_voice')
-        # Se temos duração real, usa ela (mínimo 2s, máximo 60s para não travar)
-        if duration > 0:
-            wait_time = min(max(duration, 2), 60)
-            logger.info(f"🎙️ Simulando gravação por {wait_time}s (áudio real: {duration}s)")
-        else:
-            wait_time = 3  # Fallback padrão
-        time.sleep(wait_time)
-    except:
-        pass
+    # 2. Simula gravação pelo tempo real do áudio (COM LOOP DE RENOVAÇÃO)
+    # Se temos duração real, usa ela (mínimo 2s, máximo 60s)
+    if duration > 0:
+        wait_time = min(max(duration, 2), 60)
+        logger.info(f"🎙️ Simulando gravação por {wait_time}s (áudio real: {duration}s)")
+    else:
+        wait_time = 3  # Fallback padrão
+    
+    # 🔥 AQUI ESTÁ A CORREÇÃO: Usa o helper com loop
+    _sleep_with_action(bot, chat_id, wait_time, 'record_voice')
     
     # 3. Envia como bytes (garante voice note nativo)
     try:
@@ -474,9 +500,11 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
                 
                 # Passo 1: Envia áudio sozinho (voice note nativo)
                 audio_combo_bytes, _, _dur_combo = _download_audio_bytes(_audio_url_cfg)
-                bot_instance.send_chat_action(chat_id, 'record_voice')
+                
+                # 🔥 CORREÇÃO: Usa _sleep_with_action para manter o status
                 _wait_combo = min(max(_dur_combo, 2), 60) if _dur_combo > 0 else 3
-                time.sleep(_wait_combo)
+                _sleep_with_action(bot_instance, chat_id, _wait_combo, 'record_voice')
+                
                 if audio_combo_bytes:
                     bot_instance.send_voice(chat_id, audio_combo_bytes, protect_content=_protect_auto)
                 else:
@@ -1255,14 +1283,17 @@ async def send_remarketing_job(
                     # 🔊 ÁUDIO: Baixa e envia como bytes para garantir voice note nativo
                     try:
                         audio_bytes, _fname, _audio_dur = _download_audio_bytes(media)
-                        bot.send_chat_action(chat_id, 'record_voice')
+                        
+                        # 🔥 CORREÇÃO ASYNC: Loop de chat action
                         _wait = min(max(_audio_dur, 2), 60) if _audio_dur > 0 else 3
-                        await asyncio.sleep(_wait)
+                        await _async_sleep_with_action(bot, chat_id, _wait, 'record_voice')
+                        
                         if audio_bytes:
                             voice_msg = bot.send_voice(chat_id, audio_bytes)
                         else:
                             voice_msg = bot.send_voice(chat_id, media)
                         sent_msg = voice_msg
+                        
                         # Envia texto e botões separadamente
                         if msg_text or markup:
                             await asyncio.sleep(2)
@@ -7725,10 +7756,6 @@ def test_channel_connection(data: ChannelTestRequest, current_user: User = Depen
             msg = f"Erro de conexão: {error_msg}"
             
         raise HTTPException(status_code=400, detail=msg)
-
-# =========================================================
-# 💳 WEBHOOK PIX (PUSHIN PAY) - V4.0 (CORREÇÃO VITALÍCIO + NOTIFICAÇÃO)
-# =========================================================
 # =========================================================
 # 💳 WEBHOOK PIX (PUSHIN PAY) - V5.0 COM RETRY
 # =========================================================
@@ -7788,13 +7815,16 @@ async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: in
                 # MODO COMBO: Áudio + mídia com legenda e botões
                 logger.info(f"🎙️ Modo combo {offer_type}: áudio + mídia para {chat_id}")
                 audio_combo_bytes, _, _dur = _download_audio_bytes(_audio_url_up)
-                tb.send_chat_action(chat_id, 'record_voice')
+                
+                # 🔥 CORREÇÃO ASYNC
                 _wait = min(max(_dur, 2), 60) if _dur > 0 else 3
-                await asyncio.sleep(_wait)
+                await _async_sleep_with_action(tb, chat_id, _wait, 'record_voice')
+                
                 if audio_combo_bytes:
                     tb.send_voice(chat_id, audio_combo_bytes)
                 else:
                     tb.send_voice(chat_id, _audio_url_up)
+                
                 await asyncio.sleep(_audio_delay_up)
                 
                 # Envia mídia + texto + botões
@@ -7809,18 +7839,15 @@ async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: in
                 else:
                     tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
             
-            elif config.msg_media:
-                # MODO NORMAL: Mídia única
-                media_url = config.msg_media.strip().lower()
-                if media_url.endswith(('.mp4', '.mov', '.avi')):
-                    tb.send_video(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
-                elif media_url.endswith(('.ogg', '.mp3', '.wav')):
+            elif media_url.endswith(('.ogg', '.mp3', '.wav')):
                     # 🔊 ÁUDIO ÚNICO: Baixa e envia como bytes
                     try:
                         audio_bytes, _fname, _audio_dur = _download_audio_bytes(config.msg_media)
-                        tb.send_chat_action(chat_id, 'record_voice')
+                        
+                        # 🔥 CORREÇÃO ASYNC
                         _wait = min(max(_audio_dur, 2), 60) if _audio_dur > 0 else 3
-                        await asyncio.sleep(_wait)
+                        await _async_sleep_with_action(tb, chat_id, _wait, 'record_voice')
+                        
                         if audio_bytes:
                             tb.send_voice(chat_id, audio_bytes)
                         else:
@@ -8768,13 +8795,16 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         # MODO COMBO: Áudio separado + mídia com legenda e botões
                         logger.info(f"🎙️ [CANAL FREE] Modo combo: áudio + mídia para {user_id}")
                         audio_combo_cf, _, _dur_cf = _download_audio_bytes(_audio_url_cf)
-                        bot_temp.send_chat_action(user_id, 'record_voice')
+                        
+                        # 🔥 CORREÇÃO (Sync)
                         _wt_cf = min(max(_dur_cf, 2), 60) if _dur_cf > 0 else 3
-                        time.sleep(_wt_cf)
+                        _sleep_with_action(bot_temp, user_id, _wt_cf, 'record_voice')
+                        
                         if audio_combo_cf:
                             bot_temp.send_voice(user_id, audio_combo_cf)
                         else:
                             bot_temp.send_voice(user_id, _audio_url_cf)
+                        
                         time.sleep(_audio_delay_cf)
                         
                         if config.media_url and config.media_type in ('photo', 'video'):
@@ -8798,9 +8828,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         elif config.media_type == 'audio' or media_low.endswith(('.ogg', '.mp3', '.wav')):
                             # 🔊 ÁUDIO ÚNICO: Baixa e envia como bytes
                             audio_bytes_cf, _fname_cf, _audio_dur_cf = _download_audio_bytes(config.media_url)
-                            bot_temp.send_chat_action(user_id, 'record_voice')
+                            
+                            # 🔥 CORREÇÃO (Sync)
                             _wait_cf = min(max(_audio_dur_cf, 2), 60) if _audio_dur_cf > 0 else 3
-                            time.sleep(_wait_cf)
+                            _sleep_with_action(bot_temp, user_id, _wait_cf, 'record_voice')
+                            
                             if audio_bytes_cf:
                                 bot_temp.send_voice(user_id, audio_bytes_cf)
                             else:
