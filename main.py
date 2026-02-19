@@ -5237,10 +5237,14 @@ async def health_check():
     Retorna status detalhado do sistema.
     """
     try:
-        # Verificar conexão com banco de dados
+        # Verificar conexão com banco de dados (SQLAlchemy síncrono)
         db_status = "ok"
         try:
-            await database.execute("SELECT 1")
+            db_check = SessionLocal()
+            try:
+                db_check.execute(text("SELECT 1"))
+            finally:
+                db_check.close()
         except Exception as e:
             db_status = f"error: {str(e)}"
         
@@ -5250,16 +5254,18 @@ async def health_check():
         # Verificar webhooks pendentes
         webhook_stats = {"pending": 0, "failed": 0}
         try:
-            webhook_query = """
-                SELECT 
-                    status,
-                    COUNT(*) as count
-                FROM webhook_retry
-                WHERE status IN ('pending', 'failed')
-                GROUP BY status
-            """
-            webhook_result = await database.fetch_all(webhook_query)
-            webhook_stats = {row['status']: row['count'] for row in webhook_result}
+            db_wh = SessionLocal()
+            try:
+                result = db_wh.execute(text("""
+                    SELECT status, COUNT(*) as count
+                    FROM webhook_retry
+                    WHERE status IN ('pending', 'failed')
+                    GROUP BY status
+                """))
+                for row in result:
+                    webhook_stats[row[0]] = row[1]
+            finally:
+                db_wh.close()
         except:
             pass  # Tabela pode não existir ainda
         
@@ -5272,7 +5278,7 @@ async def health_check():
             status_code = 503
         elif scheduler_status != "running":
             overall_status = "degraded"
-            status_code = 200  # Ainda considerado "up"
+            status_code = 200
         
         health_status = {
             "status": overall_status,

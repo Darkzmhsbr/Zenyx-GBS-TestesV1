@@ -27,7 +27,8 @@ if DATABASE_URL:
         pool_size=5,
         max_overflow=10,
         pool_timeout=30,
-        pool_recycle=1800
+        pool_recycle=600,       # 🔧 Recicla conexões a cada 10 min (era 30min - Railway pode dropar antes)
+        pool_pre_ping=True      # 🔧 CRÍTICO: Testa conexão antes de usar (evita "connection closed")
     )
 else:
     engine = create_engine("sqlite:///./sql_app.db")
