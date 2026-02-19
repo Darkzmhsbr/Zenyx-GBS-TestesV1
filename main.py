@@ -159,14 +159,39 @@ def is_audio_file(url):
         return False
     return url.lower().endswith(('.ogg', '.mp3', '.wav'))
 
+def _download_audio_bytes(media_url):
+    """
+    Baixa o áudio da URL e retorna (bytes, filename).
+    Necessário porque o Telegram só reconhece voice notes quando:
+    1. O arquivo é enviado como bytes (não URL)
+    2. O Content-Type está correto (audio/ogg)
+    3. Não tem caption nem reply_markup
+    
+    Quando enviamos uma URL HTTP do Backblaze/S3, o Telegram faz download
+    mas o Content-Type pode vir como application/octet-stream, fazendo
+    o áudio ser renderizado como arquivo genérico ao invés de voice note.
+    """
+    try:
+        resp = httpx.get(media_url, timeout=30, follow_redirects=True)
+        resp.raise_for_status()
+        # Extrai extensão da URL
+        ext = media_url.split('.')[-1].split('?')[0].lower()
+        if ext not in ('ogg', 'mp3', 'wav'):
+            ext = 'ogg'
+        filename = f"voice_{uuid.uuid4().hex[:8]}.{ext}"
+        return resp.content, filename
+    except Exception as e:
+        logger.error(f"❌ Erro ao baixar áudio de {media_url}: {e}")
+        return None, None
+
 def enviar_audio_inteligente(bot, chat_id, media_url, texto=None, markup=None, parse_mode="HTML", protect_content=False, delay_pos_audio=2):
     """
     Envia áudio OGG como voice note nativo do Telegram.
     
-    REGRA CRÍTICA: send_voice com caption/reply_markup faz o Telegram
-    renderizar como ARQUIVO ao invés de bolha de áudio nativa.
-    
-    Solução: Enviar áudio SOZINHO, depois texto+botões em mensagem separada.
+    REGRA CRÍTICA: Para o Telegram renderizar como bolha de áudio nativa:
+    1. Enviar como BYTES (não URL) para controlar Content-Type
+    2. SEM caption e SEM reply_markup
+    3. Texto e botões vão em mensagem SEPARADA depois
     
     Retorna: lista de message_ids enviados (para auto-destruição)
     """
@@ -179,12 +204,26 @@ def enviar_audio_inteligente(bot, chat_id, media_url, texto=None, markup=None, p
     except:
         pass
     
-    # 2. Envia APENAS o áudio (sem caption, sem markup)
+    # 2. Baixa o áudio e envia como bytes (garante voice note nativo)
     try:
-        voice_msg = bot.send_voice(chat_id, media_url, protect_content=protect_content)
-        sent_messages.append(voice_msg)
+        audio_bytes, filename = _download_audio_bytes(media_url)
+        if audio_bytes:
+            # Envia como bytes com nome .ogg - Telegram reconhece como voice note
+            voice_msg = bot.send_voice(chat_id, audio_bytes, protect_content=protect_content)
+            sent_messages.append(voice_msg)
+            logger.info(f"🎙️ Voice note enviado com sucesso para {chat_id} ({len(audio_bytes)} bytes)")
+        else:
+            # Fallback: tenta enviar direto pela URL mesmo assim
+            logger.warning(f"⚠️ Download falhou, tentando enviar URL direta...")
+            voice_msg = bot.send_voice(chat_id, media_url, protect_content=protect_content)
+            sent_messages.append(voice_msg)
     except Exception as e:
         logger.error(f"❌ Erro ao enviar voice: {e}")
+        # Último fallback: envia como audio (não voice) para não perder a mensagem
+        try:
+            bot.send_audio(chat_id, media_url, protect_content=protect_content)
+        except:
+            pass
         return sent_messages
     
     # 3. Se tem texto OU botões, envia em mensagem separada após delay
@@ -1155,11 +1194,15 @@ async def send_remarketing_job(
                 elif media and mtype == 'video':
                     sent_msg = bot.send_video(chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
                 elif media and (mtype == 'audio' or is_audio_file(media)):
-                    # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                    # 🔊 ÁUDIO: Baixa e envia como bytes para garantir voice note nativo
                     try:
                         bot.send_chat_action(chat_id, 'record_voice')
                         await asyncio.sleep(3)
-                        voice_msg = bot.send_voice(chat_id, media)
+                        audio_bytes, _fname = _download_audio_bytes(media)
+                        if audio_bytes:
+                            voice_msg = bot.send_voice(chat_id, audio_bytes)
+                        else:
+                            voice_msg = bot.send_voice(chat_id, media)
                         sent_msg = voice_msg
                         # Envia texto e botões separadamente
                         if msg_text or markup:
@@ -7648,11 +7691,15 @@ async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: in
                 if media_url.endswith(('.mp4', '.mov', '.avi')):
                     tb.send_video(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
                 elif media_url.endswith(('.ogg', '.mp3', '.wav')):
-                    # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                    # 🔊 ÁUDIO: Baixa e envia como bytes para voice note nativo
                     try:
                         tb.send_chat_action(chat_id, 'record_voice')
                         await asyncio.sleep(3)
-                        tb.send_voice(chat_id, config.msg_media)
+                        audio_bytes, _fname = _download_audio_bytes(config.msg_media)
+                        if audio_bytes:
+                            tb.send_voice(chat_id, audio_bytes)
+                        else:
+                            tb.send_voice(chat_id, config.msg_media)
                         if msg_texto or mk:
                             await asyncio.sleep(2)
                             if msg_texto:
@@ -8600,10 +8647,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 parse_mode="HTML"
                             )
                         elif config.media_type == 'audio' or media_low.endswith(('.ogg', '.mp3', '.wav')):
-                            # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                            # 🔊 ÁUDIO: Baixa e envia como bytes para voice note nativo
                             bot_temp.send_chat_action(user_id, 'record_voice')
                             time.sleep(3)
-                            bot_temp.send_voice(user_id, config.media_url)
+                            audio_bytes_cf, _fname_cf = _download_audio_bytes(config.media_url)
+                            if audio_bytes_cf:
+                                bot_temp.send_voice(user_id, audio_bytes_cf)
+                            else:
+                                bot_temp.send_voice(user_id, config.media_url)
                             if final_message or markup:
                                 time.sleep(2)
                                 bot_temp.send_message(
@@ -10784,6 +10835,13 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         # 🔒 Carrega flag de proteção para o bot
         _protect_rmkt = getattr(bot_db, 'protect_content', False) or False
 
+        # 🔊 PRÉ-DOWNLOAD: Se é áudio, baixa UMA vez antes do loop
+        _bulk_audio_bytes = None
+        if payload.media_url and payload.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
+            _bulk_audio_bytes, _ = _download_audio_bytes(payload.media_url)
+            if _bulk_audio_bytes:
+                logger.info(f"🎙️ Áudio pré-baixado para envio em massa ({len(_bulk_audio_bytes)} bytes)")
+
         for idx, uid in enumerate(lista_final_ids):
             if not uid or len(uid) < 5: continue
             try:
@@ -10796,10 +10854,13 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                         if ext.endswith(('.mp4', '.mov', '.avi')):
                             bot_sender.send_video(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
                         elif ext.endswith(('.ogg', '.mp3', '.wav')):
-                            # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                            # 🔊 ÁUDIO: Envia bytes pré-baixados como voice note nativo
                             bot_sender.send_chat_action(uid, 'record_voice')
                             time.sleep(2)
-                            bot_sender.send_voice(uid, payload.media_url, protect_content=_protect_rmkt)
+                            if _bulk_audio_bytes:
+                                bot_sender.send_voice(uid, _bulk_audio_bytes, protect_content=_protect_rmkt)
+                            else:
+                                bot_sender.send_voice(uid, payload.media_url, protect_content=_protect_rmkt)
                             if texto_envio or markup:
                                 time.sleep(1)
                                 bot_sender.send_message(uid, texto_envio or "⬇️ Escolha:", reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
@@ -11129,10 +11190,14 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
                 if ext.endswith(('.mp4', '.mov', '.avi')):
                     sender.send_video(payload.user_telegram_id, media, caption=msg, reply_markup=markup, parse_mode="HTML")
                 elif ext.endswith(('.ogg', '.mp3', '.wav')):
-                    # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                    # 🔊 ÁUDIO: Baixa e envia como bytes para voice note nativo
                     sender.send_chat_action(payload.user_telegram_id, 'record_voice')
                     time.sleep(3)
-                    sender.send_voice(payload.user_telegram_id, media)
+                    audio_bytes_ind, _fname_ind = _download_audio_bytes(media)
+                    if audio_bytes_ind:
+                        sender.send_voice(payload.user_telegram_id, audio_bytes_ind)
+                    else:
+                        sender.send_voice(payload.user_telegram_id, media)
                     if msg or markup:
                         time.sleep(2)
                         sender.send_message(payload.user_telegram_id, msg or "⬇️ Escolha:", reply_markup=markup, parse_mode="HTML")
