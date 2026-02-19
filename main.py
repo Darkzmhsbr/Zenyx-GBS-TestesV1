@@ -149,6 +149,62 @@ app = FastAPI(title="Zenyx Gbot SaaS")
 # 🔥 CONFIGURAÇÃO DE FUSO HORÁRIO - BRASÍLIA/SÃO PAULO
 BRAZIL_TZ = timezone('America/Sao_Paulo')
 
+
+# ============================================================
+# 🔊 HELPER: ENVIO INTELIGENTE DE ÁUDIO OGG
+# ============================================================
+def is_audio_file(url):
+    """Verifica se a URL é um arquivo de áudio"""
+    if not url:
+        return False
+    return url.lower().endswith(('.ogg', '.mp3', '.wav'))
+
+def enviar_audio_inteligente(bot, chat_id, media_url, texto=None, markup=None, parse_mode="HTML", protect_content=False, delay_pos_audio=2):
+    """
+    Envia áudio OGG como voice note nativo do Telegram.
+    
+    REGRA CRÍTICA: send_voice com caption/reply_markup faz o Telegram
+    renderizar como ARQUIVO ao invés de bolha de áudio nativa.
+    
+    Solução: Enviar áudio SOZINHO, depois texto+botões em mensagem separada.
+    
+    Retorna: lista de message_ids enviados (para auto-destruição)
+    """
+    sent_messages = []
+    
+    # 1. Simula gravação
+    try:
+        bot.send_chat_action(chat_id, 'record_voice')
+        time.sleep(3)  # Simula tempo de gravação
+    except:
+        pass
+    
+    # 2. Envia APENAS o áudio (sem caption, sem markup)
+    try:
+        voice_msg = bot.send_voice(chat_id, media_url, protect_content=protect_content)
+        sent_messages.append(voice_msg)
+    except Exception as e:
+        logger.error(f"❌ Erro ao enviar voice: {e}")
+        return sent_messages
+    
+    # 3. Se tem texto OU botões, envia em mensagem separada após delay
+    if texto or markup:
+        time.sleep(delay_pos_audio)
+        try:
+            if texto and markup:
+                text_msg = bot.send_message(chat_id, texto, reply_markup=markup, parse_mode=parse_mode, protect_content=protect_content)
+            elif texto:
+                text_msg = bot.send_message(chat_id, texto, parse_mode=parse_mode, protect_content=protect_content)
+            elif markup:
+                # Só botões sem texto - usa texto genérico
+                text_msg = bot.send_message(chat_id, "⬇️ Escolha uma opção:", reply_markup=markup, protect_content=protect_content)
+            sent_messages.append(text_msg)
+        except Exception as e:
+            logger.error(f"❌ Erro ao enviar texto pós-áudio: {e}")
+    
+    return sent_messages
+
+
 def now_brazil():
     """Retorna datetime atual no horário de Brasília/São Paulo"""
     return datetime.now(BRAZIL_TZ)
@@ -353,9 +409,16 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
                 elif config.media_type == 'video':
                     msg = bot_instance.send_video(chat_id, config.media_url, caption=mensagem, parse_mode='HTML', protect_content=_protect_auto)
                 elif config.media_type == 'audio' or config.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
-                    bot_instance.send_chat_action(chat_id, 'record_voice')
-                    time.sleep(3) # Simula o tempo de gravação
-                    msg = bot_instance.send_voice(chat_id, config.media_url, caption=mensagem, parse_mode='HTML', protect_content=_protect_auto)
+                    # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                    audio_msgs = enviar_audio_inteligente(
+                        bot_instance, chat_id, config.media_url,
+                        texto=mensagem if mensagem and mensagem.strip() else None,
+                        protect_content=_protect_auto,
+                        delay_pos_audio=2
+                    )
+                    msg = audio_msgs[-1] if audio_msgs else None
+                    if not msg and audio_msgs:
+                        msg = audio_msgs[0]
                 else:
                     msg = bot_instance.send_message(chat_id, mensagem, parse_mode='HTML', protect_content=_protect_auto)
             else:
@@ -1091,10 +1154,25 @@ async def send_remarketing_job(
                     sent_msg = bot.send_photo(chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
                 elif media and mtype == 'video':
                     sent_msg = bot.send_video(chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
-                elif media and (mtype == 'audio' or media.lower().endswith(('.ogg', '.mp3', '.wav'))):
-                    bot.send_chat_action(chat_id, 'record_voice')
-                    await asyncio.sleep(3) # Pausa assíncrona
-                    sent_msg = bot.send_voice(chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
+                elif media and (mtype == 'audio' or is_audio_file(media)):
+                    # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                    try:
+                        bot.send_chat_action(chat_id, 'record_voice')
+                        await asyncio.sleep(3)
+                        voice_msg = bot.send_voice(chat_id, media)
+                        sent_msg = voice_msg
+                        # Envia texto e botões separadamente
+                        if msg_text or markup:
+                            await asyncio.sleep(2)
+                            if msg_text and markup:
+                                sent_msg = bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
+                            elif msg_text:
+                                sent_msg = bot.send_message(chat_id, msg_text, parse_mode='HTML')
+                            elif markup:
+                                sent_msg = bot.send_message(chat_id, "⬇️ Escolha uma opção:", reply_markup=markup)
+                    except Exception as e_audio:
+                        logger.error(f"❌ Erro envio áudio remarketing: {e_audio}")
+                        sent_msg = bot.send_message(chat_id, msg_text or "...", reply_markup=markup, parse_mode='HTML')
                 else:
                     sent_msg = bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
                 
@@ -7570,9 +7648,20 @@ async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: in
                 if media_url.endswith(('.mp4', '.mov', '.avi')):
                     tb.send_video(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
                 elif media_url.endswith(('.ogg', '.mp3', '.wav')):
-                    tb.send_chat_action(chat_id, 'record_voice')
-                    await asyncio.sleep(3)
-                    tb.send_voice(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
+                    # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                    try:
+                        tb.send_chat_action(chat_id, 'record_voice')
+                        await asyncio.sleep(3)
+                        tb.send_voice(chat_id, config.msg_media)
+                        if msg_texto or mk:
+                            await asyncio.sleep(2)
+                            if msg_texto:
+                                tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
+                            else:
+                                tb.send_message(chat_id, "⬇️ Escolha:", reply_markup=mk)
+                    except Exception as e_audio_up:
+                        logger.error(f"❌ Erro áudio upsell/downsell: {e_audio_up}")
+                        tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
                 else:
                     tb.send_photo(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
             else:
@@ -8297,10 +8386,14 @@ def enviar_oferta_final(bot_temp, chat_id, fluxo, bot_id, db):
             media_low = media.lower()
             if media_low.endswith(('.mp4', '.mov', '.avi')): 
                 bot_temp.send_video(chat_id, media, caption=texto, reply_markup=mk, parse_mode="HTML")
-            elif media_low.endswith(('.ogg', '.mp3', '.wav')):
-                bot_temp.send_chat_action(chat_id, 'record_voice')
-                time.sleep(3)
-                bot_temp.send_voice(chat_id, media, caption=texto, reply_markup=mk, parse_mode="HTML")
+            elif is_audio_file(media):
+                # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                audio_msgs = enviar_audio_inteligente(
+                    bot_temp, chat_id, media,
+                    texto=texto if texto and texto.strip() else None,
+                    markup=mk,
+                    delay_pos_audio=2
+                )
             else: 
                 bot_temp.send_photo(chat_id, media, caption=texto, reply_markup=mk, parse_mode="HTML")
         else:
@@ -8344,13 +8437,15 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
                         chat_id, passo_atual.msg_media, caption=passo_atual.msg_texto, 
                         reply_markup=markup_step if passo_atual.mostrar_botao else None, parse_mode="HTML"
                     )
-                elif media_low.endswith(('.ogg', '.mp3', '.wav')):
-                    bot_temp.send_chat_action(chat_id, 'record_voice')
-                    time.sleep(3)
-                    sent_msg = bot_temp.send_voice(
-                        chat_id, passo_atual.msg_media, caption=passo_atual.msg_texto, 
-                        reply_markup=markup_step if passo_atual.mostrar_botao else None, parse_mode="HTML"
+                elif is_audio_file(passo_atual.msg_media):
+                    # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                    audio_msgs = enviar_audio_inteligente(
+                        bot_temp, chat_id, passo_atual.msg_media,
+                        texto=passo_atual.msg_texto if passo_atual.msg_texto and passo_atual.msg_texto.strip() else None,
+                        markup=markup_step if passo_atual.mostrar_botao else None,
+                        delay_pos_audio=2
                     )
+                    sent_msg = audio_msgs[-1] if audio_msgs else None
                 else:
                     sent_msg = bot_temp.send_photo(
                         chat_id, passo_atual.msg_media, caption=passo_atual.msg_texto, 
@@ -8424,6 +8519,12 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         # ========================================
         # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
         # ========================================
+        # ========================================
+        # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
+        # ========================================
+        # ========================================
+        # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
+        # ========================================
         if update.chat_join_request:
             try:
                 join_request = update.chat_join_request
@@ -8487,11 +8588,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                     url=btn['url']
                                 ))
                     
-                    # 🔥 LÓGICA DE MÍDIA ATUALIZADA (SUPORTE A ÁUDIO CORRIGIDO)
+                    # 🔥 LÓGICA DE MÍDIA ATUALIZADA (SUPORTE A ÁUDIO)
                     if config.media_url:
                         media_low = config.media_url.lower()
-                        
-                        # 1. VÍDEO
                         if config.media_type == 'video' or media_low.endswith(('.mp4', '.mov', '.avi')):
                             bot_temp.send_video(
                                 user_id,
@@ -8500,30 +8599,20 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 reply_markup=markup,
                                 parse_mode="HTML"
                             )
-                        
-                        # 2. ÁUDIO (CORREÇÃO OGG)
-                        elif config.media_type == 'audio' or media_low.endswith(('.ogg', '.mp3', '.wav', '.opus')):
-                            # 🎤 Envia APENAS o áudio (Nota de Voz Pura)
+                        elif config.media_type == 'audio' or media_low.endswith(('.ogg', '.mp3', '.wav')):
+                            # 🔊 ÁUDIO: Envia sozinho sem caption/markup
                             bot_temp.send_chat_action(user_id, 'record_voice')
-                            time.sleep(2) # Pequeno delay para simular gravação
-                            bot_temp.send_voice(
-                                user_id,
-                                config.media_url
-                            )
-                            
-                            # 📝 Envia Texto + Botões em mensagem separada logo em seguida
-                            time.sleep(1)
-                            if final_message or (markup and len(markup.keyboard) > 0):
-                                msg_text_audio = final_message if final_message else "..."
+                            time.sleep(3)
+                            bot_temp.send_voice(user_id, config.media_url)
+                            if final_message or markup:
+                                time.sleep(2)
                                 bot_temp.send_message(
                                     user_id,
-                                    msg_text_audio,
+                                    final_message or "⬇️ Escolha:",
                                     reply_markup=markup,
                                     parse_mode="HTML"
                                 )
-                                
-                        # 3. FOTO (Padrão)
-                        else: 
+                        else:  # photo ou padrão
                             bot_temp.send_photo(
                                 user_id,
                                 config.media_url,
@@ -8813,30 +8902,26 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 callback_data="step_1"
                             ))
 
-                # 🔥 BLOCO DE ENVIO COM LOG E ÁUDIO (CORRIGIDO)
+                # 🔥 BLOCO DE ENVIO COM LOG
+                # 🔥 BLOCO DE ENVIO COM LOG E ÁUDIO
                 try:
                     logger.info(f"📤 Tentando enviar menu para {chat_id}...")
                     sent_msg_start = None
                     
                     if media:
                         media_low = media.lower()
-                        
-                        # 1. VÍDEO
                         if media_low.endswith(('.mp4', '.mov', '.avi')): 
                             sent_msg_start = bot_temp.send_video(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
-                        
-                        # 2. ÁUDIO OGG (CORREÇÃO APLICADA)
-                        elif media_low.endswith(('.ogg', '.mp3', '.wav', '.opus')):
-                            bot_temp.send_chat_action(chat_id, 'record_voice')
-                            time.sleep(2) 
-                            # Envia áudio PURO
-                            bot_temp.send_voice(chat_id, media, protect_content=_protect)
-                            
-                            # Envia Texto + Botões separado
-                            time.sleep(1)
-                            sent_msg_start = bot_temp.send_message(chat_id, msg_txt or "...", reply_markup=mk, parse_mode="HTML", protect_content=_protect)
-                        
-                        # 3. FOTO
+                        elif media_low.endswith(('.ogg', '.mp3', '.wav')):
+                            # 🔊 ÁUDIO: Envia sozinho sem caption/markup (senão vira arquivo)
+                            audio_msgs = enviar_audio_inteligente(
+                                bot_temp, chat_id, media,
+                                texto=msg_txt if msg_txt.strip() else None,
+                                markup=mk,
+                                protect_content=_protect,
+                                delay_pos_audio=2
+                            )
+                            sent_msg_start = audio_msgs[-1] if audio_msgs else None
                         else: 
                             sent_msg_start = bot_temp.send_photo(chat_id, media, caption=msg_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                     else: 
@@ -8844,9 +8929,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     logger.info("✅ Menu enviado com sucesso!")
 
-                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA (Lógica mantida conforme seu pedido)
+                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão (via callback linha 6240-6242)
+                    # Motivo: Timer automático deletava mensagem ANTES do usuário clicar, parando o fluxo
+                    # A destruição agora acontece corretamente quando o usuário clica no botão
                     # if sent_msg_start and flow and flow.autodestruir_1:
-                    #      agendar_destruicao_msg(bot_temp, chat_id, sent_msg_start.message_id, 5)
+                    #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg_start.message_id, 5)
 
                 except ApiTelegramException as e_envio:
                     err_str = str(e_envio).lower()
@@ -8993,41 +9080,33 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     sent_msg = None
                     try:
                         if target_step.msg_media:
-                            media_lower = target_step.msg_media.lower()
-                            
-                            # 1. VÍDEO
-                            if media_lower.endswith(('.mp4', '.mov', '.avi')):
+                            media_step_low = target_step.msg_media.lower()
+                            if media_step_low.endswith(('.mp4', '.mov', '.avi')):
                                 sent_msg = bot_temp.send_video(chat_id, target_step.msg_media, caption=target_step.msg_texto, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
-                            
-                            # 2. ÁUDIO OGG (AQUI ESTAVA O PROBLEMA DO "....")
-                            # Agora tratamos especificamente o áudio
-                            elif media_lower.endswith(('.ogg', '.mp3', '.wav', '.opus')):
-                                bot_temp.send_chat_action(chat_id, 'record_voice')
-                                time.sleep(1)
-                                # Manda áudio limpo
-                                bot_temp.send_voice(chat_id, target_step.msg_media, protect_content=_protect)
-                                
-                                # Manda texto/botão separado
-                                time.sleep(1)
-                                if target_step.msg_texto or target_step.mostrar_botao:
-                                    sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk, parse_mode="HTML", protect_content=_protect)
-                            
-                            # 3. FOTO (Resto)
+                            elif is_audio_file(target_step.msg_media):
+                                # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                                audio_msgs = enviar_audio_inteligente(
+                                    bot_temp, chat_id, target_step.msg_media,
+                                    texto=target_step.msg_texto if target_step.msg_texto and target_step.msg_texto.strip() else None,
+                                    markup=mk if target_step.mostrar_botao else None,
+                                    protect_content=_protect,
+                                    delay_pos_audio=2
+                                )
+                                sent_msg = audio_msgs[-1] if audio_msgs else None
                             else:
                                 sent_msg = bot_temp.send_photo(chat_id, target_step.msg_media, caption=target_step.msg_texto, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                         else:
                             sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
-                    except Exception as e_step:
+                    except:
                         # Fallback caso falhe HTML ou Mídia
-                        logger.error(f"Erro no passo step: {e_step}")
                         sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk, protect_content=_protect)
 
                     # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão (via callback linha 6256-6260)
                     # Motivo: Timer automático deletava mensagem ANTES do usuário clicar, parando o fluxo
                     # A destruição agora acontece corretamente quando o usuário clica no botão do passo anterior
                     # if sent_msg and target_step.autodestruir:
-                    #      tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 20
-                    #      agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
+                    #     tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 20
+                    #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
 
                     # Lógica de Navegação Automática (Recursividade para passos SEM botão)
                     if not target_step.mostrar_botao:
@@ -10717,9 +10796,13 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                         if ext.endswith(('.mp4', '.mov', '.avi')):
                             bot_sender.send_video(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
                         elif ext.endswith(('.ogg', '.mp3', '.wav')):
+                            # 🔊 ÁUDIO: Envia sozinho sem caption/markup
                             bot_sender.send_chat_action(uid, 'record_voice')
-                            time.sleep(2) # Apenas 2s aqui para não atrasar o envio em massa
-                            bot_sender.send_voice(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
+                            time.sleep(2)
+                            bot_sender.send_voice(uid, payload.media_url, protect_content=_protect_rmkt)
+                            if texto_envio or markup:
+                                time.sleep(1)
+                                bot_sender.send_message(uid, texto_envio or "⬇️ Escolha:", reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
                         else:
                             bot_sender.send_photo(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
                         midia_ok = True
@@ -11046,9 +11129,13 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
                 if ext.endswith(('.mp4', '.mov', '.avi')):
                     sender.send_video(payload.user_telegram_id, media, caption=msg, reply_markup=markup, parse_mode="HTML")
                 elif ext.endswith(('.ogg', '.mp3', '.wav')):
+                    # 🔊 ÁUDIO: Envia sozinho sem caption/markup
                     sender.send_chat_action(payload.user_telegram_id, 'record_voice')
                     time.sleep(3)
-                    sender.send_voice(payload.user_telegram_id, media, caption=msg, reply_markup=markup, parse_mode="HTML")
+                    sender.send_voice(payload.user_telegram_id, media)
+                    if msg or markup:
+                        time.sleep(2)
+                        sender.send_message(payload.user_telegram_id, msg or "⬇️ Escolha:", reply_markup=markup, parse_mode="HTML")
                 else:
                     sender.send_photo(payload.user_telegram_id, media, caption=msg, reply_markup=markup, parse_mode="HTML")
             except:
@@ -12414,12 +12501,22 @@ def enviar_passo_automatico(bot_temp, chat_id, passo, bot_db, db):
         # Tenta enviar Mídia
         if passo.msg_media:
             try:
-                if passo.msg_media.lower().endswith(('.mp4', '.mov')):
+                media_low_pa = passo.msg_media.lower()
+                if media_low_pa.endswith(('.mp4', '.mov', '.avi')):
                     sent_msg = bot_temp.send_video(
                         chat_id, passo.msg_media, caption=passo.msg_texto, 
                         reply_markup=markup_step if passo.mostrar_botao else None,
                         parse_mode="HTML"
                     )
+                elif is_audio_file(passo.msg_media):
+                    # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                    audio_msgs = enviar_audio_inteligente(
+                        bot_temp, chat_id, passo.msg_media,
+                        texto=passo.msg_texto if passo.msg_texto and passo.msg_texto.strip() else None,
+                        markup=markup_step if passo.mostrar_botao else None,
+                        delay_pos_audio=2
+                    )
+                    sent_msg = audio_msgs[-1] if audio_msgs else None
                 else:
                     sent_msg = bot_temp.send_photo(
                         chat_id, passo.msg_media, caption=passo.msg_texto, 
