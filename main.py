@@ -501,7 +501,7 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
                 # Passo 1: Envia áudio sozinho (voice note nativo)
                 audio_combo_bytes, _, _dur_combo = _download_audio_bytes(_audio_url_cfg)
                 
-                # 🔥 CORREÇÃO: Usa _sleep_with_action para manter o status
+                # 🔥 CORREÇÃO: Usa _sleep_with_action para manter o status pelo tempo REAL
                 _wait_combo = min(max(_dur_combo, 2), 60) if _dur_combo > 0 else 3
                 _sleep_with_action(bot_instance, chat_id, _wait_combo, 'record_voice')
                 
@@ -534,7 +534,7 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
                 elif config.media_type == 'video':
                     msg = bot_instance.send_video(chat_id, config.media_url, caption=mensagem, parse_mode='HTML', protect_content=_protect_auto)
                 elif config.media_type == 'audio' or config.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
-                    # 🔊 ÁUDIO ÚNICO: Envia sozinho sem caption/markup
+                    # 🔊 ÁUDIO ÚNICO: Envia com duração inteligente
                     audio_msgs = enviar_audio_inteligente(
                         bot_instance, chat_id, config.media_url,
                         texto=mensagem if mensagem and mensagem.strip() else None,
@@ -612,44 +612,31 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
             db.close()
         
         # ✅ NOVA LÓGICA: Auto-destruição OPCIONAL e APÓS CLIQUE
-        # Correção Mestre: Verifica se está HABILITADO no painel E se o tempo é maior que 0
         if config.auto_destruct_enabled and config.auto_destruct_seconds > 0 and message_id:
             
             if config.auto_destruct_after_click:
-                # --- CENÁRIO 1: Destruir SÓ DEPOIS do clique (Salva para mais tarde) ---
-                
-                # Cria o dicionário temporário na função se ainda não existir
                 if not hasattr(enviar_remarketing_automatico, 'pending_destructions'):
                     enviar_remarketing_automatico.pending_destructions = {}
                 
-                # Armazena os dados necessários. A deleção real será feita no callback_query_handler (botão)
                 enviar_remarketing_automatico.pending_destructions[chat_id] = {
                     'message_id': message_id,
-                    'buttons_message_id': buttons_message_id, # Salva ID dos botões se forem separados
+                    'buttons_message_id': buttons_message_id,
                     'bot_instance': bot_instance,
                     'destruct_seconds': config.auto_destruct_seconds
                 }
-                logger.info(f"💣 Auto-destruição agendada APÓS CLIQUE para {chat_id} (Aguardando interação)")
+                logger.info(f"💣 Auto-destruição agendada APÓS CLIQUE para {chat_id}")
             
             else:
-                # --- CENÁRIO 2: Destruir IMEDIATAMENTE (Contagem Regressiva) ---
-                # O usuário não precisa fazer nada, a mensagem some sozinha.
-                
                 def auto_delete():
-                    # Aguarda o tempo configurado (ex: 60 segundos)
                     time.sleep(config.auto_destruct_seconds)
                     try:
-                        # Tenta apagar a mensagem principal
                         bot_instance.delete_message(chat_id, message_id)
-                        # Se tiver mensagem de botões separada, apaga também
                         if buttons_message_id:
                             bot_instance.delete_message(chat_id, buttons_message_id)
-                        logger.info(f"🗑️ Mensagem de remarketing auto-destruída (Timer esgotado) para {chat_id}")
+                        logger.info(f"🗑️ Mensagem de remarketing auto-destruída para {chat_id}")
                     except Exception as e:
-                        # Erros comuns: mensagem já apagada ou bot sem admin. Não quebra o sistema.
-                        logger.warning(f"⚠️ Tentativa de auto-destruição falhou (pode já não existir): {e}")
+                        pass
                 
-                # Inicia a contagem via pool (evita criar threads infinitas)
                 try:
                     thread_pool.submit(auto_delete)
                 except RuntimeError:
@@ -1176,10 +1163,6 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
         with remarketing_lock:
             if chat_id in alternating_tasks:
                 del alternating_tasks[chat_id]
-
-# ============================================================
-# 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
-# ============================================================
 
 # ============================================================
 # 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
@@ -7839,30 +7822,31 @@ async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: in
                 else:
                     tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
             
-            elif media_url.endswith(('.ogg', '.mp3', '.wav')):
-                    # 🔊 ÁUDIO ÚNICO: Baixa e envia como bytes
-                    try:
-                        audio_bytes, _fname, _audio_dur = _download_audio_bytes(config.msg_media)
-                        
-                        # 🔥 CORREÇÃO ASYNC
-                        _wait = min(max(_audio_dur, 2), 60) if _audio_dur > 0 else 3
-                        await _async_sleep_with_action(tb, chat_id, _wait, 'record_voice')
-                        
-                        if audio_bytes:
-                            tb.send_voice(chat_id, audio_bytes)
+            elif config.msg_media and config.msg_media.lower().endswith(('.ogg', '.mp3', '.wav')):
+                # 🔊 ÁUDIO ÚNICO: Baixa e envia como bytes
+                try:
+                    audio_bytes, _fname, _audio_dur = _download_audio_bytes(config.msg_media)
+                    
+                    # 🔥 CORREÇÃO ASYNC
+                    _wait = min(max(_audio_dur, 2), 60) if _audio_dur > 0 else 3
+                    await _async_sleep_with_action(tb, chat_id, _wait, 'record_voice')
+                    
+                    if audio_bytes:
+                        tb.send_voice(chat_id, audio_bytes)
+                    else:
+                        tb.send_voice(chat_id, config.msg_media)
+                    
+                    if msg_texto or mk:
+                        await asyncio.sleep(2)
+                        if msg_texto:
+                            tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
                         else:
-                            tb.send_voice(chat_id, config.msg_media)
-                        if msg_texto or mk:
-                            await asyncio.sleep(2)
-                            if msg_texto:
-                                tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
-                            else:
-                                tb.send_message(chat_id, "⬇️ Escolha:", reply_markup=mk)
-                    except Exception as e_audio_up:
-                        logger.error(f"❌ Erro áudio upsell/downsell: {e_audio_up}")
-                        tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
-                else:
-                    tb.send_photo(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
+                            tb.send_message(chat_id, "⬇️ Escolha:", reply_markup=mk)
+                except Exception as e_audio_up:
+                    logger.error(f"❌ Erro áudio upsell/downsell: {e_audio_up}")
+                    tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
+            elif config.msg_media:
+                tb.send_photo(chat_id, config.msg_media, caption=msg_texto, reply_markup=mk, parse_mode="HTML")
             else:
                 tb.send_message(chat_id, msg_texto, reply_markup=mk, parse_mode="HTML")
             
@@ -11019,6 +11003,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
 
         # 🔊 PRÉ-DOWNLOAD: Se é áudio, baixa UMA vez antes do loop
         _bulk_audio_bytes = None
+        _bulk_audio_dur = 0
         if payload.media_url and payload.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
             _bulk_audio_bytes, _, _bulk_audio_dur = _download_audio_bytes(payload.media_url)
             if _bulk_audio_bytes:
@@ -11037,13 +11022,16 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                             bot_sender.send_video(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
                         elif ext.endswith(('.ogg', '.mp3', '.wav')):
                             # 🔊 ÁUDIO: Envia bytes pré-baixados como voice note nativo
-                            bot_sender.send_chat_action(uid, 'record_voice')
+                            
+                            # 🔥 USA O HELPER SINCRONO AQUI
                             _wait_bulk = min(max(_bulk_audio_dur, 2), 60) if _bulk_audio_dur and _bulk_audio_dur > 0 else 3
-                            time.sleep(_wait_bulk)
+                            _sleep_with_action(bot_sender, uid, _wait_bulk, 'record_voice')
+                            
                             if _bulk_audio_bytes:
                                 bot_sender.send_voice(uid, _bulk_audio_bytes, protect_content=_protect_rmkt)
                             else:
                                 bot_sender.send_voice(uid, payload.media_url, protect_content=_protect_rmkt)
+                            
                             if texto_envio or markup:
                                 time.sleep(1)
                                 bot_sender.send_message(uid, texto_envio or "⬇️ Escolha:", reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
