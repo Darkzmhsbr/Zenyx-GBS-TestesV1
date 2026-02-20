@@ -5163,7 +5163,7 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         app_id = "a80e6196-67d7-4cd7-ab38-045790d8419c"
         
         # 🚨 ATENÇÃO: Se você deletou e gerou outra chave depois dessa, cole a mais recente aqui!
-        rest_api_key = "os_v2_app_vahgdfth25gnpkzyarlzbwcbttwejkity2tef34mjjgsli2gvu5se6m6sch6gklld5kgdvwlpo5ja76nzaf4cx3yzcrzdwlzvfa6mwq"
+        rest_api_key = "os_v2_app_vahgdfth25gnpkzyarlzbwcbtrv47woc5wleddmclmgdf6ooumgshnsqywxprdxhuzy6azeksw7t74lfsloz3sqlooculframljqnii"
         
         # 3. URL Universal e Header Blindado (Basic)
         url = "https://onesignal.com/api/v1/notifications"
