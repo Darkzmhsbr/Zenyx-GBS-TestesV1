@@ -1541,15 +1541,17 @@ scheduler = AsyncIOScheduler(timezone='America/Sao_Paulo')
 scheduler.add_job(
     verificar_vencimentos,
     'interval',
-    hours=12,
-    id='verificar_vencimentos'
+    minutes=5,  # 🔥 CORREÇÃO: De hours=12 para minutes=5. Checa vencimentos o tempo todo!
+    id='verificar_vencimentos',
+    replace_existing=True
 )
 
 scheduler.add_job(
     processar_webhooks_pendentes,
     'interval',
     minutes=1,
-    id='webhook_retry_processor'
+    id='webhook_retry_processor',
+    replace_existing=True
 )
 
 scheduler.add_job(
@@ -1560,7 +1562,7 @@ scheduler.add_job(
     replace_existing=True
 )
 
-logger.info("✅ [SCHEDULER] Job de vencimentos agendado (12h)")
+logger.info("✅ [SCHEDULER] Job de vencimentos agendado (5 min)")
 logger.info("✅ [SCHEDULER] Job de retry de webhooks agendado (1 min)")
 logger.info("✅ [SCHEDULER] Job de cleanup de remarketing agendado (1h)")
 
@@ -12169,7 +12171,7 @@ def dashboard_stats(
         if is_super_with_split and not bot_id:
             # SUPER ADMIN (Visão Geral): Calcula pelos splits de TODAS as vendas da plataforma
             vendas_periodo = db.query(Pedido).filter(
-                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
                 Pedido.data_aprovacao >= start,
                 Pedido.data_aprovacao <= end
             ).all()
@@ -12184,7 +12186,7 @@ def dashboard_stats(
         else:
             # USUÁRIO NORMAL (ou Admin vendo bot específico): Soma valor total dos pedidos
             query = db.query(Pedido).filter(
-                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
                 Pedido.data_aprovacao >= start,
                 Pedido.data_aprovacao <= end
             )
@@ -12206,7 +12208,7 @@ def dashboard_stats(
         
         # Usuários ativos (assinaturas não expiradas)
         query_active = db.query(Pedido).filter(
-            Pedido.status.in_(['approved', 'paid', 'active']),
+            Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
             Pedido.data_expiracao > now_brazil()
         )
         if not is_super_with_split or bot_id:
@@ -12216,7 +12218,7 @@ def dashboard_stats(
         # Vendas de hoje
         hoje_start = now_brazil().replace(hour=0, minute=0, second=0)
         query_hoje = db.query(Pedido).filter(
-            Pedido.status.in_(['approved', 'paid', 'active']),
+            Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
             Pedido.data_aprovacao >= hoje_start
         )
         if not is_super_with_split or bot_id:
@@ -12283,7 +12285,7 @@ def dashboard_stats(
             day_end = current_date.replace(hour=23, minute=59, second=59)
             
             query_dia = db.query(Pedido).filter(
-                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
                 Pedido.data_aprovacao >= day_start,
                 Pedido.data_aprovacao <= day_end
             )
@@ -12381,10 +12383,10 @@ def advanced_statistics(
                 return query.filter(Pedido.bot_id.in_(bots_ids))
             return query
 
-        # Vendas aprovadas no período
+        # Vendas aprovadas no período (🔥 CORRIGIDO: Inclui 'expired' para não sumir o faturamento)
         q_vendas = apply_bot_filter(
             db.query(Pedido).filter(
-                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
                 Pedido.data_aprovacao >= start,
                 Pedido.data_aprovacao <= end
             )
@@ -12401,10 +12403,10 @@ def advanced_statistics(
         )
         pendentes = q_pendentes.all()
 
-        # Todas as vendas aprovadas (para LTV)
+        # Todas as vendas aprovadas (para LTV) (🔥 CORRIGIDO: Inclui 'expired')
         q_all_vendas = apply_bot_filter(
             db.query(Pedido).filter(
-                Pedido.status.in_(['approved', 'paid', 'active'])
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
             )
         )
         todas_vendas = q_all_vendas.all()
@@ -12421,7 +12423,7 @@ def advanced_statistics(
         # Usuários ativos (assinatura não expirada)
         q_ativos = apply_bot_filter(
             db.query(Pedido).filter(
-                Pedido.status.in_(['approved', 'paid', 'active']),
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
                 Pedido.data_expiracao > agora
             )
         )
@@ -12854,10 +12856,9 @@ def get_profile_stats(
             # ============================================
             # 💰 CÁLCULO ESPECIAL PARA SUPER ADMIN (SPLIT)
             # ============================================
-            
-            # 1. Conta TODAS as vendas aprovadas da PLATAFORMA INTEIRA
+            # 1. Conta TODAS as vendas aprovadas da PLATAFORMA INTEIRA (🔥 CORRIGIDO)
             total_vendas_sistema = db.query(Pedido).filter(
-                Pedido.status.in_(['approved', 'paid', 'active'])
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
             ).count()
             
             # 2. Calcula faturamento: vendas × taxa (em centavos)
@@ -12874,12 +12875,11 @@ def get_profile_stats(
             
             # Total de membros da plataforma (AGORA VAI FUNCIONAR POIS IMPORTAMOS 'User')
             total_members = db.query(User).count()
-            
+
         else:
             # ============================================
             # 👤 CÁLCULO NORMAL PARA USUÁRIO COMUM
             # ============================================
-            
             # Busca todos os bots do usuário
             user_bots = db.query(BotModel.id).filter(BotModel.owner_id == user_id).all()
             bots_ids = [bot.id for bot in user_bots]
@@ -12892,13 +12892,13 @@ def get_profile_stats(
                     "total_revenue": 0,
                     "total_sales": 0
                 }
-            
-            # Soma pedidos aprovados dos bots do usuário
+
+            # Soma pedidos aprovados dos bots do usuário (🔥 CORRIGIDO: Inclui 'expired')
             pedidos_aprovados = db.query(Pedido).filter(
                 Pedido.bot_id.in_(bots_ids),
-                Pedido.status.in_(['approved', 'paid', 'active'])
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
             ).all()
-            
+
             # Calcula revenue em centavos
             total_revenue = sum(int(p.valor * 100) if p.valor else 0 for p in pedidos_aprovados)
             total_sales = len(pedidos_aprovados)
@@ -13400,7 +13400,7 @@ def get_superadmin_stats(
         
         # Receita total do sistema
         todas_vendas = db.query(Pedido).filter(
-            Pedido.status.in_(['approved', 'paid', 'active'])
+            Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
         ).all()
         
         total_revenue = sum(int(p.valor * 100) for p in todas_vendas)
@@ -14070,12 +14070,12 @@ def list_all_bots_system(
         for bot in bots:
             receita = db.query(func.sum(Pedido.valor)).filter(
                 Pedido.bot_id == bot.id,
-                Pedido.status.in_(['approved', 'paid', 'active'])
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
             ).scalar() or 0.0
             
             vendas = db.query(Pedido).filter(
                 Pedido.bot_id == bot.id,
-                Pedido.status.in_(['approved', 'paid', 'active'])
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
             ).count()
             
             leads = db.query(Lead).filter(Lead.bot_id == bot.id).count()
