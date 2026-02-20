@@ -5143,6 +5143,57 @@ def create_notification(db: Session, user_id: int, title: str, message: str, typ
         logger.error(f"Erro ao criar notificação: {e}")
 
 # =========================================================
+# 🔔 SISTEMA DE NOTIFICAÇÕES PUSH (ONESIGNAL)
+# =========================================================
+async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valor: float, db: Session):
+    """
+    Dispara notificação Push para o celular/PC do dono do bot (usuário da plataforma)
+    quando uma venda é aprovada.
+    """
+    try:
+        # 1. Busca o dono do bot para saber para quem enviar
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot or not bot.owner_id: 
+            return
+            
+        owner = db.query(User).filter(User.id == bot.owner_id).first()
+        if not owner or not owner.username: 
+            return
+            
+        # 2. Suas Credenciais do OneSignal
+        app_id = "a80e6196-67d7-4cd7-ab38-045790d8419c"
+        rest_api_key = "wnide5krqeljflvzxtp6nxeph"
+        
+        url = "https://onesignal.com/api/v1/notifications"
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Basic {rest_api_key}"
+        }
+        
+        # 3. Formata a mensagem bonita
+        primeiro_nome = nome_cliente.split(" ")[0] if nome_cliente else "Cliente"
+        valor_formatado = f"{valor:.2f}".replace('.', ',')
+        
+        titulo = "💰 NOVA VENDA APROVADA!"
+        mensagem = f"O usuário {primeiro_nome} acabou de assinar o {plano} por R$ {valor_formatado}!"
+        
+        # 4. Configura o envio apontando para o "username" que configuramos no Frontend
+        payload = {
+            "app_id": app_id,
+            "include_external_user_ids": [str(owner.username)],
+            "headings": {"en": titulo, "pt": titulo},
+            "contents": {"en": mensagem, "pt": mensagem}
+        }
+        
+        # 5. Dispara a requisição em background (não trava o webhook do Pix)
+        if http_client:
+            asyncio.create_task(http_client.post(url, json=payload, headers=headers, timeout=5.0))
+            logger.info(f"🔔 [PUSH ONESIGNAL] Gatilho disparado para o usuário: {owner.username}")
+        
+    except Exception as e:
+        logger.error(f"❌ [PUSH ONESIGNAL] Erro ao disparar notificação: {e}")
+
+# =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
 # =========================================================
 @app.post("/api/auth/register", response_model=Token)
@@ -8100,10 +8151,27 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             
             # 📋 AUDITORIA: Venda aprovada
             try:
-                log_action(db=db, user_id=None, username="webhook", action="sale_approved", resource_type="pedido",
-                           resource_id=pedido.id, 
-                           description=f"Venda aprovada: {pedido.first_name} - {pedido.plano_nome} - R$ {pedido.valor:.2f}")
-            except: pass
+                log_action(db=db, user_id=None, username="webhook", action="sale_approved", resource_type="pedido", resource_id=pedido.id, description=f"Venda aprovada: {pedido.first_name} - {pedido.plano_nome} - R$ {pedido.valor:.2f}")
+            except:
+                pass
+
+            # ======================================================================
+            # 🔔 [NOVO] GATILHO DE NOTIFICAÇÃO PUSH ONESIGNAL (VENDA APROVADA)
+            # ======================================================================
+            try:
+                await enviar_push_onesignal(
+                    bot_id=pedido.bot_id, 
+                    nome_cliente=pedido.first_name, 
+                    plano=pedido.plano_nome, 
+                    valor=pedido.valor, 
+                    db=db
+                )
+            except Exception as e_push:
+                logger.error(f"❌ Erro na chamada do Push: {e_push}")
+
+            # ✅ CANCELAR REMARKETING (PAGAMENTO CONFIRMADO)
+            try:
+                chat_id_int = int(pedido.telegram_id) if str(pedido.telegram_id).isdigit() else None
             
             # ✅ CANCELAR REMARKETING (PAGAMENTO CONFIRMADO)
             try:
