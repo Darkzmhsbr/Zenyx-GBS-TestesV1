@@ -5143,7 +5143,7 @@ def create_notification(db: Session, user_id: int, title: str, message: str, typ
         logger.error(f"Erro ao criar notificação: {e}")
 
 # =========================================================
-# 🔔 SISTEMA DE NOTIFICAÇÕES PUSH (ONESIGNAL)
+# 🔔 SISTEMA DE NOTIFICAÇÕES PUSH (ONESIGNAL) - API V2
 # =========================================================
 async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valor: float, db: Session):
     """
@@ -5159,24 +5159,25 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         if not owner or not owner.username: 
             return
             
-        # 2. Suas Credenciais
+        # 2. Suas Credenciais (NOVO PADRÃO V2)
         app_id = "a80e6196-67d7-4cd7-ab38-045790d8419c"
-        rest_api_key = "wnide5krqeljflvzxtp6nxeph"
+        rest_api_key = "os_v2_app_vahgdfth25gnpkzyarlzbwcbttwejkity2tef34mjjgsli2gvu5se6m6sch6gklld5kgdvwlpo5ja76nzaf4cx3yzcrzdwlzvfa6mwq"
         
-        url = "https://onesignal.com/api/v1/notifications"
+        # 3. Nova Base URL Oficial do OneSignal
+        url = "https://api.onesignal.com/notifications"
         headers = {
             "Content-Type": "application/json; charset=utf-8",
-            "Authorization": f"Basic {rest_api_key}"
+            "Authorization": f"Key {rest_api_key}"  # 🔥 Mudou de 'Basic' para 'Key'
         }
         
-        # 3. Formata a mensagem
+        # 4. Formata a mensagem
         primeiro_nome = nome_cliente.split(" ")[0] if nome_cliente else "Cliente"
         valor_formatado = f"{valor:.2f}".replace('.', ',')
         
         titulo = "💰 NOVA VENDA APROVADA!"
         mensagem = f"O usuário {primeiro_nome} assinou o {plano} por R$ {valor_formatado}!"
         
-        # 4. Configura o envio (Ataque Duplo: Pega SDK antigo e novo)
+        # 5. Configura o envio
         payload = {
             "app_id": app_id,
             "target_channel": "push",
@@ -5186,7 +5187,7 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
             "contents": {"en": mensagem, "pt": mensagem}
         }
         
-        # 5. Envia e LÊ A RESPOSTA do OneSignal
+        # 6. Envia e LÊ A RESPOSTA do OneSignal
         if http_client:
             response = await http_client.post(url, json=payload, headers=headers, timeout=10.0)
             
