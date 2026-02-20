@@ -8150,6 +8150,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             db.commit()
             
             # 📋 AUDITORIA: Venda aprovada
+            # 📋 AUDITORIA: Venda aprovada
             try:
                 log_action(db=db, user_id=None, username="webhook", action="sale_approved", resource_type="pedido", resource_id=pedido.id, description=f"Venda aprovada: {pedido.first_name} - {pedido.plano_nome} - R$ {pedido.valor:.2f}")
             except:
@@ -8169,10 +8170,6 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             except Exception as e_push:
                 logger.error(f"❌ Erro na chamada do Push: {e_push}")
 
-            # ✅ CANCELAR REMARKETING (PAGAMENTO CONFIRMADO)
-            try:
-                chat_id_int = int(pedido.telegram_id) if str(pedido.telegram_id).isdigit() else None
-            
             # ✅ CANCELAR REMARKETING (PAGAMENTO CONFIRMADO)
             try:
                 chat_id_int = int(pedido.telegram_id) if str(pedido.telegram_id).isdigit() else None
