@@ -5147,11 +5147,10 @@ def create_notification(db: Session, user_id: int, title: str, message: str, typ
 # =========================================================
 async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valor: float, db: Session):
     """
-    Dispara notificação Push para o celular/PC do dono do bot (usuário da plataforma)
-    quando uma venda é aprovada.
+    Dispara notificação Push para o celular/PC do dono do bot.
     """
     try:
-        # 1. Busca o dono do bot para saber para quem enviar
+        # 1. Busca o dono do bot
         bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
         if not bot or not bot.owner_id: 
             return
@@ -5160,7 +5159,7 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         if not owner or not owner.username: 
             return
             
-        # 2. Suas Credenciais do OneSignal
+        # 2. Suas Credenciais
         app_id = "a80e6196-67d7-4cd7-ab38-045790d8419c"
         rest_api_key = "wnide5krqeljflvzxtp6nxeph"
         
@@ -5170,28 +5169,34 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
             "Authorization": f"Basic {rest_api_key}"
         }
         
-        # 3. Formata a mensagem bonita
+        # 3. Formata a mensagem
         primeiro_nome = nome_cliente.split(" ")[0] if nome_cliente else "Cliente"
         valor_formatado = f"{valor:.2f}".replace('.', ',')
         
         titulo = "💰 NOVA VENDA APROVADA!"
-        mensagem = f"O usuário {primeiro_nome} acabou de assinar o {plano} por R$ {valor_formatado}!"
+        mensagem = f"O usuário {primeiro_nome} assinou o {plano} por R$ {valor_formatado}!"
         
-        # 4. Configura o envio apontando para o "username" que configuramos no Frontend
+        # 4. Configura o envio (Ataque Duplo: Pega SDK antigo e novo)
         payload = {
             "app_id": app_id,
+            "target_channel": "push",
             "include_external_user_ids": [str(owner.username)],
+            "include_aliases": {"external_id": [str(owner.username)]},
             "headings": {"en": titulo, "pt": titulo},
             "contents": {"en": mensagem, "pt": mensagem}
         }
         
-        # 5. Dispara a requisição em background (não trava o webhook do Pix)
+        # 5. Envia e LÊ A RESPOSTA do OneSignal
         if http_client:
-            asyncio.create_task(http_client.post(url, json=payload, headers=headers, timeout=5.0))
-            logger.info(f"🔔 [PUSH ONESIGNAL] Gatilho disparado para o usuário: {owner.username}")
+            response = await http_client.post(url, json=payload, headers=headers, timeout=10.0)
+            
+            if response.status_code == 200:
+                logger.info(f"✅ [PUSH ONESIGNAL] Enviado com sucesso para {owner.username}! Resposta: {response.text}")
+            else:
+                logger.error(f"❌ [PUSH ONESIGNAL] Falha no envio! Code: {response.status_code} | Retorno: {response.text}")
         
     except Exception as e:
-        logger.error(f"❌ [PUSH ONESIGNAL] Erro ao disparar notificação: {e}")
+        logger.error(f"❌ [PUSH ONESIGNAL] Erro interno na função: {e}")
 
 # =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
