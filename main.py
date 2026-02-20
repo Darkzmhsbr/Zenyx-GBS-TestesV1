@@ -5143,7 +5143,7 @@ def create_notification(db: Session, user_id: int, title: str, message: str, typ
         logger.error(f"Erro ao criar notificação: {e}")
 
 # =========================================================
-# 🔔 SISTEMA DE NOTIFICAÇÕES PUSH (ONESIGNAL) - API V2
+# 🔔 SISTEMA DE NOTIFICAÇÕES PUSH (ONESIGNAL) - ROTA UNIVERSAL
 # =========================================================
 async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valor: float, db: Session):
     """
@@ -5159,15 +5159,18 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         if not owner or not owner.username: 
             return
             
-        # 2. Suas Credenciais (NOVO PADRÃO V2)
+        # 2. Suas Credenciais
         app_id = "a80e6196-67d7-4cd7-ab38-045790d8419c"
+        
+        # 🚨 ATENÇÃO: Se você deletou e gerou outra chave depois dessa, cole a mais recente aqui!
         rest_api_key = "os_v2_app_vahgdfth25gnpkzyarlzbwcbttwejkity2tef34mjjgsli2gvu5se6m6sch6gklld5kgdvwlpo5ja76nzaf4cx3yzcrzdwlzvfa6mwq"
         
-        # 3. Nova Base URL Oficial do OneSignal
-        url = "https://api.onesignal.com/notifications"
+        # 3. URL Universal e Header Blindado (Basic)
+        url = "https://onesignal.com/api/v1/notifications"
         headers = {
-            "Content-Type": "application/json; charset=utf-8",
-            "Authorization": f"Key {rest_api_key}"  # 🔥 Mudou de 'Basic' para 'Key'
+            "accept": "application/json",
+            "content-type": "application/json",
+            "Authorization": f"Basic {rest_api_key}" # 'Basic' é o formato exigido na V1 Universal
         }
         
         # 4. Formata a mensagem
@@ -5177,27 +5180,25 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         titulo = "💰 NOVA VENDA APROVADA!"
         mensagem = f"O usuário {primeiro_nome} assinou o {plano} por R$ {valor_formatado}!"
         
-        # 5. Configura o envio
+        # 5. Payload Limpo e Seguro
         payload = {
             "app_id": app_id,
-            "target_channel": "push",
-            "include_external_user_ids": [str(owner.username)],
-            "include_aliases": {"external_id": [str(owner.username)]},
+            "include_external_user_ids": [str(owner.username)], # O Frontend vinculou esse nome!
             "headings": {"en": titulo, "pt": titulo},
             "contents": {"en": mensagem, "pt": mensagem}
         }
         
-        # 6. Envia e LÊ A RESPOSTA do OneSignal
+        # 6. Dispara e lê a resposta
         if http_client:
             response = await http_client.post(url, json=payload, headers=headers, timeout=10.0)
             
             if response.status_code == 200:
-                logger.info(f"✅ [PUSH ONESIGNAL] Enviado com sucesso para {owner.username}! Resposta: {response.text}")
+                logger.info(f"✅ [PUSH ONESIGNAL] SUCESSO ABSOLUTO para {owner.username}! Resposta: {response.text}")
             else:
-                logger.error(f"❌ [PUSH ONESIGNAL] Falha no envio! Code: {response.status_code} | Retorno: {response.text}")
+                logger.error(f"❌ [PUSH ONESIGNAL] Código de Erro: {response.status_code} | Resposta: {response.text}")
         
     except Exception as e:
-        logger.error(f"❌ [PUSH ONESIGNAL] Erro interno na função: {e}")
+        logger.error(f"❌ [PUSH ONESIGNAL] Erro Crítico: {e}")
 
 # =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
