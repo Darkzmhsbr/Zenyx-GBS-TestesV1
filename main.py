@@ -4640,6 +4640,15 @@ class ProfileUpdate(BaseModel):
     name: str
     avatar_url: Optional[str] = None
 
+# 🆕 MODELS PARA ALTERAÇÃO DE SENHA E USERNAME
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+    confirm_password: str
+
+class ChangeUsernameRequest(BaseModel):
+    new_username: str
+
 class ChannelTestRequest(BaseModel):
     token: str
     channel_id: str
@@ -13048,6 +13057,154 @@ def update_profile(data: ProfileUpdate, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Erro ao atualizar perfil: {e}")
         raise HTTPException(status_code=500, detail="Erro ao salvar perfil")
+
+# =========================================================
+# 🔒 ALTERAR SENHA DO USUÁRIO
+# =========================================================
+@app.post("/api/admin/profile/change-password")
+def change_password(
+    data: ChangePasswordRequest, 
+    db: Session = Depends(get_db), 
+    current_user = Depends(get_current_user)
+):
+    """
+    Permite ao usuário alterar sua própria senha.
+    Requer: senha atual válida + nova senha com confirmação.
+    """
+    try:
+        from database import User
+        
+        # 1. Validar que nova senha e confirmação são iguais
+        if data.new_password != data.confirm_password:
+            raise HTTPException(status_code=400, detail="A nova senha e a confirmação não coincidem.")
+        
+        # 2. Validar tamanho mínimo da nova senha
+        if len(data.new_password) < 6:
+            raise HTTPException(status_code=400, detail="A nova senha deve ter pelo menos 6 caracteres.")
+        
+        # 3. Buscar o usuário no banco
+        user = db.query(User).filter(User.id == current_user.id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        
+        # 4. Verificar se a senha atual está correta
+        if not verify_password(data.current_password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Senha atual incorreta.")
+        
+        # 5. Verificar se a nova senha é diferente da atual
+        if verify_password(data.new_password, user.password_hash):
+            raise HTTPException(status_code=400, detail="A nova senha não pode ser igual à senha atual.")
+        
+        # 6. Gerar hash e salvar nova senha
+        user.password_hash = get_password_hash(data.new_password)
+        db.commit()
+        
+        # 7. Log de auditoria
+        log_action(
+            db=db, user_id=user.id, username=user.username, 
+            action="password_changed", resource_type="auth",
+            description="Senha alterada com sucesso pelo próprio usuário"
+        )
+        
+        logger.info(f"🔒 Senha alterada com sucesso para o usuário: {user.username}")
+        
+        return {"status": "success", "msg": "Senha alterada com sucesso!"}
+        
+    except HTTPException:
+        raise  # Re-lança exceções HTTP sem modificar
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro ao alterar senha: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao alterar senha.")
+
+# =========================================================
+# 👤 ALTERAR USERNAME DO USUÁRIO
+# =========================================================
+@app.post("/api/admin/profile/change-username")
+def change_username(
+    data: ChangeUsernameRequest, 
+    db: Session = Depends(get_db), 
+    current_user = Depends(get_current_user)
+):
+    """
+    Permite ao usuário alterar seu username.
+    Verifica se o novo username já está em uso por outro usuário.
+    Retorna um novo JWT com o username atualizado.
+    """
+    try:
+        from database import User
+        
+        new_username = data.new_username.strip()
+        
+        # 1. Validar tamanho do username
+        if len(new_username) < 3:
+            raise HTTPException(status_code=400, detail="O username deve ter pelo menos 3 caracteres.")
+        
+        if len(new_username) > 30:
+            raise HTTPException(status_code=400, detail="O username deve ter no máximo 30 caracteres.")
+        
+        # 2. Validar caracteres permitidos (letras, números, underscore, ponto)
+        import re
+        if not re.match(r'^[a-zA-Z0-9_.]+$', new_username):
+            raise HTTPException(status_code=400, detail="O username pode conter apenas letras, números, underscore (_) e ponto (.).")
+        
+        # 3. Buscar o usuário atual
+        user = db.query(User).filter(User.id == current_user.id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+        
+        # 4. Verificar se o novo username é igual ao atual
+        if user.username == new_username:
+            raise HTTPException(status_code=400, detail="O novo username é igual ao atual.")
+        
+        # 5. Verificar se o username já está em uso por outro usuário
+        existing_user = db.query(User).filter(
+            User.username == new_username,
+            User.id != current_user.id
+        ).first()
+        
+        if existing_user:
+            raise HTTPException(
+                status_code=409, 
+                detail=f"O username '{new_username}' já está em uso. Escolha outro."
+            )
+        
+        # 6. Salvar o antigo username para log
+        old_username = user.username
+        
+        # 7. Atualizar o username
+        user.username = new_username
+        db.commit()
+        
+        # 8. Gerar novo token JWT com o username atualizado
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        new_token = create_access_token(
+            data={"sub": new_username, "user_id": user.id},
+            expires_delta=access_token_expires
+        )
+        
+        # 9. Log de auditoria
+        log_action(
+            db=db, user_id=user.id, username=new_username,
+            action="username_changed", resource_type="auth",
+            description=f"Username alterado de '{old_username}' para '{new_username}'"
+        )
+        
+        logger.info(f"👤 Username alterado: {old_username} → {new_username}")
+        
+        return {
+            "status": "success", 
+            "msg": f"Username alterado para '{new_username}'!",
+            "new_username": new_username,
+            "new_token": new_token  # Frontend deve salvar este novo token
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Erro ao alterar username: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao alterar username.")
 
 # =========================================================
 # 🛒 ROTA PÚBLICA PARA O MINI APP (ESSA É A CORRETA ✅)
