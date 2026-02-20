@@ -5143,7 +5143,7 @@ def create_notification(db: Session, user_id: int, title: str, message: str, typ
         logger.error(f"Erro ao criar notificação: {e}")
 
 # =========================================================
-# 🔔 SISTEMA DE NOTIFICAÇÕES PUSH (ONESIGNAL) - ROTA UNIVERSAL
+# 🔔 SISTEMA DE NOTIFICAÇÕES PUSH (ONESIGNAL) - MODO BLINDADO
 # =========================================================
 async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valor: float, db: Session):
     """
@@ -5159,18 +5159,17 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         if not owner or not owner.username: 
             return
             
-        # 2. Suas Credenciais
-        app_id = "a80e6196-67d7-4cd7-ab38-045790d8419c"
+        # 2. Suas Credenciais (COM TRATAMENTO DE ESPAÇOS INVISÍVEIS)
+        app_id = "a80e6196-67d7-4cd7-ab38-045790d8419c".strip()
         
-        # 🚨 ATENÇÃO: Se você deletou e gerou outra chave depois dessa, cole a mais recente aqui!
-        rest_api_key = "os_v2_app_vahgdfth25gnpkzyarlzbwcbtrv47woc5wleddmclmgdf6ooumgshnsqywxprdxhuzy6azeksw7t74lfsloz3sqlooculframljqnii"
+        # 🚨 COLE AQUI A NOVA CHAVE QUE VOCÊ ACABOU DE CRIAR NO PASSO 1
+        rest_api_key = "os_v2_app_vahgdfth25gnpkzyarlzbwcbtrcxdeeo465e5ufddfopx4cqmh57uulchdnvqwzkyc6j4xbs2ov6qljtqzb6a7ib5oyemm733obcrla".strip() 
         
-        # 3. URL Universal e Header Blindado (Basic)
+        # 3. URL e Headers formatados exatamente como a documentação exige
         url = "https://onesignal.com/api/v1/notifications"
         headers = {
-            "accept": "application/json",
-            "content-type": "application/json",
-            "Authorization": f"Basic {rest_api_key}" # 'Basic' é o formato exigido na V1 Universal
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Basic {rest_api_key}" 
         }
         
         # 4. Formata a mensagem
@@ -5180,25 +5179,26 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         titulo = "💰 NOVA VENDA APROVADA!"
         mensagem = f"O usuário {primeiro_nome} assinou o {plano} por R$ {valor_formatado}!"
         
-        # 5. Payload Limpo e Seguro
+        # 5. Payload
         payload = {
             "app_id": app_id,
-            "include_external_user_ids": [str(owner.username)], # O Frontend vinculou esse nome!
+            "include_external_user_ids": [str(owner.username)],
             "headings": {"en": titulo, "pt": titulo},
             "contents": {"en": mensagem, "pt": mensagem}
         }
         
         # 6. Dispara e lê a resposta
         if http_client:
+            logger.info(f"📤 [PUSH ONESIGNAL] Tentando enviar para: {owner.username}...")
             response = await http_client.post(url, json=payload, headers=headers, timeout=10.0)
             
             if response.status_code == 200:
-                logger.info(f"✅ [PUSH ONESIGNAL] SUCESSO ABSOLUTO para {owner.username}! Resposta: {response.text}")
+                logger.info(f"✅ [PUSH ONESIGNAL] SUCESSO! Resposta: {response.text}")
             else:
-                logger.error(f"❌ [PUSH ONESIGNAL] Código de Erro: {response.status_code} | Resposta: {response.text}")
+                logger.error(f"❌ [PUSH ONESIGNAL] Falhou. HTTP {response.status_code} | Resposta: {response.text} | URL Usada: {url}")
         
     except Exception as e:
-        logger.error(f"❌ [PUSH ONESIGNAL] Erro Crítico: {e}")
+        logger.error(f"❌ [PUSH ONESIGNAL] Erro Crítico do Servidor: {e}")
 
 # =========================================================
 # 🔐 ROTAS DE AUTENTICAÇÃO (ATUALIZADAS COM AUDITORIA 🆕)
