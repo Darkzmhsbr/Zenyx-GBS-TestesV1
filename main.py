@@ -5164,7 +5164,6 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         app_id = os.getenv("ONESIGNAL_APP_ID")
         rest_api_key = os.getenv("ONESIGNAL_REST_API_KEY")
         
-        # Trava de segurança: Se você esquecer de colocar no Railway, ele avisa no log e não quebra.
         if not app_id or not rest_api_key:
             logger.warning("⚠️ [PUSH ONESIGNAL] Chaves não configuradas no Railway. Ignorando envio.")
             return
@@ -5174,15 +5173,17 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         headers = {
             "accept": "application/json",
             "content-type": "application/json",
-            "Authorization": f"key {rest_api_key.strip()}" # 🔥 Blindado e formatado
+            "Authorization": f"key {rest_api_key.strip()}"
         }
         
-        # 4. Formata a mensagem
-        primeiro_nome = nome_cliente.split(" ")[0] if nome_cliente else "Cliente"
+        # =========================================================
+        # 4. Formata a mensagem (🔥 ALTERADO AQUI CONFORME SEU PEDIDO)
+        # =========================================================
         valor_formatado = f"{valor:.2f}".replace('.', ',')
         
         titulo = "💰 NOVA VENDA APROVADA!"
-        mensagem = f"O usuário {primeiro_nome} assinou o {plano} por R$ {valor_formatado}!"
+        mensagem = f"Você fez uma venda de R$ {valor_formatado}!"
+        # =========================================================
         
         # 5. Payload Moderno V2
         payload = {
