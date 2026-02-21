@@ -60,6 +60,10 @@ class User(Base):
     # 🆕 CAMPOS FINANCEIROS (MULTI-GATEWAY)
     pushin_pay_id = Column(String, nullable=True)   # ID da conta do membro na PushinPay
     wiinpay_user_id = Column(String, nullable=True)  # ID da conta do membro na WiinPay
+    
+    # 🆕 MULTI-GATEWAY: Sync Pay (ID para Taxa de Split)
+    syncpay_client_id = Column(String, nullable=True) # ID da conta do membro na Sync Pay
+    
     taxa_venda = Column(Integer, default=60)         # Taxa em centavos (Padrão: 60)
 
     # RELACIONAMENTO: Um usuário possui vários bots
@@ -105,11 +109,18 @@ class Bot(Base):
     # 🆕 MULTI-GATEWAY: WiinPay
     wiinpay_api_key = Column(String, nullable=True)   # Chave API do usuário na WiinPay
     
+    # 🆕 MULTI-GATEWAY: Sync Pay
+    syncpay_client_id = Column(String, nullable=True)     # Chave Pública
+    syncpay_client_secret = Column(String, nullable=True) # Chave Privada
+    syncpay_access_token = Column(String, nullable=True)  # Token temporário de 1h
+    syncpay_token_expires_at = Column(DateTime, nullable=True) # Validade do Token
+    
     # 🆕 MULTI-GATEWAY: Controle de Gateways
-    gateway_principal = Column(String, default="pushinpay")  # "pushinpay" ou "wiinpay"
+    gateway_principal = Column(String, default="pushinpay")  # "pushinpay", "wiinpay" ou "syncpay"
     gateway_fallback = Column(String, nullable=True)          # Gateway de contingência
     pushinpay_ativo = Column(Boolean, default=False)          # Gateway PushinPay ativa para este bot
     wiinpay_ativo = Column(Boolean, default=False)            # Gateway WiinPay ativa para este bot
+    syncpay_ativo = Column(Boolean, default=False)            # Gateway Sync Pay ativa para este bot
 
     # 🔒 PROTEÇÃO DE CONTEÚDO (Telegram protect_content)
     # Quando ativo, todas as mídias e mensagens enviadas pelo bot ficam protegidas:
@@ -832,6 +843,7 @@ class RemarketingLog(Base):
     
     def __repr__(self):
         return f"<RemarketingLog(bot_id={self.bot_id}, user_id={self.user_id}, status={self.status})>"
+
 # =========================================================
 # 🆓 CANAL FREE (APROVAÇÃO AUTOMÁTICA)
 # =========================================================

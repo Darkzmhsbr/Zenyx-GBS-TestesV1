@@ -3443,6 +3443,159 @@ def get_plataforma_pushin_id(db: Session) -> str:
 # =========================================================
 # 🔄 PROCESSAMENTO BACKGROUND DE REMARKETING
 # =========================================================
+
+# =========================================================
+# 🔌 INTEGRAÇÃO SYNC PAY (NOVA)
+# =========================================================
+async def obter_token_syncpay(bot, db: Session):
+    """
+    Verifica se o token da Sync Pay ainda é válido.
+    Se não for (ou não existir), faz uma requisição assíncrona para gerar um novo.
+    """
+    agora = now_brazil()
+    
+    # Se o token existir e a data de expiração for maior que agora (margem de 5 min)
+    if bot.syncpay_access_token and bot.syncpay_token_expires_at:
+        from datetime import timedelta
+        if bot.syncpay_token_expires_at > (agora + timedelta(minutes=5)):
+            return bot.syncpay_access_token
+
+    url = "https://syncpay.apidog.io/api/partner/v1/auth-token"
+    payload = {
+        "client_id": bot.syncpay_client_id,
+        "client_secret": bot.syncpay_client_secret
+    }
+    headers = {"Content-Type": "application/json"}
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, headers=headers, timeout=10)
+        
+        data = response.json()
+        
+        if response.status_code == 200 and "access_token" in data:
+            novo_token = data["access_token"]
+            expires_in_seconds = data.get("expires_in", 3600)
+            
+            # Atualiza no banco de dados
+            bot.syncpay_access_token = novo_token
+            from datetime import timedelta
+            bot.syncpay_token_expires_at = agora + timedelta(seconds=expires_in_seconds)
+            
+            db.commit()
+            return novo_token
+        else:
+            logger.error(f"[SYNC PAY ERRO AUTH] Bot {bot.id}: {data}")
+            return None
+    except Exception as e:
+        logger.error(f"[SYNC PAY EXCEPTION AUTH] {str(e)}")
+        return None
+
+
+async def gerar_pix_syncpay(
+    valor_float: float, 
+    transaction_id: str, 
+    bot_id: int, 
+    db: Session,
+    user_telegram_id: str = None,      
+    user_first_name: str = None,       
+    plano_nome: str = None,
+    agendar_remarketing: bool = True
+):
+    """Gera o Pix via Sync Pay de forma assíncrona com cálculo de Split em Porcentagem"""
+    
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot: return None
+
+    token = await obter_token_syncpay(bot, db)
+    if not token:
+        logger.error(f"❌ [SYNC PAY] Falha de autenticação. Verifique as credenciais do bot {bot_id}.")
+        return None
+        
+    url = "https://syncpay.apidog.io/api/partner/v1/cash-in"
+    
+    # ⚠️ REGRA DO SPLIT SYNC PAY (Exige PORCENTAGEM inteira)
+    split_array = []
+    if bot.owner_id:
+        from database import User
+        owner = db.query(User).filter(User.id == bot.owner_id).first()
+        if owner and owner.syncpay_client_id:
+            # Pega a taxa configurada (em centavos)
+            taxa_centavos = owner.taxa_venda or 60
+            taxa_reais = taxa_centavos / 100.0
+            
+            # Converte a taxa em reais para porcentagem baseada no valor do plano
+            porcentagem = int((taxa_reais / valor_float) * 100)
+            if porcentagem < 1 and taxa_reais > 0:
+                porcentagem = 1 # Mínimo de 1% se o valor for muito pequeno
+                
+            if 0 < porcentagem <= 100:
+                split_array.append({
+                    "percentage": porcentagem,
+                    "user_id": owner.syncpay_client_id
+                })
+                logger.info(f"✅ [SYNC PAY DEBUG] Split configurado: {porcentagem}% para {owner.syncpay_client_id}")
+
+    # Domínio do seu Webhook
+    raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
+    clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
+    
+    payload = {
+        "amount": round(valor_float, 2),
+        "description": f"{plano_nome} - Bot {bot.nome}",
+        "webhook_url": f"https://{clean_domain}/webhook/pix", # Aponta pro Webhook genérico
+        "client": {
+            "name": user_first_name or "Cliente Telegram",
+            "cpf": "00000000000", 
+            "email": f"cliente{user_telegram_id or 'anon'}@telegram.bot",
+            "phone": "11999999999"
+        }
+    }
+    
+    if split_array:
+        payload["split"] = split_array
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, headers=headers, timeout=15)
+        
+        data = response.json()
+        
+        if response.status_code == 200 and "pix_code" in data:
+            identifier = data.get("identifier", transaction_id)
+            logger.info(f"✅ [SYNC PAY] PIX gerado com sucesso! ID: {identifier}")
+            
+            # Agenda remarketing se solicitado
+            if agendar_remarketing and user_telegram_id:
+                try:
+                    chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
+                    if chat_id_int:
+                        cancelar_remarketing(chat_id_int)
+                        schedule_remarketing_and_alternating(
+                            bot_id=bot_id, chat_id=chat_id_int, payment_message_id=0,
+                            user_info={'first_name': user_first_name or "Cliente", 'plano': plano_nome, 'valor': valor_float}
+                        )
+                except: pass
+
+            # Formato padronizado que a sua rota do Telegram espera
+            return {
+                "id": identifier,
+                "qr_code": data["pix_code"]
+            }
+        else:
+            logger.error(f"❌ [SYNC PAY ERRO PIX] {data}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ [SYNC PAY EXCEPTION PIX] {str(e)}")
+        return None
+
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (DINÂMICA)
 # =========================================================
@@ -4016,6 +4169,81 @@ async def gerar_pix_wiinpay(
     logger.error(f"❌ [WIINPAY] Falha definitiva após {max_retries} tentativas")
     return None
 
+
+def gerar_pagamento_syncpay(pedido: Pedido, bot: Bot, user: User, plano: PlanoConfig, db: Session):
+    """Gera o Pix via Sync Pay com a regra de Split"""
+    
+    token = obter_token_syncpay(bot, db)
+    if not token:
+        return {"erro": "Falha ao autenticar na Sync Pay. Verifique as credenciais do bot."}
+        
+    url = "https://syncpay.apidog.io/api/partner/v1/cash-in"
+    
+    # ⚠️ ATENÇÃO DO MESTRE: Regra do Split
+    # A Sync Pay pede porcentagem inteira (ex: 10 para 10%). 
+    # Precisaremos adaptar a sua lógica atual se você usa taxa fixa em centavos, 
+    # mas deixei pronto no formato exigido pela doc deles.
+    split_array = []
+    if user and user.syncpay_client_id:
+        # Exemplo: Supondo que a sua taxa seja 5%
+        taxa_porcentagem = 5 
+        split_array.append({
+            "percentage": taxa_porcentagem,
+            "user_id": user.syncpay_client_id
+        })
+
+    payload = {
+        "amount": round(pedido.valor, 2),
+        "description": f"Plano {plano.nome_exibicao} - Bot {bot.nome}",
+        "webhook_url": f"https://SEU_DOMINIO.com/webhook/syncpay/{bot.id}", # Adapte pro seu domínio real
+        "client": {
+            "name": pedido.first_name or "Cliente Telegram",
+            "cpf": "00000000000", # Necessário capturar o CPF do lead caso a API exija reais
+            "email": f"cliente{pedido.telegram_id}@telegram.com",
+            "phone": "11999999999"
+        }
+    }
+    
+    # Adiciona o split só se tiver configurado
+    if split_array:
+        payload["split"] = split_array
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    
+    try:
+        import requests
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        data = response.json()
+        
+        if response.status_code == 200 and "pix_code" in data:
+            # A Sync Pay retorna o identifier da transação
+            identifier = data["identifier"]
+            pedido.txid = identifier
+            pedido.transaction_id = identifier
+            pedido.qr_code = data["pix_code"]
+            pedido.gateway_usada = "syncpay"
+            db.commit()
+            
+            return {
+                "sucesso": True,
+                "txid": identifier,
+                "copia_cola": data["pix_code"]
+            }
+        else:
+            print(f"[SYNC PAY ERRO PIX] Pedido {pedido.id}: {data}")
+            return {"erro": "A Sync Pay recusou a geração do Pix."}
+            
+    except Exception as e:
+        print(f"[SYNC PAY EXCEPTION PIX] {str(e)}")
+        return {"erro": "Erro de conexão com a Sync Pay."}
+
+# =========================================================
+# 🔄 ORQUESTRADOR MULTI-GATEWAY COM CONTINGÊNCIA
+# =========================================================
 # =========================================================
 # 🔄 ORQUESTRADOR MULTI-GATEWAY COM CONTINGÊNCIA
 # =========================================================
@@ -4056,6 +4284,8 @@ async def gerar_pix_gateway(
         gateways_disponiveis.append("pushinpay")
     elif principal == "wiinpay" and bot.wiinpay_ativo and bot.wiinpay_api_key:
         gateways_disponiveis.append("wiinpay")
+    elif principal == "syncpay" and bot.syncpay_ativo and bot.syncpay_client_id:
+        gateways_disponiveis.append("syncpay")
     
     # Adiciona fallback se diferente da principal e ativa
     if fallback and fallback != principal:
@@ -4063,6 +4293,8 @@ async def gerar_pix_gateway(
             gateways_disponiveis.append("pushinpay")
         elif fallback == "wiinpay" and bot.wiinpay_ativo and bot.wiinpay_api_key:
             gateways_disponiveis.append("wiinpay")
+        elif fallback == "syncpay" and bot.syncpay_ativo and bot.syncpay_client_id:
+            gateways_disponiveis.append("syncpay")
     
     # Se nenhuma gateway multi está ativa, fallback para comportamento legado (pushinpay com token)
     if not gateways_disponiveis:
@@ -4113,6 +4345,24 @@ async def gerar_pix_gateway(
                     return result, "wiinpay"
                 else:
                     logger.warning(f"⚠️ [GATEWAY] WiinPay falhou. Tentando próxima...")
+                    
+            elif gw == "syncpay":
+                logger.info(f"📤 [GATEWAY] Tentando Sync Pay...")
+                result = await gerar_pix_syncpay(
+                    valor_float=valor_float,
+                    transaction_id=transaction_id,
+                    bot_id=bot_id,
+                    db=db,
+                    user_telegram_id=user_telegram_id,
+                    user_first_name=user_first_name,
+                    plano_nome=plano_nome,
+                    agendar_remarketing=agendar_remarketing
+                )
+                if result:
+                    logger.info(f"✅ [GATEWAY] Sync Pay respondeu com sucesso!")
+                    return result, "syncpay"
+                else:
+                    logger.warning(f"⚠️ [GATEWAY] Sync Pay falhou. Tentando próxima...")
                     
         except Exception as e:
             logger.error(f"❌ [GATEWAY] Erro ao tentar {gw}: {e}")
@@ -8075,8 +8325,8 @@ async def webhook_wiinpay(request: Request, db: Session = Depends(get_db)):
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     """
-    Webhook de pagamento com sistema de retry automático e suporte a múltiplos canais VIP.
-    Se falhar, agenda reprocessamento com exponential backoff.
+    Webhook de pagamento unificado (PushinPay, WiinPay, SyncPay)
+    com sistema de retry automático e suporte a múltiplos canais VIP.
     """
     print("🔔 WEBHOOK PIX CHEGOU!")
     
@@ -8097,11 +8347,23 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                 logger.error(f"❌ Payload inválido: {body_str[:200]}")
                 return {"status": "ignored"}
         
-        # 2. VALIDAR STATUS
-        raw_tx_id = data.get("id") or data.get("external_reference") or data.get("uuid")
-        tx_id = str(raw_tx_id).lower() if raw_tx_id else None
-        status_pix = str(data.get("status", "")).lower()
+        # 2. VALIDAR STATUS E ID (Suporta múltiplas Gateways)
+        # Tenta extrair dados do payload (algumas APIs jogam tudo num dict "data")
+        payload_data = data.get("data", data) if isinstance(data.get("data"), dict) else data
         
+        # id=PushinPay, paymentId=WiinPay, identifier=SyncPay, external_reference=Fallback
+        raw_tx_id = (
+            payload_data.get("id") or 
+            payload_data.get("paymentId") or 
+            payload_data.get("identifier") or 
+            payload_data.get("external_reference") or 
+            payload_data.get("uuid")
+        )
+        
+        tx_id = str(raw_tx_id).lower() if raw_tx_id else None
+        status_pix = str(payload_data.get("status", "")).lower()
+        
+        # added 'completed' for SyncPay
         if status_pix not in ["paid", "approved", "completed", "succeeded"]:
             return {"status": "ignored"}
         
@@ -8163,7 +8425,6 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             
             db.commit()
             
-            # 📋 AUDITORIA: Venda aprovada
             # 📋 AUDITORIA: Venda aprovada
             try:
                 log_action(db=db, user_id=None, username="webhook", action="sale_approved", resource_type="pedido", resource_id=pedido.id, description=f"Venda aprovada: {pedido.first_name} - {pedido.plano_nome} - R$ {pedido.valor:.2f}")
@@ -8417,7 +8678,6 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                                 f"{tracking_info}"
                             )
                             # Função auxiliar que você já deve ter no código
-                            # Se não tiver, substitua por lógica direta de envio
                             if 'notificar_admin_principal' in globals():
                                 notificar_admin_principal(bot_data, msg_admin)
                             elif bot_data.admin_principal_id:
@@ -8572,7 +8832,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                                             logger.info(f"✅ Downsell entregue (link manual) para {target_id}")
                                         except Exception as e_down:
                                             logger.error(f"❌ Erro entrega downsell: {e_down}")
-                                        
+                                            
                         except Exception as e_upsell_schedule:
                             logger.error(f"⚠️ Erro ao agendar upsell/downsell: {e_upsell_schedule}")
                         
@@ -15590,7 +15850,7 @@ async def migrate_canal_notificacao(db: Session = Depends(get_db)):
 
 
 # ============================================================
-# 🔧 MIGRAÇÃO: MULTI-GATEWAY (WIINPAY + CONTINGÊNCIA)
+# 🔧 MIGRAÇÃO: MULTI-GATEWAY (WIINPAY + CONTINGÊNCIA + SYNC PAY)
 # ============================================================
 @app.get("/migrate-multi-gateway")
 async def migrate_multi_gateway(db: Session = Depends(get_db)):
@@ -15604,6 +15864,7 @@ async def migrate_multi_gateway(db: Session = Depends(get_db)):
         resultados = []
         
         comandos = [
+            # --- GATEWAYS EXISTENTES ---
             ("bots", "wiinpay_api_key", "ALTER TABLE bots ADD COLUMN wiinpay_api_key VARCHAR;"),
             ("bots", "gateway_principal", "ALTER TABLE bots ADD COLUMN gateway_principal VARCHAR DEFAULT 'pushinpay';"),
             ("bots", "gateway_fallback", "ALTER TABLE bots ADD COLUMN gateway_fallback VARCHAR;"),
@@ -15611,6 +15872,14 @@ async def migrate_multi_gateway(db: Session = Depends(get_db)):
             ("bots", "wiinpay_ativo", "ALTER TABLE bots ADD COLUMN wiinpay_ativo BOOLEAN DEFAULT FALSE;"),
             ("users", "wiinpay_user_id", "ALTER TABLE users ADD COLUMN wiinpay_user_id VARCHAR;"),
             ("pedidos", "gateway_usada", "ALTER TABLE pedidos ADD COLUMN gateway_usada VARCHAR;"),
+            
+            # --- NOVA GATEWAY: SYNC PAY ---
+            ("users", "syncpay_client_id", "ALTER TABLE users ADD COLUMN syncpay_client_id VARCHAR;"),
+            ("bots", "syncpay_client_id", "ALTER TABLE bots ADD COLUMN syncpay_client_id VARCHAR;"),
+            ("bots", "syncpay_client_secret", "ALTER TABLE bots ADD COLUMN syncpay_client_secret VARCHAR;"),
+            ("bots", "syncpay_access_token", "ALTER TABLE bots ADD COLUMN syncpay_access_token VARCHAR;"),
+            ("bots", "syncpay_token_expires_at", "ALTER TABLE bots ADD COLUMN syncpay_token_expires_at TIMESTAMP;"),
+            ("bots", "syncpay_ativo", "ALTER TABLE bots ADD COLUMN syncpay_ativo BOOLEAN DEFAULT FALSE;")
         ]
         
         for tabela, coluna, sql in comandos:
@@ -15625,12 +15894,13 @@ async def migrate_multi_gateway(db: Session = Depends(get_db)):
                 else:
                     resultados.append(f"❌ {tabela}.{coluna}: {str(e)}")
         
-        # Verificação final
+        # Verificação final (AGORA COM SYNC PAY INCLUÍDA!)
         try:
             check = db.execute(text("""
                 SELECT column_name FROM information_schema.columns 
                 WHERE table_name = 'bots' AND column_name IN 
-                ('wiinpay_api_key', 'gateway_principal', 'gateway_fallback', 'pushinpay_ativo', 'wiinpay_ativo')
+                ('wiinpay_api_key', 'gateway_principal', 'gateway_fallback', 'pushinpay_ativo', 'wiinpay_ativo', 
+                 'syncpay_client_id', 'syncpay_client_secret', 'syncpay_access_token', 'syncpay_ativo')
             """))
             cols_bots = [r[0] for r in check.fetchall()]
             resultados.append(f"✅ Verificação bots: {cols_bots}")
@@ -15651,9 +15921,6 @@ async def migrate_multi_gateway(db: Session = Depends(get_db)):
             "detalhes": str(e)
         }
 
-# ============================================================
-# 🔧 MIGRAÇÃO: MINI APP V2 (SEPARADORES E PAGINAÇÃO)
-# ============================================================
 # ============================================================
 # 🔧 MIGRAÇÃO: MINI APP V2 (SEPARADORES E PAGINAÇÃO)
 # ============================================================
