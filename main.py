@@ -3680,7 +3680,8 @@ async def gerar_pix_syncpay(
 
             return {
                 "id": identifier,
-                "qr_code": data["pix_code"]
+                "qr_code": data["pix_code"],
+                "gateway": "syncpay"
             }
         else:
             logger.error(f"❌ [SYNC PAY ERRO PIX] Resposta sem PIX: {data}")
@@ -8450,8 +8451,17 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8")
         
+        # 🔥 Captura headers relevantes (Sync Pay envia "event" no header)
+        header_event = ""
+        try:
+            header_event = request.headers.get("event", "") or ""
+        except:
+            pass
+        
         # 🔥 LOG INSERIDO PARA DEBUGGAR QUALQUER GATEWAY
         logger.info(f"📩 [WEBHOOK PIX] Payload recebido: {body_str[:500]}")
+        if header_event:
+            logger.info(f"📩 [WEBHOOK PIX] Header event: {header_event}")
         
         try:
             data = json.loads(body_str)
@@ -8466,7 +8476,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                 return {"status": "ignored"}
         
         # 2. VALIDAR STATUS E ID (Suporta múltiplas Gateways)
-        # Tenta extrair dados do payload (algumas APIs jogam tudo num dict "data")
+        # Tenta extrair dados do payload (Sync Pay envolve tudo em "data": {...})
         payload_data = data.get("data", data) if isinstance(data.get("data"), dict) else data
         
         # 🔥 Busca abrangente pelo ID do pedido (Pega da Raiz e do Payload Data)
@@ -8474,29 +8484,62 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             payload_data.get("id") or 
             payload_data.get("paymentId") or 
             payload_data.get("identifier") or 
+            payload_data.get("reference_id") or
             payload_data.get("external_reference") or 
             payload_data.get("transaction_id") or 
             payload_data.get("uuid") or
             data.get("id") or
             data.get("identifier") or
+            data.get("reference_id") or
             data.get("transaction_id")
         )
         tx_id = str(raw_tx_id).lower() if raw_tx_id else None
         
-        # 🔥 Busca abrangente pelo Status (Importante para Sync Pay que usa 'event')
-        raw_status = str(
-            payload_data.get("status") or 
-            data.get("status") or 
-            data.get("event") or 
-            payload_data.get("state") or 
-            data.get("state") or 
-            ""
-        ).lower()
+        # 🔥 Busca abrangente pelo Status 
+        # PRIORIDADE: 1) header event (Sync Pay), 2) body status, 3) body event
+        raw_status = ""
         
-        logger.info(f"🔍 [WEBHOOK PIX] TxID Extrapolado: {tx_id} | Status Lido: {raw_status}")
+        # Sync Pay envia o tipo de evento no HEADER, não no body
+        if header_event:
+            raw_status = header_event.lower()
         
-        # 🔥 BLINDAGEM SYNC PAY: Considera pago se o status contiver qualquer destas palavras chaves
-        is_paid = any(s in raw_status for s in ["paid", "approved", "completed", "succeeded", "confirmed", "recebido"])
+        if not raw_status or raw_status in ["cashin.create"]:
+            # Se o header é cashin.create (criação) ou vazio, pega do body
+            raw_status = str(
+                payload_data.get("status") or 
+                data.get("status") or 
+                data.get("event") or 
+                payload_data.get("state") or 
+                data.get("state") or 
+                header_event or
+                ""
+            ).lower()
+        
+        logger.info(f"🔍 [WEBHOOK PIX] TxID Extrapolado: {tx_id} | Status Lido: {raw_status} | Header Event: {header_event}")
+        
+        # 🔥 BLINDAGEM: Considera pago se o status contiver qualquer destas palavras chaves
+        # Sync Pay: cashin.update com status "completed" / header "cashin.update"
+        is_paid = any(s in raw_status for s in [
+            "paid", "approved", "completed", "succeeded", "confirmed", "recebido",
+            "cashin.update"  # 🆕 Sync Pay envia este header quando pagamento é confirmado
+        ])
+        
+        # 🔥 SYNC PAY EXTRA: Se header_event == "cashin.update", verifica o status interno
+        if header_event.lower() == "cashin.update":
+            inner_status = str(payload_data.get("status") or "").lower()
+            if inner_status == "completed":
+                is_paid = True
+                logger.info(f"✅ [WEBHOOK PIX] Sync Pay cashin.update com status completed! Processando...")
+            elif inner_status == "pending":
+                is_paid = False
+                logger.info(f"ℹ️ [WEBHOOK PIX] Sync Pay cashin.update mas status ainda pending. Ignorando.")
+        
+        # Sync Pay cashin.create sempre tem status pending - IGNORA
+        if header_event.lower() == "cashin.create":
+            inner_status = str(payload_data.get("status") or "").lower()
+            if inner_status != "completed":
+                logger.info(f"ℹ️ [WEBHOOK PIX] Sync Pay cashin.create (status: {inner_status}). Ignorando - aguardando update.")
+                return {"status": "ignored"}
         
         if not is_paid:
             logger.info(f"ℹ️ [WEBHOOK PIX] Ignorado. Status não indica pagamento aprovado: {raw_status}")
@@ -8507,12 +8550,54 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             return {"status": "ignored"}
         
         # 3. BUSCAR PEDIDO
+        # 🔥 Busca multi-campo: txid, transaction_id (cobre diferentes gateways)
         pedido = db.query(Pedido).filter(
             (Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)
         ).first()
         
+        # 🔥 SYNC PAY FALLBACK: Se não achou pelo ID principal, tenta buscar
+        # pelo reference_id que pode estar em outro campo do payload
+        if not pedido and payload_data:
+            alt_ids = set()
+            for field in ["id", "identifier", "reference_id", "transaction_id", "uuid"]:
+                val = payload_data.get(field) or data.get(field)
+                if val:
+                    alt_ids.add(str(val).lower())
+            # Remove o tx_id já tentado
+            alt_ids.discard(tx_id)
+            
+            for alt_id in alt_ids:
+                pedido = db.query(Pedido).filter(
+                    (Pedido.txid == alt_id) | (Pedido.transaction_id == alt_id)
+                ).first()
+                if pedido:
+                    logger.info(f"✅ [WEBHOOK PIX] Pedido encontrado via ID alternativo: {alt_id}")
+                    tx_id = alt_id
+                    break
+        
+        # 🔥 ÚLTIMO RECURSO SYNC PAY: Busca por valor + bot + status pending + criado recentemente
+        if not pedido and header_event and "cashin" in header_event.lower():
+            try:
+                amount_webhook = payload_data.get("amount")
+                if amount_webhook:
+                    from datetime import timedelta as td
+                    pedido = db.query(Pedido).filter(
+                        Pedido.status == "pending",
+                        Pedido.valor == float(amount_webhook),
+                        Pedido.gateway_usada == "syncpay",
+                        Pedido.created_at >= now_brazil() - td(hours=2)
+                    ).order_by(Pedido.created_at.desc()).first()
+                    
+                    if pedido:
+                        logger.info(f"✅ [WEBHOOK PIX] Pedido encontrado via FALLBACK (valor+gateway+recente): ID={pedido.id}, TxID={pedido.transaction_id}")
+                        # Atualiza o transaction_id com o ID correto do webhook para futuras referências
+                        pedido.transaction_id = tx_id
+                        db.commit()
+            except Exception as e_fallback:
+                logger.warning(f"⚠️ [WEBHOOK PIX] Erro no fallback de busca: {e_fallback}")
+        
         if not pedido:
-            logger.warning(f"⚠️ Pedido {tx_id} não encontrado")
+            logger.warning(f"⚠️ Pedido {tx_id} não encontrado (IDs testados: txid, transaction_id, alternativas)")
             return {"status": "ok", "msg": "Order not found"}
         
         if pedido.status in ["approved", "paid", "active"]:
@@ -8521,6 +8606,10 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         
         # 4. PROCESSAR PAGAMENTO (LÓGICA CRÍTICA)
         try:
+            # 🔥 Detectar e marcar gateway usada (se ainda não marcada)
+            if header_event and "cashin" in header_event.lower() and not pedido.gateway_usada:
+                pedido.gateway_usada = "syncpay"
+            
             # Calcular data de expiração
             now = now_brazil()
             data_validade = None
@@ -8586,6 +8675,23 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             except Exception as e_push:
                 logger.error(f"❌ Erro na chamada do Push: {e_push}")
 
+            # ======================================================================
+            # 🔔 [NOVO] NOTIFICAÇÃO NO PAINEL WEB (IN-APP)
+            # ======================================================================
+            try:
+                bot_notif = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
+                if bot_notif and bot_notif.owner_id:
+                    valor_fmt = f"{pedido.valor:.2f}".replace('.', ',')
+                    create_notification(
+                        db=db,
+                        user_id=bot_notif.owner_id,
+                        title="💰 Nova Venda Aprovada!",
+                        message=f"{pedido.first_name} comprou {pedido.plano_nome} por R$ {valor_fmt}",
+                        type="success"
+                    )
+            except Exception as e_notif:
+                logger.error(f"❌ Erro ao criar notificação in-app: {e_notif}")
+
             # ✅ CANCELAR REMARKETING (PAGAMENTO CONFIRMADO)
             try:
                 chat_id_int = int(pedido.telegram_id) if str(pedido.telegram_id).isdigit() else None
@@ -8624,6 +8730,23 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             
             texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
             logger.info(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
+            
+            # ======================================================================
+            # 🔥 ATUALIZAR LEAD PARA CLIENTE (CONTATOS / FUNIL)
+            # ======================================================================
+            try:
+                lead_update = db.query(Lead).filter(
+                    Lead.bot_id == pedido.bot_id,
+                    Lead.user_id == str(pedido.telegram_id)
+                ).first()
+                
+                if lead_update:
+                    lead_update.status = 'active'
+                    lead_update.funil_stage = 'cliente' if hasattr(lead_update, 'funil_stage') else None
+                    db.commit()
+                    logger.info(f"✅ Lead {pedido.telegram_id} atualizado para CLIENTE")
+            except Exception as e_lead:
+                logger.warning(f"⚠️ Erro ao atualizar Lead para cliente: {e_lead}")
             
             # 5. ENTREGA DO ACESSO (COM LÓGICA MULTI-CANAIS)
             try:
@@ -9943,6 +10066,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             plano_id=plano.id,
                             valor=preco_promo,
                             transaction_id=txid,
+                            txid=txid,
                             qr_code=qr,
                             status="pending",
                             tem_order_bump=False,
@@ -10116,6 +10240,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             plano_id=plano.id,
                             valor=valor_final,
                             transaction_id=txid,
+                            txid=txid,
                             qr_code=qr,
                             status="pending",
                             tem_order_bump=False,
@@ -10246,6 +10371,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             plano_id=plano.id,
                             valor=plano.preco_atual,
                             transaction_id=txid,
+                            txid=txid,
                             qr_code=qr,
                             status="pending",
                             tem_order_bump=False,
@@ -10353,6 +10479,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         plano_id=plano.id,
                         valor=valor_final,
                         transaction_id=txid,
+                        txid=txid,
                         qr_code=qr,
                         status="pending",
                         tem_order_bump=aceitou,
@@ -10514,6 +10641,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             plano_id=plano.id, 
                             valor=preco_final, 
                             transaction_id=txid, 
+                            txid=txid,
                             qr_code=qr, 
                             status="pending", 
                             tem_order_bump=False, 
@@ -10647,6 +10775,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             plano_id=None,
                             valor=preco_upsell,
                             transaction_id=txid,
+                            txid=txid,
                             qr_code=qr,
                             status="pending",
                             tem_order_bump=False,
@@ -10749,6 +10878,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             plano_id=None,
                             valor=preco_downsell,
                             transaction_id=txid,
+                            txid=txid,
                             qr_code=qr,
                             status="pending",
                             tem_order_bump=False,

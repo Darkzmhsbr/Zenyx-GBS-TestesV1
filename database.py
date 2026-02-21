@@ -495,10 +495,10 @@ class Pedido(Base):
     
     txid = Column(String, unique=True, index=True) 
     qr_code = Column(Text, nullable=True)
-    transaction_id = Column(String, nullable=True)
+    transaction_id = Column(String, nullable=True, index=True)
     
     # 🆕 MULTI-GATEWAY: Qual gateway processou este pagamento
-    gateway_usada = Column(String, nullable=True)  # "pushinpay" ou "wiinpay"
+    gateway_usada = Column(String, nullable=True)  # "pushinpay", "wiinpay" ou "syncpay"
     
     data_aprovacao = Column(DateTime, nullable=True)
     data_expiracao = Column(DateTime, nullable=True)
