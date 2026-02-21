@@ -3632,6 +3632,23 @@ async def gerar_pix_syncpay(
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers, timeout=15)
         
+        # 🔥 CORREÇÃO MESTRA: Se o token foi invalidado pela Sync Pay antes do tempo, forçamos a renovação
+        if response.status_code == 401:
+            logger.warning("⚠️ [SYNC PAY] Token expirado no servidor. Forçando renovação automática...")
+            
+            # Limpa o token velho no banco
+            bot.syncpay_access_token = None
+            db.commit()
+            
+            # Pega um token fresquinho
+            token = await obter_token_syncpay(bot, db)
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+                
+                # Tenta gerar o PIX mais uma vez
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(url, json=payload, headers=headers, timeout=15)
+
         # 🛡️ ESCUDO SUPREMO: Se der 422 ou 500, e tiver split no payload, retenta SEM split para salvar a venda!
         if response.status_code in [422, 500] and "split" in payload:
             logger.warning(f"⚠️ [SYNC PAY] Erro {response.status_code} ({response.text}). Retentando SEM split para salvar a venda!")
@@ -3672,6 +3689,7 @@ async def gerar_pix_syncpay(
     except Exception as e:
         logger.error(f"❌ [SYNC PAY EXCEPTION PIX] {type(e).__name__}: {str(e)}")
         return None
+        
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (DINÂMICA)
 # =========================================================
@@ -9130,9 +9148,6 @@ def enviar_passo_automatico(bot_temp, chat_id, passo_atual, bot_db, db):
 # =========================================================
 # 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
 # =========================================================
-# =========================================================
-# 3. WEBHOOK TELEGRAM (START + GATEKEEPER + COMANDOS)
-# =========================================================
 @app.post("/webhook/{token}")
 async def receber_update_telegram(token: str, req: Request, db: Session = Depends(get_db)):
     if token == "pix": return {"status": "ignored"}
@@ -9570,7 +9585,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 callback_data="step_1"
                             ))
 
-                # 🔥 BLOCO DE ENVIO COM LOG
                 # 🔥 BLOCO DE ENVIO COM LOG E ÁUDIO
                 try:
                     logger.info(f"📤 Tentando enviar menu para {chat_id}...")
@@ -9597,9 +9611,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     logger.info("✅ Menu enviado com sucesso!")
 
-                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão (via callback linha 6240-6242)
-                    # Motivo: Timer automático deletava mensagem ANTES do usuário clicar, parando o fluxo
-                    # A destruição agora acontece corretamente quando o usuário clica no botão
+                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão
                     # if sent_msg_start and flow and flow.autodestruir_1:
                     #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg_start.message_id, 5)
 
@@ -9638,11 +9650,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     txid = data.replace("check_payment_", "").strip()
                     
                     if not txid:
-                        bot_temp.answer_callback_query(
-                            update.callback_query.id,
-                            text="❌ Código de transação inválido.",
-                            show_alert=True
-                        )
+                        try:
+                            bot_temp.answer_callback_query(
+                                update.callback_query.id,
+                                text="❌ Código de transação inválido.",
+                                show_alert=True
+                            )
+                        except Exception as e_net:
+                            logger.warning(f"⚠️ Aviso de rede ignorado: {e_net}")
                         return {"status": "ok"}
                     
                     # Busca o pedido no banco
@@ -9651,36 +9666,48 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     ).first()
                     
                     if not pedido:
-                        bot_temp.answer_callback_query(
-                            update.callback_query.id,
-                            text="❌ Transação não encontrada. Tente novamente mais tarde.",
-                            show_alert=True
-                        )
+                        try:
+                            bot_temp.answer_callback_query(
+                                update.callback_query.id,
+                                text="❌ Transação não encontrada. Tente novamente mais tarde.",
+                                show_alert=True
+                            )
+                        except Exception as e_net:
+                            logger.warning(f"⚠️ Aviso de rede ignorado: {e_net}")
                         return {"status": "ok"}
                     
                     status = str(pedido.status).lower() if pedido.status else "pending"
                     
                     if status in ['paid', 'active', 'approved', 'completed', 'succeeded']:
                         # ✅ Pagamento confirmado
-                        bot_temp.answer_callback_query(
-                            update.callback_query.id,
-                            text="✅ Pagamento CONFIRMADO! Seu acesso está sendo liberado.",
-                            show_alert=True
-                        )
+                        try:
+                            bot_temp.answer_callback_query(
+                                update.callback_query.id,
+                                text="✅ Pagamento CONFIRMADO! Seu acesso está sendo liberado.",
+                                show_alert=True
+                            )
+                        except Exception as e_net:
+                            logger.warning(f"⚠️ Aviso de rede ignorado: {e_net}")
                     elif status == 'expired':
                         # ⏰ PIX expirado
-                        bot_temp.answer_callback_query(
-                            update.callback_query.id,
-                            text="⏰ Este PIX expirou! Por favor, gere um novo pagamento.",
-                            show_alert=True
-                        )
+                        try:
+                            bot_temp.answer_callback_query(
+                                update.callback_query.id,
+                                text="⏰ Este PIX expirou! Por favor, gere um novo pagamento.",
+                                show_alert=True
+                            )
+                        except Exception as e_net:
+                            logger.warning(f"⚠️ Aviso de rede ignorado: {e_net}")
                     else:
                         # ⏳ Ainda pendente
-                        bot_temp.answer_callback_query(
-                            update.callback_query.id,
-                            text="⏳ Pagamento ainda NÃO identificado.\n\nSe você já pagou, aguarde alguns instantes e tente novamente. O sistema verifica automaticamente.",
-                            show_alert=True
-                        )
+                        try:
+                            bot_temp.answer_callback_query(
+                                update.callback_query.id,
+                                text="⏳ Pagamento ainda NÃO identificado.\n\nSe você já pagou, aguarde alguns instantes e tente novamente. O sistema verifica automaticamente.",
+                                show_alert=True
+                            )
+                        except Exception as e_net:
+                            logger.warning(f"⚠️ Aviso de rede ignorado: {e_net}")
                     
                 except Exception as e:
                     logger.error(f"❌ Erro no handler check_payment_: {e}", exc_info=True)
@@ -9769,9 +9796,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         # Fallback caso falhe HTML ou Mídia
                         sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk, protect_content=_protect)
 
-                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão (via callback linha 6256-6260)
-                    # Motivo: Timer automático deletava mensagem ANTES do usuário clicar, parando o fluxo
-                    # A destruição agora acontece corretamente quando o usuário clica no botão do passo anterior
+                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão
                     # if sent_msg and target_step.autodestruir:
                     #     tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 20
                     #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
