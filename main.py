@@ -3447,6 +3447,11 @@ def get_plataforma_pushin_id(db: Session) -> str:
 # =========================================================
 # 🔌 INTEGRAÇÃO SYNC PAY (NOVA)
 # =========================================================
+# =========================================================
+# 🔌 INTEGRAÇÃO SYNC PAY (NOVA)
+# =========================================================
+SYNC_PAY_BASE_URL = "https://api.syncpayments.com.br"
+
 async def obter_token_syncpay(bot, db: Session):
     """
     Verifica se o token da Sync Pay ainda é válido.
@@ -3460,7 +3465,7 @@ async def obter_token_syncpay(bot, db: Session):
         if bot.syncpay_token_expires_at > (agora + timedelta(minutes=5)):
             return bot.syncpay_access_token
 
-    url = "https://syncpay.apidog.io/api/partner/v1/auth-token"
+    url = f"{SYNC_PAY_BASE_URL}/api/partner/v1/auth-token"
     payload = {
         "client_id": bot.syncpay_client_id,
         "client_secret": bot.syncpay_client_secret
@@ -3469,11 +3474,15 @@ async def obter_token_syncpay(bot, db: Session):
     
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, headers=headers, timeout=10)
+            response = await client.post(url, json=payload, headers=headers, timeout=15)
         
+        if response.status_code != 200:
+            logger.error(f"❌ [SYNC PAY ERRO AUTH] HTTP {response.status_code}: {response.text}")
+            return None
+            
         data = response.json()
         
-        if response.status_code == 200 and "access_token" in data:
+        if "access_token" in data:
             novo_token = data["access_token"]
             expires_in_seconds = data.get("expires_in", 3600)
             
@@ -3485,10 +3494,10 @@ async def obter_token_syncpay(bot, db: Session):
             db.commit()
             return novo_token
         else:
-            logger.error(f"[SYNC PAY ERRO AUTH] Bot {bot.id}: {data}")
+            logger.error(f"❌ [SYNC PAY ERRO AUTH] Resposta sem token: {data}")
             return None
     except Exception as e:
-        logger.error(f"[SYNC PAY EXCEPTION AUTH] {str(e)}")
+        logger.error(f"❌ [SYNC PAY EXCEPTION AUTH] {type(e).__name__}: {str(e)}")
         return None
 
 
@@ -3512,7 +3521,7 @@ async def gerar_pix_syncpay(
         logger.error(f"❌ [SYNC PAY] Falha de autenticação. Verifique as credenciais do bot {bot_id}.")
         return None
         
-    url = "https://syncpay.apidog.io/api/partner/v1/cash-in"
+    url = f"{SYNC_PAY_BASE_URL}/api/partner/v1/cash-in"
     
     # ⚠️ REGRA DO SPLIT SYNC PAY (Exige PORCENTAGEM inteira)
     split_array = []
@@ -3565,9 +3574,13 @@ async def gerar_pix_syncpay(
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers, timeout=15)
         
+        if response.status_code != 200:
+            logger.error(f"❌ [SYNC PAY ERRO PIX] HTTP {response.status_code}: {response.text}")
+            return None
+
         data = response.json()
         
-        if response.status_code == 200 and "pix_code" in data:
+        if "pix_code" in data:
             identifier = data.get("identifier", transaction_id)
             logger.info(f"✅ [SYNC PAY] PIX gerado com sucesso! ID: {identifier}")
             
@@ -3589,11 +3602,11 @@ async def gerar_pix_syncpay(
                 "qr_code": data["pix_code"]
             }
         else:
-            logger.error(f"❌ [SYNC PAY ERRO PIX] {data}")
+            logger.error(f"❌ [SYNC PAY ERRO PIX] Resposta sem PIX: {data}")
             return None
             
     except Exception as e:
-        logger.error(f"❌ [SYNC PAY EXCEPTION PIX] {str(e)}")
+        logger.error(f"❌ [SYNC PAY EXCEPTION PIX] {type(e).__name__}: {str(e)}")
         return None
 
 # =========================================================
