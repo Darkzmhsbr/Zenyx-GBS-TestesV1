@@ -3475,7 +3475,7 @@ def get_plataforma_syncpay_id(db: Session) -> str:
 # 🔄 PROCESSAMENTO BACKGROUND DE REMARKETING
 # =========================================================
 # =========================================================
-# 🔌 INTEGRAÇÃO SYNC PAY (CORRIGIDA - FUSO HORÁRIO)
+# 🔌 INTEGRAÇÃO SYNC PAY (NOVA)
 # =========================================================
 SYNC_PAY_BASE_URL = "https://api.syncpayments.com.br"
 
@@ -3489,8 +3489,6 @@ async def obter_token_syncpay(bot, db: Session):
     # Se o token existir e a data de expiração for maior que agora (margem de 5 min)
     if bot.syncpay_access_token and bot.syncpay_token_expires_at:
         from datetime import timedelta
-        
-        # 🔥 CORREÇÃO MESTRE: Trata o problema de naive vs aware datetime do banco
         expires_at = bot.syncpay_token_expires_at
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=agora.tzinfo)
@@ -3561,47 +3559,49 @@ async def gerar_pix_syncpay(
     # 🔥 Lógica de Split: Converte Centavos em Porcentagem para a Plataforma
     # ======================================================================
     split_array = []
-    if bot.owner_id:
+    
+    # Pega o ID da plataforma Zenyx
+    plataforma_id = get_plataforma_syncpay_id(db)
+    
+    # 🛡️ PROTEÇÃO 1: Se o Bot usa a MESMA chave da plataforma, NUNCA faz split para não dar Erro 500!
+    if plataforma_id and bot.syncpay_client_id and bot.syncpay_client_id.strip() == plataforma_id.strip():
+        logger.info(f"ℹ️ [SYNC PAY] O Bot usa a mesma chave Mestra da Plataforma. PIX SEM split.")
+    
+    elif bot.owner_id and plataforma_id:
         from database import User
         owner = db.query(User).filter(User.id == bot.owner_id).first()
         
         if owner:
-            # 1. Pega o ID da plataforma Zenyx
-            plataforma_id = get_plataforma_syncpay_id(db)
-            
-            if plataforma_id:
-                # 2. Proteção para não cobrar taxa da própria plataforma
-                owner_sync_id = getattr(owner, 'syncpay_client_id', None)
-                if owner_sync_id and owner_sync_id.strip() == plataforma_id.strip():
-                    logger.info(f"ℹ️ [SYNC PAY] Owner é a própria plataforma. PIX SEM split.")
-                else:
-                    # 3. Descobre o valor da taxa em centavos (Padrão 60)
-                    taxa_centavos = owner.taxa_venda
-                    if not taxa_centavos:
-                        try:
-                            cfg_fee = db.query(SystemConfig).filter(SystemConfig.key == "default_fee").first()
-                            taxa_centavos = int(cfg_fee.value) if cfg_fee and cfg_fee.value else 60
-                        except:
-                            taxa_centavos = 60
-                            
-                    # 4. Converte os centavos em PORCENTAGEM (Exigência da Sync Pay)
-                    taxa_reais = taxa_centavos / 100.0
-                    porcentagem = int((taxa_reais / valor_float) * 100)
-                    
-                    if porcentagem < 1 and taxa_reais > 0:
-                        porcentagem = 1 # Mínimo de 1%
-                        
-                    # Segurança: Não cobra mais de 50% de taxa
-                    if porcentagem >= 50:
-                        logger.warning(f"⚠️ [SYNC PAY] Taxa muito alta ({porcentagem}%). Split ignorado.")
-                    elif porcentagem > 0:
-                        split_array.append({
-                            "percentage": porcentagem,
-                            "user_id": plataforma_id
-                        })
-                        logger.info(f"✅ [SYNC PAY DEBUG] Split configurado: {porcentagem}% para a Plataforma ({plataforma_id[:8]}...)")
+            # 🛡️ PROTEÇÃO 2: Se o usuário dono do bot configurou o próprio ID igual ao da plataforma
+            owner_sync_id = getattr(owner, 'syncpay_client_id', None)
+            if owner_sync_id and owner_sync_id.strip() == plataforma_id.strip():
+                logger.info(f"ℹ️ [SYNC PAY] Owner é a própria plataforma. PIX SEM split.")
             else:
-                logger.warning("⚠️ [SYNC PAY] Client ID da plataforma não configurado. PIX SEM split.")
+                # Descobre o valor da taxa em centavos (Padrão 60)
+                taxa_centavos = owner.taxa_venda
+                if not taxa_centavos:
+                    try:
+                        cfg_fee = db.query(SystemConfig).filter(SystemConfig.key == "default_fee").first()
+                        taxa_centavos = int(cfg_fee.value) if cfg_fee and cfg_fee.value else 60
+                    except:
+                        taxa_centavos = 60
+                        
+                # Converte os centavos em PORCENTAGEM
+                taxa_reais = taxa_centavos / 100.0
+                porcentagem = int((taxa_reais / valor_float) * 100)
+                
+                if porcentagem < 1 and taxa_reais > 0:
+                    porcentagem = 1 # Mínimo de 1%
+                    
+                # Segurança: Não cobra mais de 50% de taxa
+                if porcentagem >= 50:
+                    logger.warning(f"⚠️ [SYNC PAY] Taxa muito alta ({porcentagem}%). Split ignorado.")
+                elif porcentagem > 0:
+                    split_array.append({
+                        "percentage": porcentagem,
+                        "user_id": plataforma_id
+                    })
+                    logger.info(f"✅ [SYNC PAY DEBUG] Split configurado: {porcentagem}% para a Plataforma ({plataforma_id[:8]}...)")
 
     # Domínio do seu Webhook
     raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
@@ -3632,9 +3632,9 @@ async def gerar_pix_syncpay(
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers, timeout=15)
         
-        # 🔥 ESCUDO ANTI-FALHAS: Se der 422 (Erro de Split), tenta de novo sem split para salvar a venda!
-        if response.status_code == 422 and "split" in payload:
-            logger.warning(f"⚠️ [SYNC PAY] Erro no ID do Split ({response.text}). Retentando SEM split para salvar a venda!")
+        # 🛡️ ESCUDO SUPREMO: Se der 422 ou 500, e tiver split no payload, retenta SEM split para salvar a venda!
+        if response.status_code in [422, 500] and "split" in payload:
+            logger.warning(f"⚠️ [SYNC PAY] Erro {response.status_code} ({response.text}). Retentando SEM split para salvar a venda!")
             del payload["split"]
             async with httpx.AsyncClient() as fallback_client:
                 response = await fallback_client.post(url, json=payload, headers=headers, timeout=15)
@@ -3672,7 +3672,6 @@ async def gerar_pix_syncpay(
     except Exception as e:
         logger.error(f"❌ [SYNC PAY EXCEPTION PIX] {type(e).__name__}: {str(e)}")
         return None
-
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (DINÂMICA)
 # =========================================================
