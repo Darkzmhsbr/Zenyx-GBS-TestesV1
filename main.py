@@ -3689,7 +3689,6 @@ async def gerar_pix_syncpay(
     except Exception as e:
         logger.error(f"❌ [SYNC PAY EXCEPTION PIX] {type(e).__name__}: {str(e)}")
         return None
-        
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (DINÂMICA)
 # =========================================================
