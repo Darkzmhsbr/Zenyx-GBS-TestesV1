@@ -4341,19 +4341,18 @@ def notificar_admin_principal(bot_db: BotModel, mensagem: str):
         except Exception as e_send:
             logger.error(f"Erro ao notificar admin {chat_id}: {e_send}")
 
-# --- ROTAS DE INTEGRAÇÃO (SALVAR TOKEN) ---
-# =========================================================
-# 🔌 ROTAS DE INTEGRAÇÃO (SALVAR TOKEN PUSHIN PAY)
-# =========================================================
-
-# Modelo para receber o JSON do frontend
 # =========================================================
 # 🔌 ROTAS DE INTEGRAÇÃO (AGORA POR BOT)
 # =========================================================
 
-# Modelo para receber o JSON do frontend
+# Modelo para receber o JSON do frontend (PushinPay e WiinPay)
 class IntegrationUpdate(BaseModel):
     token: str
+
+# 🆕 NOVO: Modelo para receber os dados duplos da Sync Pay do frontend
+class SyncPayIntegrationUpdate(BaseModel):
+    client_id: str
+    client_secret: str
 
 @app.get("/api/admin/integrations/pushinpay/{bot_id}")
 def get_pushin_status(bot_id: int, db: Session = Depends(get_db)):
@@ -4456,14 +4455,74 @@ def save_wiinpay_token(bot_id: int, data: IntegrationUpdate, db: Session = Depen
     return {"status": "conectado", "msg": f"Integração WiinPay salva para {bot.nome}!"}
 
 # =========================================================
+# 🔌 ROTAS DE INTEGRAÇÃO SYNC PAY (NOVA - POR BOT)
+# =========================================================
+
+@app.get("/api/admin/integrations/syncpay/{bot_id}")
+def get_syncpay_status(bot_id: int, db: Session = Depends(get_db)):
+    """Retorna status da integração Sync Pay para um bot específico."""
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    
+    if not bot:
+        return {"status": "erro", "msg": "Bot não encontrado"}
+    
+    client_id = bot.syncpay_client_id
+
+    if not client_id:
+        return {"status": "desconectado", "client_id_mask": "", "client_secret_mask": ""}
+    
+    mask_id = f"{client_id[:8]}...{client_id[-4:]}" if len(client_id) > 12 else "****"
+    mask_secret = f"****...{bot.syncpay_client_secret[-4:]}" if bot.syncpay_client_secret else "****"
+    
+    return {
+        "status": "conectado", 
+        "client_id_mask": mask_id,
+        "client_secret_mask": mask_secret,
+        "ativo": bot.syncpay_ativo
+    }
+
+@app.post("/api/admin/integrations/syncpay/{bot_id}")
+def save_syncpay_token(bot_id: int, data: SyncPayIntegrationUpdate, db: Session = Depends(get_db)):
+    """Salva credenciais duplas da Sync Pay para um bot específico."""
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
+    client_id_limpo = data.client_id.strip()
+    client_secret_limpo = data.client_secret.strip()
+    
+    if len(client_id_limpo) < 10 or len(client_secret_limpo) < 10:
+        return {"status": "erro", "msg": "Credenciais muito curtas ou inválidas."}
+
+    bot.syncpay_client_id = client_id_limpo
+    bot.syncpay_client_secret = client_secret_limpo
+    # Zera o token temporário para forçar uma nova geração com as novas chaves
+    bot.syncpay_access_token = None
+    bot.syncpay_token_expires_at = None
+    bot.syncpay_ativo = True  # Ativa automaticamente ao salvar
+    
+    # Lógica de definição de Gateway
+    if not bot.gateway_principal or bot.gateway_principal == "":
+        bot.gateway_principal = "syncpay"
+    elif bot.gateway_principal != "syncpay" and not bot.gateway_fallback:
+        bot.gateway_fallback = "syncpay"
+    
+    db.commit()
+    
+    logger.info(f"🔑 [SYNC PAY] Credenciais salvas para BOT {bot.nome}: {client_id_limpo[:8]}...")
+    
+    return {"status": "conectado", "msg": f"Integração Sync Pay salva para {bot.nome}!"}
+
+# =========================================================
 # 🔄 ROTAS DE CONFIGURAÇÃO MULTI-GATEWAY (POR BOT)
 # =========================================================
 
 class GatewayConfigUpdate(BaseModel):
-    gateway_principal: Optional[str] = None   # "pushinpay" ou "wiinpay"
-    gateway_fallback: Optional[str] = None    # "pushinpay", "wiinpay" ou None
+    gateway_principal: Optional[str] = None   # "pushinpay", "wiinpay" ou "syncpay"
+    gateway_fallback: Optional[str] = None    # "pushinpay", "wiinpay", "syncpay" ou None
     pushinpay_ativo: Optional[bool] = None
     wiinpay_ativo: Optional[bool] = None
+    syncpay_ativo: Optional[bool] = None      # 🆕 NOVO: Ativador da Sync Pay
 
 @app.get("/api/admin/integrations/gateway-config/{bot_id}")
 def get_gateway_config(bot_id: int, db: Session = Depends(get_db)):
@@ -4486,6 +4545,11 @@ def get_gateway_config(bot_id: int, db: Session = Depends(get_db)):
             "ativo": bot.wiinpay_ativo or False,
             "configurado": bool(bot.wiinpay_api_key),
             "token_mask": f"{bot.wiinpay_api_key[:8]}...{bot.wiinpay_api_key[-6:]}" if bot.wiinpay_api_key and len(bot.wiinpay_api_key) > 14 else ""
+        },
+        "syncpay": {
+            "ativo": bot.syncpay_ativo or False,
+            "configurado": bool(bot.syncpay_client_id),
+            "token_mask": f"{bot.syncpay_client_id[:8]}...{bot.syncpay_client_id[-4:]}" if bot.syncpay_client_id and len(bot.syncpay_client_id) > 12 else ""
         }
     }
 
@@ -4497,12 +4561,12 @@ def update_gateway_config(bot_id: int, config: GatewayConfigUpdate, db: Session 
         raise HTTPException(status_code=404, detail="Bot não encontrado")
     
     if config.gateway_principal is not None:
-        if config.gateway_principal not in ["pushinpay", "wiinpay"]:
-            raise HTTPException(status_code=400, detail="Gateway principal inválida. Use 'pushinpay' ou 'wiinpay'.")
+        if config.gateway_principal not in ["pushinpay", "wiinpay", "syncpay"]:
+            raise HTTPException(status_code=400, detail="Gateway principal inválida. Use 'pushinpay', 'wiinpay' ou 'syncpay'.")
         bot.gateway_principal = config.gateway_principal
         
     if config.gateway_fallback is not None:
-        if config.gateway_fallback not in ["pushinpay", "wiinpay", ""]:
+        if config.gateway_fallback not in ["pushinpay", "wiinpay", "syncpay", ""]:
             raise HTTPException(status_code=400, detail="Gateway fallback inválida.")
         bot.gateway_fallback = config.gateway_fallback if config.gateway_fallback != "" else None
         
@@ -4515,6 +4579,11 @@ def update_gateway_config(bot_id: int, config: GatewayConfigUpdate, db: Session 
         if config.wiinpay_ativo and not bot.wiinpay_api_key:
             raise HTTPException(status_code=400, detail="Não é possível ativar WiinPay sem API Key configurada.")
         bot.wiinpay_ativo = config.wiinpay_ativo
+        
+    if config.syncpay_ativo is not None:
+        if config.syncpay_ativo and not bot.syncpay_client_id:
+            raise HTTPException(status_code=400, detail="Não é possível ativar Sync Pay sem Credenciais configuradas.")
+        bot.syncpay_ativo = config.syncpay_ativo
     
     db.commit()
     
@@ -4526,7 +4595,8 @@ def update_gateway_config(bot_id: int, config: GatewayConfigUpdate, db: Session 
         "gateway_principal": bot.gateway_principal,
         "gateway_fallback": bot.gateway_fallback,
         "pushinpay_ativo": bot.pushinpay_ativo,
-        "wiinpay_ativo": bot.wiinpay_ativo
+        "wiinpay_ativo": bot.wiinpay_ativo,
+        "syncpay_ativo": bot.syncpay_ativo
     }
 
 # =========================================================
@@ -4568,6 +4638,31 @@ def update_wiinpay_token(bot_id: int, data: IntegrationUpdate, db: Session = Dep
     
     logger.info(f"🔄 [WIINPAY] API Key EDITADA para BOT {bot.nome}: {old_mask} → {api_key_limpa[:8]}...")
     return {"status": "conectado", "msg": f"API Key WiinPay atualizada para {bot.nome}!"}
+
+@app.put("/api/admin/integrations/syncpay/{bot_id}")
+def update_syncpay_token(bot_id: int, data: SyncPayIntegrationUpdate, db: Session = Depends(get_db)):
+    """Permite editar as credenciais da Sync Pay de um bot já configurado."""
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
+    client_id_limpo = data.client_id.strip()
+    client_secret_limpo = data.client_secret.strip()
+    
+    if len(client_id_limpo) < 10 or len(client_secret_limpo) < 10:
+        return {"status": "erro", "msg": "Credenciais muito curtas ou inválidas."}
+
+    old_mask = f"{bot.syncpay_client_id[:8]}..." if bot.syncpay_client_id else "nenhum"
+    
+    bot.syncpay_client_id = client_id_limpo
+    bot.syncpay_client_secret = client_secret_limpo
+    bot.syncpay_access_token = None # Força renovação
+    bot.syncpay_token_expires_at = None
+    
+    db.commit()
+    
+    logger.info(f"🔄 [SYNC PAY] Credenciais EDITADAS para BOT {bot.nome}: {old_mask} → {client_id_limpo[:8]}...")
+    return {"status": "conectado", "msg": f"Credenciais Sync Pay atualizadas para {bot.nome}!"}
 
 # --- MODELOS ---
 class BotCreate(BaseModel):
