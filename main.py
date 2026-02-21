@@ -14579,6 +14579,22 @@ def impersonate_user(
 # ⚙️ CONFIG GLOBAL + BROADCAST (SUPER ADMIN)
 # =========================================================
 
+# 🔥 ATUALIZAÇÃO DO SCHEMA: Adicionado o campo master_syncpay_client_id
+# Se este schema já existir em outra parte do seu código, substitua por este
+# ou apenas certifique-se de que a linha do syncpay está nele.
+class SystemConfigSchema(BaseModel):
+    default_fee: int = 60
+    master_pushin_pay_id: Optional[str] = ""
+    master_wiinpay_user_id: Optional[str] = ""
+    master_syncpay_client_id: Optional[str] = ""  # 🆕 NOVO: Chave Mestra Sync Pay
+    maintenance_mode: bool = False
+
+class BroadcastSchema(BaseModel):
+    title: str
+    message: str
+    type: str = "info"
+
+
 @app.get("/api/admin/config")
 def get_global_config(
     db: Session = Depends(get_db), 
@@ -14595,6 +14611,7 @@ def get_global_config(
         "default_fee": int(config_map.get("default_fee", "60")),
         "master_pushin_pay_id": config_map.get("master_pushin_pay_id", ""),
         "master_wiinpay_user_id": config_map.get("master_wiinpay_user_id", ""),
+        "master_syncpay_client_id": config_map.get("master_syncpay_client_id", ""), # 🆕 ADICIONADO AQUI
         "maintenance_mode": config_map.get("maintenance_mode", "false") == "true"
     }
 
@@ -14620,12 +14637,14 @@ def update_global_config(
         upsert("default_fee", config.default_fee)
         upsert("master_pushin_pay_id", config.master_pushin_pay_id)
         upsert("master_wiinpay_user_id", config.master_wiinpay_user_id)
+        upsert("master_syncpay_client_id", config.master_syncpay_client_id) # 🆕 ADICIONADO AQUI
         upsert("maintenance_mode", "true" if config.maintenance_mode else "false")
         db.commit()
         
         logger.info(f"⚙️ Config global atualizada por {current_user.username}")
         logger.info(f"  master_pushin_pay_id: {config.master_pushin_pay_id}")
         logger.info(f"  master_wiinpay_user_id: {config.master_wiinpay_user_id}")
+        logger.info(f"  master_syncpay_client_id: {config.master_syncpay_client_id}") # 🆕 ADICIONADO AQUI
         return {"message": "Configurações salvas com sucesso!"}
     except Exception as e:
         db.rollback()
@@ -14662,7 +14681,6 @@ def send_broadcast(
         db.rollback()
         logger.error(f"❌ Erro broadcast: {e}")
         raise HTTPException(500, str(e))
-
 
 # ========================================================================
 # ENDPOINTS PÚBLICOS PARA LANDING PAGE
