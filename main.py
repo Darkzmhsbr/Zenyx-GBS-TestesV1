@@ -3632,6 +3632,13 @@ async def gerar_pix_syncpay(
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json=payload, headers=headers, timeout=15)
         
+        # 🔥 ESCUDO ANTI-FALHAS: Se der 422 (Erro de Split), tenta de novo sem split para salvar a venda!
+        if response.status_code == 422 and "split" in payload:
+            logger.warning(f"⚠️ [SYNC PAY] Erro no ID do Split ({response.text}). Retentando SEM split para salvar a venda!")
+            del payload["split"]
+            async with httpx.AsyncClient() as fallback_client:
+                response = await fallback_client.post(url, json=payload, headers=headers, timeout=15)
+
         if response.status_code != 200:
             logger.error(f"❌ [SYNC PAY ERRO PIX] HTTP {response.status_code}: {response.text}")
             return None
