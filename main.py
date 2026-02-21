@@ -8434,6 +8434,9 @@ async def webhook_wiinpay(request: Request, db: Session = Depends(get_db)):
             pass
         return {"status": "error"}
 
+# =========================================================
+# 💳 WEBHOOK PIX (UNIFICADO) - V5.0 COM RETRY
+# =========================================================
 @app.post("/webhook/pix")
 async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     """
@@ -8446,6 +8449,9 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         # 1. EXTRAIR PAYLOAD
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8")
+        
+        # 🔥 LOG INSERIDO PARA DEBUGGAR QUALQUER GATEWAY
+        logger.info(f"📩 [WEBHOOK PIX] Payload recebido: {body_str[:500]}")
         
         try:
             data = json.loads(body_str)
@@ -8463,20 +8469,41 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         # Tenta extrair dados do payload (algumas APIs jogam tudo num dict "data")
         payload_data = data.get("data", data) if isinstance(data.get("data"), dict) else data
         
-        # id=PushinPay, paymentId=WiinPay, identifier=SyncPay, external_reference=Fallback
+        # 🔥 Busca abrangente pelo ID do pedido (Pega da Raiz e do Payload Data)
         raw_tx_id = (
             payload_data.get("id") or 
             payload_data.get("paymentId") or 
             payload_data.get("identifier") or 
             payload_data.get("external_reference") or 
-            payload_data.get("uuid")
+            payload_data.get("transaction_id") or 
+            payload_data.get("uuid") or
+            data.get("id") or
+            data.get("identifier") or
+            data.get("transaction_id")
         )
-        
         tx_id = str(raw_tx_id).lower() if raw_tx_id else None
-        status_pix = str(payload_data.get("status", "")).lower()
         
-        # added 'completed' for SyncPay
-        if status_pix not in ["paid", "approved", "completed", "succeeded"]:
+        # 🔥 Busca abrangente pelo Status (Importante para Sync Pay que usa 'event')
+        raw_status = str(
+            payload_data.get("status") or 
+            data.get("status") or 
+            data.get("event") or 
+            payload_data.get("state") or 
+            data.get("state") or 
+            ""
+        ).lower()
+        
+        logger.info(f"🔍 [WEBHOOK PIX] TxID Extrapolado: {tx_id} | Status Lido: {raw_status}")
+        
+        # 🔥 BLINDAGEM SYNC PAY: Considera pago se o status contiver qualquer destas palavras chaves
+        is_paid = any(s in raw_status for s in ["paid", "approved", "completed", "succeeded", "confirmed", "recebido"])
+        
+        if not is_paid:
+            logger.info(f"ℹ️ [WEBHOOK PIX] Ignorado. Status não indica pagamento aprovado: {raw_status}")
+            return {"status": "ignored"}
+            
+        if not tx_id:
+            logger.warning("⚠️ [WEBHOOK PIX] Status é pago, mas não achei ID da transação no payload.")
             return {"status": "ignored"}
         
         # 3. BUSCAR PEDIDO
@@ -8489,6 +8516,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             return {"status": "ok", "msg": "Order not found"}
         
         if pedido.status in ["approved", "paid", "active"]:
+            logger.info(f"ℹ️ [WEBHOOK PIX] Pedido {tx_id} já processado anteriormente.")
             return {"status": "ok", "msg": "Already paid"}
         
         # 4. PROCESSAR PAGAMENTO (LÓGICA CRÍTICA)
@@ -8547,13 +8575,14 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             # 🔔 [NOVO] GATILHO DE NOTIFICAÇÃO PUSH ONESIGNAL (VENDA APROVADA)
             # ======================================================================
             try:
-                await enviar_push_onesignal(
-                    bot_id=pedido.bot_id, 
-                    nome_cliente=pedido.first_name, 
-                    plano=pedido.plano_nome, 
-                    valor=pedido.valor, 
-                    db=db
-                )
+                if 'enviar_push_onesignal' in globals():
+                    await enviar_push_onesignal(
+                        bot_id=pedido.bot_id, 
+                        nome_cliente=pedido.first_name, 
+                        plano=pedido.plano_nome, 
+                        valor=pedido.valor, 
+                        db=db
+                    )
             except Exception as e_push:
                 logger.error(f"❌ Erro na chamada do Push: {e_push}")
 
@@ -8623,9 +8652,6 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                             # Entrega principal (APENAS para planos normais)
                             try:
                                 # 🔥 LÓGICA V7: DEFINIÇÃO INTELIGENTE DO CANAL DE DESTINO 🔥
-                                # Se o plano tem um canal específico configurado, usa ele.
-                                # Caso contrário, usa o canal padrão configurado no Bot.
-                                
                                 canal_id_final = bot_data.id_canal_vip # Default
                                 
                                 if plano and plano.id_canal_destino and str(plano.id_canal_destino).strip() != "":
@@ -8669,8 +8695,6 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                             
                             # =========================================================
                             # 📦 FASE 2: ENTREGA DE GRUPOS EXTRAS (CATÁLOGO)
-                            # Consulta bot_groups vinculados ao plano comprado
-                            # e gera convite automático para cada um
                             # =========================================================
                             try:
                                 if plano:
@@ -8957,17 +8981,17 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             
         except Exception as e_process:
             # ERRO CRÍTICO NO PROCESSAMENTO (BANCO, DADOS, ETC)
-            logger.error(f"❌ ERRO no processamento do webhook: {e_process}")
+            logger.error(f"❌ ERRO no processamento do webhook: {e_process}", exc_info=True)
             
             # Registrar para retry (se a função existir no seu escopo global)
             if 'registrar_webhook_para_retry' in globals():
                 registrar_webhook_para_retry(
-                    webhook_type='pushinpay',
+                    webhook_type='syncpay',
                     payload=data,
                     reference_id=tx_id
                 )
             
-            # Retornar erro 500 para PushinPay tentar novamente
+            # Retornar erro 500 para gateway tentar novamente
             raise HTTPException(status_code=500, detail="Erro interno, será reprocessado")
         
     except HTTPException:
