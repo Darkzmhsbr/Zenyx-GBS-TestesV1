@@ -3475,7 +3475,7 @@ def get_plataforma_syncpay_id(db: Session) -> str:
 # 🔄 PROCESSAMENTO BACKGROUND DE REMARKETING
 # =========================================================
 # =========================================================
-# 🔌 INTEGRAÇÃO SYNC PAY (NOVA)
+# 🔌 INTEGRAÇÃO SYNC PAY (CORRIGIDA - FUSO HORÁRIO)
 # =========================================================
 SYNC_PAY_BASE_URL = "https://api.syncpayments.com.br"
 
@@ -3489,7 +3489,13 @@ async def obter_token_syncpay(bot, db: Session):
     # Se o token existir e a data de expiração for maior que agora (margem de 5 min)
     if bot.syncpay_access_token and bot.syncpay_token_expires_at:
         from datetime import timedelta
-        if bot.syncpay_token_expires_at > (agora + timedelta(minutes=5)):
+        
+        # 🔥 CORREÇÃO MESTRE: Trata o problema de naive vs aware datetime do banco
+        expires_at = bot.syncpay_token_expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=agora.tzinfo)
+            
+        if expires_at > (agora + timedelta(minutes=5)):
             return bot.syncpay_access_token
 
     url = f"{SYNC_PAY_BASE_URL}/api/partner/v1/auth-token"
@@ -3506,7 +3512,7 @@ async def obter_token_syncpay(bot, db: Session):
         if response.status_code != 200:
             logger.error(f"❌ [SYNC PAY ERRO AUTH] HTTP {response.status_code}: {response.text}")
             return None
-            
+
         data = response.json()
         
         if "access_token" in data:
@@ -3523,6 +3529,7 @@ async def obter_token_syncpay(bot, db: Session):
         else:
             logger.error(f"❌ [SYNC PAY ERRO AUTH] Resposta sem token: {data}")
             return None
+            
     except Exception as e:
         logger.error(f"❌ [SYNC PAY EXCEPTION AUTH] {type(e).__name__}: {str(e)}")
         return None
