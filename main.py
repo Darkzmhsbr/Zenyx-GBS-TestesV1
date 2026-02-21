@@ -3440,12 +3440,39 @@ def get_plataforma_pushin_id(db: Session) -> str:
     except Exception as e:
         logger.error(f"Erro ao buscar pushin_pay_id da plataforma: {e}")
         return None
-# =========================================================
-# 🔄 PROCESSAMENTO BACKGROUND DE REMARKETING
-# =========================================================
 
 # =========================================================
-# 🔌 INTEGRAÇÃO SYNC PAY (NOVA)
+# 🏢 BUSCAR SYNC PAY ID DA PLATAFORMA (ZENYX)
+# =========================================================
+def get_plataforma_syncpay_id(db: Session) -> str:
+    """
+    Retorna o client_id da plataforma Zenyx para receber as taxas via Sync Pay.
+    """
+    try:
+        # 1. Tenta buscar da SystemConfig
+        config = db.query(SystemConfig).filter(SystemConfig.key == "master_syncpay_client_id").first()
+        if config and config.value and config.value.strip():
+            return config.value.strip()
+        
+        # 2. Busca o primeiro Super Admin com syncpay_client_id configurado (Fallback)
+        from database import User
+        super_admin = db.query(User).filter(
+            User.is_superuser == True,
+            User.syncpay_client_id.isnot(None)
+        ).first()
+        
+        if super_admin and super_admin.syncpay_client_id:
+            return super_admin.syncpay_client_id
+        
+        logger.warning("⚠️ Nenhum Client ID da plataforma Sync Pay configurado! Split desabilitado.")
+        return None
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar syncpay_client_id da plataforma: {e}")
+        return None
+
+# =========================================================
+# 🔄 PROCESSAMENTO BACKGROUND DE REMARKETING
 # =========================================================
 # =========================================================
 # 🔌 INTEGRAÇÃO SYNC PAY (NOVA)
@@ -3523,27 +3550,51 @@ async def gerar_pix_syncpay(
         
     url = f"{SYNC_PAY_BASE_URL}/api/partner/v1/cash-in"
     
-    # ⚠️ REGRA DO SPLIT SYNC PAY (Exige PORCENTAGEM inteira)
+    # ======================================================================
+    # 🔥 Lógica de Split: Converte Centavos em Porcentagem para a Plataforma
+    # ======================================================================
     split_array = []
     if bot.owner_id:
         from database import User
         owner = db.query(User).filter(User.id == bot.owner_id).first()
-        if owner and owner.syncpay_client_id:
-            # Pega a taxa configurada (em centavos)
-            taxa_centavos = owner.taxa_venda or 60
-            taxa_reais = taxa_centavos / 100.0
+        
+        if owner:
+            # 1. Pega o ID da plataforma Zenyx
+            plataforma_id = get_plataforma_syncpay_id(db)
             
-            # Converte a taxa em reais para porcentagem baseada no valor do plano
-            porcentagem = int((taxa_reais / valor_float) * 100)
-            if porcentagem < 1 and taxa_reais > 0:
-                porcentagem = 1 # Mínimo de 1% se o valor for muito pequeno
-                
-            if 0 < porcentagem <= 100:
-                split_array.append({
-                    "percentage": porcentagem,
-                    "user_id": owner.syncpay_client_id
-                })
-                logger.info(f"✅ [SYNC PAY DEBUG] Split configurado: {porcentagem}% para {owner.syncpay_client_id}")
+            if plataforma_id:
+                # 2. Proteção para não cobrar taxa da própria plataforma
+                owner_sync_id = getattr(owner, 'syncpay_client_id', None)
+                if owner_sync_id and owner_sync_id.strip() == plataforma_id.strip():
+                    logger.info(f"ℹ️ [SYNC PAY] Owner é a própria plataforma. PIX SEM split.")
+                else:
+                    # 3. Descobre o valor da taxa em centavos (Padrão 60)
+                    taxa_centavos = owner.taxa_venda
+                    if not taxa_centavos:
+                        try:
+                            cfg_fee = db.query(SystemConfig).filter(SystemConfig.key == "default_fee").first()
+                            taxa_centavos = int(cfg_fee.value) if cfg_fee and cfg_fee.value else 60
+                        except:
+                            taxa_centavos = 60
+                            
+                    # 4. Converte os centavos em PORCENTAGEM (Exigência da Sync Pay)
+                    taxa_reais = taxa_centavos / 100.0
+                    porcentagem = int((taxa_reais / valor_float) * 100)
+                    
+                    if porcentagem < 1 and taxa_reais > 0:
+                        porcentagem = 1 # Mínimo de 1%
+                        
+                    # Segurança: Não cobra mais de 50% de taxa
+                    if porcentagem >= 50:
+                        logger.warning(f"⚠️ [SYNC PAY] Taxa muito alta ({porcentagem}%). Split ignorado.")
+                    elif porcentagem > 0:
+                        split_array.append({
+                            "percentage": porcentagem,
+                            "user_id": plataforma_id
+                        })
+                        logger.info(f"✅ [SYNC PAY DEBUG] Split configurado: {porcentagem}% para a Plataforma ({plataforma_id[:8]}...)")
+            else:
+                logger.warning("⚠️ [SYNC PAY] Client ID da plataforma não configurado. PIX SEM split.")
 
     # Domínio do seu Webhook
     raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
@@ -3596,7 +3647,6 @@ async def gerar_pix_syncpay(
                         )
                 except: pass
 
-            # Formato padronizado que a sua rota do Telegram espera
             return {
                 "id": identifier,
                 "qr_code": data["pix_code"]
