@@ -5143,11 +5143,12 @@ def create_notification(db: Session, user_id: int, title: str, message: str, typ
         logger.error(f"Erro ao criar notificação: {e}")
 
 # =========================================================
-# 🔔 SISTEMA DE NOTIFICAÇÕES PUSH (ONESIGNAL) - API V2 OFICIAL
+# 🔔 SISTEMA DE NOTIFICAÇÕES PUSH (ONESIGNAL) - VARIÁVEIS DE AMBIENTE
 # =========================================================
 async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valor: float, db: Session):
     """
     Dispara notificação Push para o celular/PC do dono do bot.
+    As chaves estão protegidas nas variáveis de ambiente do Railway.
     """
     try:
         # 1. Busca o dono do bot
@@ -5159,16 +5160,21 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         if not owner or not owner.username: 
             return
             
-        # 2. Suas Credenciais (A CHAVE NOVA V2 QUE VOCÊ COPIOU)
-        app_id = "a80e6196-67d7-4cd7-ab38-045790d8419c"
-        rest_api_key = "os_v2_app_vahgdfth25gnpkzyarlzbwcbtrz35avbncteavuyg6ygsxws5dn2rx6d4pbyz7oym3fr7fon6bjwz55cxt4pzo2hu6qdbf3634x6xli"
+        # 2. Puxa as Credenciais Seguras do Servidor (Railway)
+        app_id = os.getenv("ONESIGNAL_APP_ID")
+        rest_api_key = os.getenv("ONESIGNAL_REST_API_KEY")
         
-        # 3. URL da API V2 e Cabeçalho 'key' Exigido pela Documentação
+        # Trava de segurança: Se você esquecer de colocar no Railway, ele avisa no log e não quebra.
+        if not app_id or not rest_api_key:
+            logger.warning("⚠️ [PUSH ONESIGNAL] Chaves não configuradas no Railway. Ignorando envio.")
+            return
+            
+        # 3. URL da API V2 e Cabeçalho 'key'
         url = "https://api.onesignal.com/notifications"
         headers = {
             "accept": "application/json",
             "content-type": "application/json",
-            "Authorization": f"key {rest_api_key}" # 🔥 Aqui está o segredo da V2: palavra 'key'
+            "Authorization": f"key {rest_api_key.strip()}" # 🔥 Blindado e formatado
         }
         
         # 4. Formata a mensagem
@@ -5178,9 +5184,9 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         titulo = "💰 NOVA VENDA APROVADA!"
         mensagem = f"O usuário {primeiro_nome} assinou o {plano} por R$ {valor_formatado}!"
         
-        # 5. Payload Moderno
+        # 5. Payload Moderno V2
         payload = {
-            "app_id": app_id,
+            "app_id": app_id.strip(),
             "target_channel": "push",
             "include_external_user_ids": [str(owner.username)],
             "include_aliases": {"external_id": [str(owner.username)]},
@@ -5193,7 +5199,7 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
             response = await http_client.post(url, json=payload, headers=headers, timeout=10.0)
             
             if response.status_code == 200:
-                logger.info(f"✅ [PUSH ONESIGNAL] SUCESSO ABSOLUTO V2 para {owner.username}! Resposta: {response.text}")
+                logger.info(f"✅ [PUSH ONESIGNAL] SUCESSO ABSOLUTO para {owner.username}! Resposta: {response.text}")
             else:
                 logger.error(f"❌ [PUSH ONESIGNAL] Código de Erro: {response.status_code} | Resposta: {response.text}")
         
