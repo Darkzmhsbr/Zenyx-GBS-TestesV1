@@ -1535,6 +1535,131 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
 # CONFIGURAÇÃO DO SCHEDULER (MOVIDO PARA CÁ)
 # ============================================================
 
+# =========================================================
+# 🔄 SYNC PAY POLLING: VERIFICAR PAGAMENTOS PENDENTES
+# =========================================================
+async def verificar_pagamentos_syncpay():
+    """
+    🔥 SOLUÇÃO DEFINITIVA: Consulta a API da Sync Pay para verificar
+    se transações pendentes já foram pagas.
+    
+    A Sync Pay NEM SEMPRE envia o webhook de confirmação (cashin.update).
+    Este job roda a cada 30 segundos e faz polling ativo.
+    """
+    db = SessionLocal()
+    try:
+        # Buscar pedidos PENDENTES que usaram Sync Pay (criados nas últimas 2 horas)
+        from datetime import timedelta
+        limite = now_brazil() - timedelta(hours=2)
+        
+        pedidos_pendentes = db.query(Pedido).filter(
+            Pedido.status == "pending",
+            Pedido.gateway_usada == "syncpay",
+            Pedido.created_at >= limite
+        ).all()
+        
+        if not pedidos_pendentes:
+            return  # Nada para verificar
+        
+        logger.info(f"🔄 [SYNCPAY-POLL] Verificando {len(pedidos_pendentes)} pedidos pendentes...")
+        
+        for pedido in pedidos_pendentes:
+            try:
+                # Buscar o bot para obter credenciais
+                bot = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
+                if not bot or not bot.syncpay_client_id:
+                    continue
+                
+                # Obter token da Sync Pay
+                token = await obter_token_syncpay(bot, db)
+                if not token:
+                    continue
+                
+                # Consultar status da transação na API
+                tx_id = pedido.transaction_id or pedido.txid
+                if not tx_id:
+                    continue
+                
+                url = f"{SYNC_PAY_BASE_URL}/api/partner/v1/transaction/{tx_id}"
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json"
+                }
+                
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, headers=headers, timeout=10)
+                
+                if response.status_code != 200:
+                    logger.warning(f"⚠️ [SYNCPAY-POLL] Erro ao consultar {tx_id}: HTTP {response.status_code}")
+                    continue
+                
+                resp_data = response.json()
+                tx_data = resp_data.get("data", resp_data)
+                status_api = str(tx_data.get("status", "")).lower()
+                
+                logger.info(f"🔍 [SYNCPAY-POLL] Pedido #{pedido.id} ({tx_id[:12]}...): status = {status_api}")
+                
+                if status_api == "completed":
+                    logger.info(f"✅ [SYNCPAY-POLL] PAGAMENTO CONFIRMADO! Pedido #{pedido.id}. Processando entrega...")
+                    
+                    # Simular webhook_pix internamente
+                    try:
+                        import io
+                        fake_payload = json.dumps({
+                            "data": {
+                                "id": tx_id,
+                                "status": "completed",
+                                "amount": pedido.valor
+                            }
+                        }).encode("utf-8")
+                        
+                        scope = {
+                            "type": "http",
+                            "method": "POST",
+                            "path": "/webhook/pix",
+                            "headers": [
+                                (b"content-type", b"application/json"),
+                                (b"event", b"cashin.update"),
+                            ],
+                        }
+                        
+                        class FakeReceive:
+                            def __init__(self, body):
+                                self._body = body
+                                self._sent = False
+                            async def __call__(self):
+                                if not self._sent:
+                                    self._sent = True
+                                    return {"type": "http.request", "body": self._body}
+                                return {"type": "http.disconnect"}
+                        
+                        fake_request = Request(scope, receive=FakeReceive(fake_payload))
+                        
+                        # Usar uma sessão nova para não conflitar
+                        db_new = SessionLocal()
+                        try:
+                            result = await webhook_pix(fake_request, db_new)
+                            logger.info(f"✅ [SYNCPAY-POLL] Resultado: {result}")
+                        finally:
+                            db_new.close()
+                    
+                    except Exception as e_process:
+                        logger.error(f"❌ [SYNCPAY-POLL] Erro ao processar pedido #{pedido.id}: {e_process}", exc_info=True)
+                
+                elif status_api == "failed":
+                    pedido.status = "failed"
+                    db.commit()
+                    logger.info(f"❌ [SYNCPAY-POLL] Pedido #{pedido.id} marcado como FAILED")
+                
+            except Exception as e_pedido:
+                logger.error(f"❌ [SYNCPAY-POLL] Erro ao verificar pedido #{pedido.id}: {e_pedido}")
+                continue
+        
+    except Exception as e:
+        logger.error(f"❌ [SYNCPAY-POLL] Erro geral: {e}")
+    finally:
+        db.close()
+
 scheduler = AsyncIOScheduler(timezone='America/Sao_Paulo')
 
 # Adicionar jobs
@@ -1565,6 +1690,16 @@ scheduler.add_job(
 logger.info("✅ [SCHEDULER] Job de vencimentos agendado (5 min)")
 logger.info("✅ [SCHEDULER] Job de retry de webhooks agendado (1 min)")
 logger.info("✅ [SCHEDULER] Job de cleanup de remarketing agendado (1h)")
+
+# 🔥 SYNC PAY POLLING: Verifica pagamentos pendentes a cada 30s
+scheduler.add_job(
+    verificar_pagamentos_syncpay,
+    'interval',
+    seconds=30,
+    id='syncpay_polling',
+    replace_existing=True
+)
+logger.info("✅ [SCHEDULER] Job de polling Sync Pay agendado (30s)")
 
 # ========================================
 # 🔧 AUXILIAR: DELETE ATRASADO (MENSAGEM FINAL)
@@ -8458,7 +8593,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         except:
             pass
         
-        # 🔥 LOG INSERIDO PARA DEBUGGAR QUALQUER GATEWAY
+        # 🔥 LOG COMPLETO PARA DEBUG
         logger.info(f"📩 [WEBHOOK PIX] Payload recebido: {body_str[:500]}")
         if header_event:
             logger.info(f"📩 [WEBHOOK PIX] Header event: {header_event}")
@@ -8476,10 +8611,9 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                 return {"status": "ignored"}
         
         # 2. VALIDAR STATUS E ID (Suporta múltiplas Gateways)
-        # Tenta extrair dados do payload (Sync Pay envolve tudo em "data": {...})
         payload_data = data.get("data", data) if isinstance(data.get("data"), dict) else data
         
-        # 🔥 Busca abrangente pelo ID do pedido (Pega da Raiz e do Payload Data)
+        # 🔥 Busca abrangente pelo ID do pedido
         raw_tx_id = (
             payload_data.get("id") or 
             payload_data.get("paymentId") or 
@@ -8487,6 +8621,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             payload_data.get("reference_id") or
             payload_data.get("external_reference") or 
             payload_data.get("transaction_id") or 
+            payload_data.get("idtransaction") or
             payload_data.get("uuid") or
             data.get("id") or
             data.get("identifier") or
@@ -8495,76 +8630,58 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         )
         tx_id = str(raw_tx_id).lower() if raw_tx_id else None
         
-        # 🔥 Busca abrangente pelo Status 
-        # PRIORIDADE: 1) header event (Sync Pay), 2) body status, 3) body event
-        raw_status = ""
+        # 🔥 LEITURA INTELIGENTE DO STATUS
+        # Sync Pay: header event pode ser "cashin.create" ou "cashin.update"
+        # Sync Pay: body status pode ser "WAITING_FOR_APPROVAL", "completed", "pending"
+        # PushinPay/WiinPay: body status é "paid", "approved", etc
         
-        # Sync Pay envia o tipo de evento no HEADER, não no body
-        if header_event:
-            raw_status = header_event.lower()
+        inner_status = str(payload_data.get("status") or data.get("status") or "").lower()
+        header_evt_lower = header_event.lower().strip()
         
-        if not raw_status or raw_status in ["cashin.create"]:
-            # Se o header é cashin.create (criação) ou vazio, pega do body
-            raw_status = str(
-                payload_data.get("status") or 
-                data.get("status") or 
-                data.get("event") or 
-                payload_data.get("state") or 
-                data.get("state") or 
-                header_event or
-                ""
-            ).lower()
+        raw_status = inner_status or header_evt_lower or str(
+            data.get("event") or payload_data.get("state") or data.get("state") or ""
+        ).lower()
         
-        logger.info(f"🔍 [WEBHOOK PIX] TxID Extrapolado: {tx_id} | Status Lido: {raw_status} | Header Event: {header_event}")
+        logger.info(f"🔍 [WEBHOOK PIX] TxID: {tx_id} | Inner Status: {inner_status} | Header Event: {header_evt_lower} | Raw: {raw_status}")
         
-        # 🔥 BLINDAGEM: Considera pago se o status contiver qualquer destas palavras chaves
-        # Sync Pay: cashin.update com status "completed" / header "cashin.update"
-        is_paid = any(s in raw_status for s in [
-            "paid", "approved", "completed", "succeeded", "confirmed", "recebido",
-            "cashin.update"  # 🆕 Sync Pay envia este header quando pagamento é confirmado
-        ])
-        
-        # 🔥 SYNC PAY EXTRA: Se header_event == "cashin.update", verifica o status interno
-        if header_event.lower() == "cashin.update":
-            inner_status = str(payload_data.get("status") or "").lower()
-            if inner_status == "completed":
-                is_paid = True
-                logger.info(f"✅ [WEBHOOK PIX] Sync Pay cashin.update com status completed! Processando...")
-            elif inner_status == "pending":
-                is_paid = False
-                logger.info(f"ℹ️ [WEBHOOK PIX] Sync Pay cashin.update mas status ainda pending. Ignorando.")
-        
-        # Sync Pay cashin.create sempre tem status pending - IGNORA
-        if header_event.lower() == "cashin.create":
-            inner_status = str(payload_data.get("status") or "").lower()
-            if inner_status != "completed":
-                logger.info(f"ℹ️ [WEBHOOK PIX] Sync Pay cashin.create (status: {inner_status}). Ignorando - aguardando update.")
+        # =====================================================================
+        # 🔥 SYNC PAY: cashin.create com WAITING_FOR_APPROVAL → IGNORAR
+        # Isso significa que o PIX foi gerado mas ainda não pago
+        # =====================================================================
+        if header_evt_lower == "cashin.create" or inner_status in ["waiting_for_approval", "pending"]:
+            # Verifica se NÃO tem indicação de pagamento real
+            if inner_status not in ["completed", "paid", "approved"]:
+                logger.info(f"ℹ️ [WEBHOOK PIX] Sync Pay criação/pendente (status: {inner_status}). Ignorando - aguardando pagamento.")
                 return {"status": "ignored"}
         
+        # 🔥 DETERMINAR SE É PAGAMENTO CONFIRMADO
+        is_paid = any(s in raw_status for s in ["paid", "approved", "completed", "succeeded", "confirmed", "recebido"])
+        
+        # Sync Pay cashin.update = pagamento confirmado
+        if header_evt_lower == "cashin.update" and inner_status == "completed":
+            is_paid = True
+            logger.info(f"✅ [WEBHOOK PIX] Sync Pay cashin.update COMPLETED! Processando pagamento.")
+        
         if not is_paid:
-            logger.info(f"ℹ️ [WEBHOOK PIX] Ignorado. Status não indica pagamento aprovado: {raw_status}")
+            logger.info(f"ℹ️ [WEBHOOK PIX] Ignorado. Status não indica pagamento: {raw_status}")
             return {"status": "ignored"}
             
         if not tx_id:
             logger.warning("⚠️ [WEBHOOK PIX] Status é pago, mas não achei ID da transação no payload.")
             return {"status": "ignored"}
         
-        # 3. BUSCAR PEDIDO
-        # 🔥 Busca multi-campo: txid, transaction_id (cobre diferentes gateways)
+        # 3. BUSCAR PEDIDO (com fallback robusto para Sync Pay)
         pedido = db.query(Pedido).filter(
             (Pedido.txid == tx_id) | (Pedido.transaction_id == tx_id)
         ).first()
         
-        # 🔥 SYNC PAY FALLBACK: Se não achou pelo ID principal, tenta buscar
-        # pelo reference_id que pode estar em outro campo do payload
-        if not pedido and payload_data:
+        # Fallback: tenta IDs alternativos do payload
+        if not pedido:
             alt_ids = set()
-            for field in ["id", "identifier", "reference_id", "transaction_id", "uuid"]:
+            for field in ["id", "identifier", "reference_id", "idtransaction", "transaction_id", "uuid"]:
                 val = payload_data.get(field) or data.get(field)
-                if val:
+                if val and str(val).lower() != tx_id:
                     alt_ids.add(str(val).lower())
-            # Remove o tx_id já tentado
-            alt_ids.discard(tx_id)
             
             for alt_id in alt_ids:
                 pedido = db.query(Pedido).filter(
@@ -8575,29 +8692,8 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                     tx_id = alt_id
                     break
         
-        # 🔥 ÚLTIMO RECURSO SYNC PAY: Busca por valor + bot + status pending + criado recentemente
-        if not pedido and header_event and "cashin" in header_event.lower():
-            try:
-                amount_webhook = payload_data.get("amount")
-                if amount_webhook:
-                    from datetime import timedelta as td
-                    pedido = db.query(Pedido).filter(
-                        Pedido.status == "pending",
-                        Pedido.valor == float(amount_webhook),
-                        Pedido.gateway_usada == "syncpay",
-                        Pedido.created_at >= now_brazil() - td(hours=2)
-                    ).order_by(Pedido.created_at.desc()).first()
-                    
-                    if pedido:
-                        logger.info(f"✅ [WEBHOOK PIX] Pedido encontrado via FALLBACK (valor+gateway+recente): ID={pedido.id}, TxID={pedido.transaction_id}")
-                        # Atualiza o transaction_id com o ID correto do webhook para futuras referências
-                        pedido.transaction_id = tx_id
-                        db.commit()
-            except Exception as e_fallback:
-                logger.warning(f"⚠️ [WEBHOOK PIX] Erro no fallback de busca: {e_fallback}")
-        
         if not pedido:
-            logger.warning(f"⚠️ Pedido {tx_id} não encontrado (IDs testados: txid, transaction_id, alternativas)")
+            logger.warning(f"⚠️ Pedido {tx_id} não encontrado")
             return {"status": "ok", "msg": "Order not found"}
         
         if pedido.status in ["approved", "paid", "active"]:
@@ -8607,8 +8703,9 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
         # 4. PROCESSAR PAGAMENTO (LÓGICA CRÍTICA)
         try:
             # 🔥 Detectar e marcar gateway usada (se ainda não marcada)
-            if header_event and "cashin" in header_event.lower() and not pedido.gateway_usada:
-                pedido.gateway_usada = "syncpay"
+            if not pedido.gateway_usada:
+                if header_evt_lower and "cashin" in header_evt_lower:
+                    pedido.gateway_usada = "syncpay"
             
             # Calcular data de expiração
             now = now_brazil()
@@ -8676,7 +8773,7 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                 logger.error(f"❌ Erro na chamada do Push: {e_push}")
 
             # ======================================================================
-            # 🔔 [NOVO] NOTIFICAÇÃO NO PAINEL WEB (IN-APP)
+            # 🔔 NOTIFICAÇÃO NO PAINEL WEB (IN-APP) + ATUALIZAR LEAD
             # ======================================================================
             try:
                 bot_notif = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
@@ -8690,7 +8787,19 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                         type="success"
                     )
             except Exception as e_notif:
-                logger.error(f"❌ Erro ao criar notificação in-app: {e_notif}")
+                logger.error(f"❌ Erro notificação in-app: {e_notif}")
+            
+            try:
+                lead_update = db.query(Lead).filter(
+                    Lead.bot_id == pedido.bot_id,
+                    Lead.user_id == str(pedido.telegram_id)
+                ).first()
+                if lead_update:
+                    lead_update.status = 'active'
+                    db.commit()
+                    logger.info(f"✅ Lead {pedido.telegram_id} atualizado para CLIENTE")
+            except Exception as e_lead:
+                logger.warning(f"⚠️ Erro ao atualizar Lead: {e_lead}")
 
             # ✅ CANCELAR REMARKETING (PAGAMENTO CONFIRMADO)
             try:
@@ -8730,23 +8839,6 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
             
             texto_validade = data_validade.strftime("%d/%m/%Y") if data_validade else "VITALÍCIO ♾️"
             logger.info(f"✅ Pedido {tx_id} APROVADO! Validade: {texto_validade}")
-            
-            # ======================================================================
-            # 🔥 ATUALIZAR LEAD PARA CLIENTE (CONTATOS / FUNIL)
-            # ======================================================================
-            try:
-                lead_update = db.query(Lead).filter(
-                    Lead.bot_id == pedido.bot_id,
-                    Lead.user_id == str(pedido.telegram_id)
-                ).first()
-                
-                if lead_update:
-                    lead_update.status = 'active'
-                    lead_update.funil_stage = 'cliente' if hasattr(lead_update, 'funil_stage') else None
-                    db.commit()
-                    logger.info(f"✅ Lead {pedido.telegram_id} atualizado para CLIENTE")
-            except Exception as e_lead:
-                logger.warning(f"⚠️ Erro ao atualizar Lead para cliente: {e_lead}")
             
             # 5. ENTREGA DO ACESSO (COM LÓGICA MULTI-CANAIS)
             try:
