@@ -5693,11 +5693,13 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         mensagem = f"Você fez uma venda de R$ {valor_formatado}!"
         # =========================================================
         
-        # 5. Payload Moderno V2
+        # 5. Payload Moderno V2 (Solução Definitiva Multi-Usuário)
         payload = {
             "app_id": app_id.strip(),
             "target_channel": "push",
-            "include_external_user_ids": [str(owner.id)],
+            "filters": [
+                {"field": "tag", "key": "user_id", "relation": "=", "value": str(owner.id)}
+            ],
             "headings": {"en": titulo, "pt": titulo},
             "contents": {"en": mensagem, "pt": mensagem}
         }
