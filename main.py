@@ -5689,7 +5689,7 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         # =========================================================
         valor_formatado = f"{valor:.2f}".replace('.', ',')
         
-        titulo = "💰 NOVA VENDA APROVADA!"
+        titulo = "NOVA VENDA APROVADA!"
         mensagem = f"Você fez uma venda de R$ {valor_formatado}!"
         # =========================================================
         
