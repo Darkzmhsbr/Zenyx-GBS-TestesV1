@@ -11746,7 +11746,7 @@ def listar_planos_com_canais(
         if not bot:
             raise HTTPException(404, "Bot não encontrado")
         
-        planos = db.query(Plano).filter(Plano.bot_id == bot_id).all()
+        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
         
         result = []
         
