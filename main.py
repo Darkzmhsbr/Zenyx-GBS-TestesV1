@@ -4530,8 +4530,8 @@ def notificar_admin_principal(bot_db: BotModel, mensagem: str):
     """
     Envia notificação para:
     1. Canal de Notificações (se configurado) — mensagem vai para o canal
-    2. Admin Principal (DM) — mantém comportamento original
-    3. Admins Extras (DM) — mantém comportamento original
+    2. Admin Principal (DM) — SE notificar_no_bot estiver ativo
+    3. Admins Extras (DM) — SE notificar_no_bot estiver ativo
     """
     try:
         sender = telebot.TeleBot(bot_db.token, threaded=False)
@@ -4550,7 +4550,15 @@ def notificar_admin_principal(bot_db: BotModel, mensagem: str):
         except Exception as e_canal:
             logger.error(f"❌ Erro ao enviar no canal de notificações {bot_db.id_canal_notificacao}: {e_canal}")
     
-    # 2. ENVIO VIA DM PARA ADMINS (COMPORTAMENTO ORIGINAL MANTIDO)
+    # 🔥 2. ENVIO VIA DM PARA ADMINS (RESPEITA TOGGLE notificar_no_bot)
+    notificar_bot = getattr(bot_db, 'notificar_no_bot', True)
+    if notificar_bot is None:
+        notificar_bot = True
+    
+    if not notificar_bot:
+        logger.info(f"🔕 Notificação no bot desativada para bot {bot_db.id}")
+        return
+    
     ids_unicos = set()
 
     if bot_db.admin_principal_id:
@@ -4900,8 +4908,9 @@ class BotCreate(BaseModel):
     id_canal_vip: str
     admin_principal_id: Optional[str] = None
     suporte_username: Optional[str] = None
-    id_canal_notificacao: Optional[str] = None  # ✅ Canal de Notificações
-    protect_content: Optional[bool] = False     # 🔒 Proteção de Conteúdo
+    id_canal_notificacao: Optional[str] = None
+    protect_content: Optional[bool] = False
+    notificar_no_bot: Optional[bool] = True  # 🔥 NOVO: Toggle notificação no bot
 
 # Novo modelo para Atualização
 class BotUpdate(BaseModel):
@@ -4910,8 +4919,9 @@ class BotUpdate(BaseModel):
     id_canal_vip: Optional[str] = None
     admin_principal_id: Optional[str] = None
     suporte_username: Optional[str] = None
-    id_canal_notificacao: Optional[str] = None  # ✅ Canal de Notificações
-    protect_content: Optional[bool] = None      # 🔒 Proteção de Conteúdo
+    id_canal_notificacao: Optional[str] = None
+    protect_content: Optional[bool] = None
+    notificar_no_bot: Optional[bool] = None  # 🔥 NOVO: Toggle notificação no bot
 
 # Modelo para Criar Admin
 class BotAdminCreate(BaseModel):
@@ -5983,8 +5993,9 @@ def criar_bot(
         id_canal_vip=bot_data.id_canal_vip,
         admin_principal_id=bot_data.admin_principal_id,
         suporte_username=bot_data.suporte_username,
-        id_canal_notificacao=bot_data.id_canal_notificacao,  # ✅ Canal de Notificações
-        protect_content=getattr(bot_data, 'protect_content', False),  # 🔒 Proteção de Conteúdo
+        id_canal_notificacao=bot_data.id_canal_notificacao,
+        protect_content=getattr(bot_data, 'protect_content', False),
+        notificar_no_bot=getattr(bot_data, 'notificar_no_bot', True),  # 🔥 NOVO
         owner_id=current_user.id,
         status="ativo"
     )
@@ -6144,6 +6155,11 @@ def update_bot(
     if dados.protect_content is not None and dados.protect_content != getattr(bot_db, 'protect_content', False):
         changes["protect_content"] = {"old": getattr(bot_db, 'protect_content', False), "new": dados.protect_content}
         bot_db.protect_content = dados.protect_content
+    
+    # 🔥 NOVO: Toggle de notificação no bot
+    if dados.notificar_no_bot is not None and dados.notificar_no_bot != getattr(bot_db, 'notificar_no_bot', True):
+        changes["notificar_no_bot"] = {"old": getattr(bot_db, 'notificar_no_bot', True), "new": dados.notificar_no_bot}
+        bot_db.notificar_no_bot = dados.notificar_no_bot
     
     # 2. LÓGICA DE TROCA DE TOKEN (MANTIDA INTACTA)
     if dados.token and dados.token != old_token:
@@ -6883,7 +6899,8 @@ def listar_bots(
             "admin_principal_id": bot.admin_principal_id,
             "suporte_username": bot.suporte_username,
             "id_canal_notificacao": bot.id_canal_notificacao,  # ✅ Canal de Notificações
-            "protect_content": getattr(bot, 'protect_content', False),  # 🔒 Proteção de Conteúdo
+            "protect_content": getattr(bot, 'protect_content', False),
+            "notificar_no_bot": getattr(bot, 'notificar_no_bot', True),  # 🔥 NOVO
             "status": bot.status,
             "leads": leads_count,
             "revenue": revenue,
@@ -7485,23 +7502,23 @@ class TrackingLinkCreate(BaseModel):
 @app.get("/api/admin/tracking/folders")
 def list_tracking_folders(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)  # ✅ CORRIGIDO: Nome da função ajustado
+    current_user: User = Depends(get_current_user)
 ):
     """
     Lista pastas com filtro de segurança:
-    O usuário só vê pastas que contêm links dos SEUS bots ou pastas vazias.
+    O usuário só vê pastas que são DELE (owner_id) ou que contêm links dos SEUS bots.
+    Superadmin vê APENAS suas próprias pastas também (evita poluição).
     """
     try:
-        # 🔥 SEGURANÇA: Lista de IDs dos bots que o usuário realmente possui
         user_bot_ids = [bot.id for bot in current_user.bots]
         
-        # Busca todas as pastas (da mais nova para mais antiga)
+        # Busca todas as pastas
         folders = db.query(TrackingFolder).order_by(desc(TrackingFolder.created_at)).all()
         
         result = []
         for f in folders:
-            # Conta links totais na pasta
-            total_links_absoluto = db.query(TrackingLink).filter(TrackingLink.folder_id == f.id).count()
+            # 🔥 FILTRO PRINCIPAL: Pasta pertence a este usuário?
+            is_owner = (f.owner_id == current_user.id) if f.owner_id else False
             
             # Conta links "meus" (Dos bots vinculados ao meu usuário)
             meus_links_count = 0
@@ -7522,22 +7539,28 @@ def list_tracking_folders(
                         TrackingLink.bot_id.in_(user_bot_ids)
                     ).first()
             
-            # --- LÓGICA DE VISIBILIDADE (BLINDAGEM) ---
+            # 🔥 LÓGICA DE VISIBILIDADE (CORRIGIDA):
             # Mostra SE:
-            # 1. Tenho links meus lá dentro (meus_links_count > 0)
-            # 2. OU a pasta está vazia (total_links_absoluto == 0)
-            # 3. OU sou superadmin
-            should_show = (meus_links_count > 0) or (total_links_absoluto == 0)
+            # 1. Eu sou o dono da pasta (owner_id == meu id)
+            # 2. OU tenho links meus lá dentro
+            # 3. OU a pasta não tem dono (legado) E eu tenho links lá
+            # Pastas vazias de outros usuários NÃO aparecem mais
+            should_show = False
             
-            if current_user.is_superuser:
+            if is_owner:
                 should_show = True
+            elif meus_links_count > 0:
+                should_show = True
+            elif f.owner_id is None and meus_links_count > 0:
+                should_show = True
+            # Pastas sem dono E sem links meus = não mostra (era aqui o bug)
 
             if should_show:
                 result.append({
                     "id": f.id, 
                     "nome": f.nome, 
                     "plataforma": f.plataforma, 
-                    "link_count": meus_links_count, # Mostra apenas contagem dos MEUS
+                    "link_count": meus_links_count,
                     "total_clicks": (stats.total_clicks if stats else 0) or 0,
                     "total_vendas": (stats.total_vendas if stats else 0) or 0,
                     "created_at": f.created_at
@@ -7553,12 +7576,13 @@ def list_tracking_folders(
 def create_tracking_folder(
     dados: TrackingFolderCreate, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user) # ✅ CORRIGIDO
+    current_user: User = Depends(get_current_user)
 ):
     try:
-        # Verifica duplicidade
+        # 🔥 Verifica duplicidade POR USUÁRIO (não global)
         existe = db.query(TrackingFolder).filter(
-            func.lower(TrackingFolder.nome) == dados.nome.lower()
+            func.lower(TrackingFolder.nome) == dados.nome.lower(),
+            TrackingFolder.owner_id == current_user.id
         ).first()
         
         if existe:
@@ -7567,6 +7591,7 @@ def create_tracking_folder(
         nova_pasta = TrackingFolder(
             nome=dados.nome, 
             plataforma=dados.plataforma,
+            owner_id=current_user.id,  # 🔥 NOVO: Marca o dono
             created_at=now_brazil()
         )
         db.add(nova_pasta)
@@ -7693,7 +7718,7 @@ def create_tracking_link(
 def delete_link(
     lid: int, 
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user) # ✅ CORRIGIDO
+    current_user: User = Depends(get_current_user)
 ):
     try:
         user_bot_ids = [bot.id for bot in current_user.bots]
@@ -7708,14 +7733,24 @@ def delete_link(
             if link.bot_id not in user_bot_ids:
                 raise HTTPException(403, "Acesso negado. Você não é dono deste link.")
         
+        # 🔥 FIX: Desvincula pedidos e leads que referenciam este link (SET NULL)
+        db.query(Pedido).filter(Pedido.tracking_id == lid).update(
+            {"tracking_id": None}, synchronize_session=False
+        )
+        db.query(Lead).filter(Lead.tracking_id == lid).update(
+            {"tracking_id": None}, synchronize_session=False
+        )
+        
         db.delete(link)
         db.commit()
+        logger.info(f"🗑️ Link #{lid} deletado por {current_user.username}")
         return {"status": "deleted"}
         
     except HTTPException as he:
         raise he
     except Exception as e:
         logger.error(f"Erro ao deletar link: {e}")
+        db.rollback()
         raise HTTPException(500, "Erro interno")
 
 # =========================================================
@@ -9026,7 +9061,9 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                                 f"📦 Plano: {pedido.plano_nome}\n"
                                 f"💵 Valor: <b>R$ {pedido.valor:.2f}</b>\n"
                                 f"📅 Vence em: {texto_validade}"
-                                f"{tracking_info}"
+                                f"{tracking_info}\n"
+                                f"🆔 ID Pagamento: <code>{pedido.transaction_id or pedido.txid or 'N/A'}</code>\n"
+                                f"🕐 Data/Hora: {now_brazil().strftime('%d/%m/%Y %H:%M:%S')}"
                             )
                             # Função auxiliar que você já deve ter no código
                             if 'notificar_admin_principal' in globals():
@@ -9568,11 +9605,17 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             username=username,
                             bot_id=bot_db.id,
                             status='topo',
-                            funil_stage='lead_frio'
+                            funil_stage='lead_frio',
+                            origem_entrada='canal_free'  # 🔥 NOVO: Marca origem
                         )
                         db.add(lead)
                         db.commit()
                         logger.info(f"✅ [CANAL FREE] Lead salvo: {user_name}")
+                    else:
+                        # 🔥 Se lead já existe mas não tem origem marcada, atualiza
+                        if not lead_existente.origem_entrada or lead_existente.origem_entrada == 'bot_direto':
+                            lead_existente.origem_entrada = 'canal_free'
+                            db.commit()
                     
                 except Exception as e_lead:
                     logger.error(f"❌ [CANAL FREE] Erro ao salvar lead: {e_lead}")
@@ -11265,6 +11308,7 @@ async def get_contacts(
                     "created_at": clean_date(l.created_at),
                     "status_funil": "topo",
                     "origem": "lead",
+                    "origem_entrada": getattr(l, 'origem_entrada', 'bot_direto') or 'bot_direto',
                     "custom_expiration": clean_date(data_lead)
                 }
 
@@ -11303,6 +11347,33 @@ async def get_contacts(
         # ============================================================
         # CENÁRIO 2: FILTROS ESPECÍFICOS (PAGANTES, PENDENTES...)
         # ============================================================
+        elif status == "canal_free":
+            # 🔥 NOVO: Filtro exclusivo para leads do Canal Free
+            leads_cf = db.query(Lead).filter(
+                Lead.bot_id.in_(bots_alvo),
+                Lead.origem_entrada == "canal_free"
+            ).all()
+            
+            for l in leads_cf:
+                tid = str(l.user_id).strip()
+                key = f"{l.bot_id}_{tid}"
+                data_lead = getattr(l, 'expiration_date', None)
+                
+                contatos_unicos[key] = {
+                    "id": l.id,
+                    "telegram_id": tid,
+                    "user_id": tid,
+                    "first_name": l.nome or "Sem nome",
+                    "username": l.username,
+                    "plano_nome": "-",
+                    "valor": 0.0,
+                    "status": l.status or "pending",
+                    "role": "user",
+                    "created_at": clean_date(l.created_at),
+                    "status_funil": l.funil_stage or "topo",
+                    "origem": "canal_free",
+                    "custom_expiration": clean_date(data_lead)
+                }
         else:
             # Busca TODOS os pedidos do filtro (sem limit ainda, para poder deduplicar)
             query = db.query(Pedido).filter(Pedido.bot_id.in_(bots_alvo))
@@ -11441,9 +11512,15 @@ async def update_user(user_id: int, data: dict, db: Session = Depends(get_db)):
 # ROTA 2: Reenviar Acesso
 # ============================================================
 @app.post("/api/admin/users/{user_id}/resend-access")
-async def resend_user_access(user_id: int, db: Session = Depends(get_db)):
+async def resend_user_access(
+    user_id: int, 
+    plano_id: int = None,
+    db: Session = Depends(get_db)
+):
     """
-    🔑 Reenvia o link de acesso VIP para um usuário que já pagou
+    🔑 Reenvia o link de acesso VIP para um usuário que já pagou.
+    Se plano_id for informado, envia o link do canal daquele plano específico.
+    Caso contrário, usa o canal VIP padrão do bot.
     """
     try:
         # 1. Buscar pedido
@@ -11468,20 +11545,33 @@ async def resend_user_access(user_id: int, db: Session = Depends(get_db)):
             logger.error(f"❌ Bot {pedido.bot_id} não encontrado")
             raise HTTPException(status_code=404, detail="Bot não encontrado")
         
-        # 4. Verificar se bot tem canal configurado
-        if not bot_data.id_canal_vip:
-            logger.error(f"❌ Bot {pedido.bot_id} não tem canal VIP configurado")
-            raise HTTPException(status_code=400, detail="Bot não tem canal VIP configurado")
+        # 4. 🔥 DETERMINAR CANAL CORRETO (por plano ou padrão)
+        canal_id_str = None
+        plano_nome_reenvio = "Canal Padrão"
+        
+        if plano_id:
+            # Buscar o plano específico para usar seu canal destino
+            plano_obj = db.query(Plano).filter(Plano.id == plano_id, Plano.bot_id == bot_data.id).first()
+            if plano_obj and plano_obj.id_canal_destino:
+                canal_id_str = str(plano_obj.id_canal_destino).strip()
+                plano_nome_reenvio = plano_obj.nome_exibicao or f"Plano #{plano_id}"
+                logger.info(f"🎯 Reenvio via plano '{plano_nome_reenvio}' → canal {canal_id_str}")
+        
+        # Se não achou canal via plano, usa o padrão do bot
+        if not canal_id_str:
+            if not bot_data.id_canal_vip:
+                logger.error(f"❌ Bot {pedido.bot_id} não tem canal VIP configurado")
+                raise HTTPException(status_code=400, detail="Bot não tem canal VIP configurado")
+            canal_id_str = str(bot_data.id_canal_vip).strip()
         
         # 5. Gerar novo link e enviar
         try:
             tb = telebot.TeleBot(bot_data.token)
             
-            # Tratamento do ID do Canal
             try: 
-                canal_id = int(str(bot_data.id_canal_vip).strip())
+                canal_id = int(canal_id_str)
             except: 
-                canal_id = bot_data.id_canal_vip
+                canal_id = canal_id_str
             
             # Tenta desbanir antes (caso tenha sido banido)
             try:
@@ -11505,6 +11595,7 @@ async def resend_user_access(user_id: int, db: Session = Depends(get_db)):
             # Envia mensagem
             msg_cliente = (
                 f"✅ <b>Acesso Reenviado!</b>\n"
+                f"📦 Plano: <b>{plano_nome_reenvio}</b>\n"
                 f"📅 Validade: <b>{texto_validade}</b>\n\n"
                 f"Seu acesso exclusivo:\n👉 {convite.invite_link}\n\n"
                 f"<i>Use este link para entrar no grupo VIP.</i>"
@@ -11512,11 +11603,11 @@ async def resend_user_access(user_id: int, db: Session = Depends(get_db)):
             
             tb.send_message(int(pedido.telegram_id), msg_cliente, parse_mode="HTML")
             
-            logger.info(f"✅ Acesso reenviado para {pedido.first_name} (ID: {pedido.telegram_id})")
+            logger.info(f"✅ Acesso reenviado para {pedido.first_name} (ID: {pedido.telegram_id}) via plano '{plano_nome_reenvio}'")
             
             return {
                 "status": "success",
-                "message": "Acesso reenviado com sucesso!",
+                "message": f"Acesso reenviado com sucesso via {plano_nome_reenvio}!",
                 "telegram_id": pedido.telegram_id,
                 "nome": pedido.first_name,
                 "validade": texto_validade
@@ -11534,6 +11625,157 @@ async def resend_user_access(user_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"❌ Erro ao reenviar acesso: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# =========================================================
+# 🚫 REMOVER USUÁRIO DO VIP (MANUAL)
+# =========================================================
+@app.post("/api/admin/users/{user_id}/remove-vip")
+async def remove_user_from_vip(user_id: int, db: Session = Depends(get_db)):
+    """
+    Remove manualmente um usuário de TODOS os canais/grupos VIP do bot,
+    marca o pedido como expired e atualiza o Lead.
+    """
+    try:
+        pedido = db.query(Pedido).filter(Pedido.id == user_id).first()
+        if not pedido:
+            raise HTTPException(404, "Pedido não encontrado")
+        
+        if pedido.status in ["expired", "failed"]:
+            raise HTTPException(400, "Pedido já está expirado/cancelado")
+        
+        bot_data = db.query(BotModel).filter(BotModel.id == pedido.bot_id).first()
+        if not bot_data:
+            raise HTTPException(404, "Bot não encontrado")
+        
+        tb = telebot.TeleBot(bot_data.token)
+        telegram_id = int(pedido.telegram_id)
+        canais_removidos = []
+        erros_remocao = []
+        
+        # 1. Remover do canal VIP padrão
+        if bot_data.id_canal_vip:
+            try:
+                canal_id = int(str(bot_data.id_canal_vip).strip())
+                tb.ban_chat_member(canal_id, telegram_id)
+                tb.unban_chat_member(canal_id, telegram_id)
+                canais_removidos.append(f"Padrão ({canal_id})")
+            except Exception as e:
+                erros_remocao.append(f"Padrão: {str(e)}")
+        
+        # 2. Remover de canais específicos dos planos
+        planos = db.query(Plano).filter(Plano.bot_id == bot_data.id).all()
+        for plano in planos:
+            if plano.id_canal_destino and str(plano.id_canal_destino).strip() != str(bot_data.id_canal_vip or "").strip():
+                try:
+                    canal_plano = int(str(plano.id_canal_destino).strip())
+                    tb.ban_chat_member(canal_plano, telegram_id)
+                    tb.unban_chat_member(canal_plano, telegram_id)
+                    canais_removidos.append(f"{plano.nome_exibicao} ({canal_plano})")
+                except Exception as e:
+                    erros_remocao.append(f"{plano.nome_exibicao}: {str(e)}")
+        
+        # 3. Remover de grupos extras (se tiver)
+        try:
+            grupos = db.query(GrupoVip).filter(GrupoVip.bot_id == bot_data.id).all()
+            for grupo in grupos:
+                try:
+                    tb.ban_chat_member(int(grupo.chat_id), telegram_id)
+                    tb.unban_chat_member(int(grupo.chat_id), telegram_id)
+                    canais_removidos.append(f"Grupo: {grupo.title}")
+                except:
+                    pass
+        except:
+            pass
+        
+        # 4. Atualizar status do pedido
+        pedido.status = "expired"
+        pedido.custom_expiration = now_brazil()
+        
+        # 5. Atualizar Lead
+        lead = db.query(Lead).filter(
+            Lead.bot_id == pedido.bot_id,
+            Lead.user_id == str(telegram_id)
+        ).first()
+        if lead:
+            lead.status = "expired"
+            lead.funil_stage = "expirado"
+        
+        db.commit()
+        
+        # 6. Notificar o usuário
+        try:
+            tb.send_message(
+                telegram_id,
+                "🚫 <b>Seu acesso VIP foi removido.</b>\n\nPara renovar, digite /start",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+        
+        logger.info(f"🚫 Usuário {pedido.first_name} ({telegram_id}) removido do VIP manualmente. Canais: {canais_removidos}")
+        
+        return {
+            "status": "success",
+            "message": f"Usuário removido de {len(canais_removidos)} canal(is)",
+            "canais_removidos": canais_removidos,
+            "erros": erros_remocao
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao remover do VIP: {e}")
+        db.rollback()
+        raise HTTPException(500, str(e))
+
+# =========================================================
+# 📋 LISTAR PLANOS DO BOT (Para modal de reenvio de acesso)
+# =========================================================
+@app.get("/api/admin/bots/{bot_id}/planos-canais")
+def listar_planos_com_canais(
+    bot_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Retorna lista de planos do bot com seus canais de destino,
+    para o frontend montar o seletor de reenvio de acesso.
+    """
+    try:
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot:
+            raise HTTPException(404, "Bot não encontrado")
+        
+        planos = db.query(Plano).filter(Plano.bot_id == bot_id).all()
+        
+        result = []
+        
+        # Canal padrão do bot
+        if bot.id_canal_vip:
+            result.append({
+                "id": None,
+                "nome": "Canal VIP Padrão",
+                "canal_id": bot.id_canal_vip,
+                "is_default": True
+            })
+        
+        # Planos com canais específicos
+        for p in planos:
+            result.append({
+                "id": p.id,
+                "nome": p.nome_exibicao or f"Plano #{p.id}",
+                "preco": p.preco_atual,
+                "canal_id": p.id_canal_destino or bot.id_canal_vip,
+                "is_default": False
+            })
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao listar planos: {e}")
+        return []
 
 # --- ROTAS FLOW V2 (HÍBRIDO) ---
 @app.get("/api/admin/bots/{bot_id}/flow")
@@ -13355,7 +13597,9 @@ async def webhook(req: Request, bg_tasks: BackgroundTasks):
                             f"💎 Plano: {p.plano_nome}\n"
                             f"💵 Valor: R$ {p.valor:.2f}\n"
                             f"🆔 ID/User: {p.telegram_id}"
-                            f"{tracking_info_site}"
+                            f"{tracking_info_site}\n"
+                            f"🆔 ID Pagamento: <code>{p.transaction_id or p.txid or 'N/A'}</code>\n"
+                            f"🕐 Data/Hora: {now_brazil().strftime('%d/%m/%Y %H:%M:%S')}"
                         )
                         # Chama a função auxiliar de notificação (assumindo que existe no seu código)
                         notificar_admin_principal(bot_db, msg_venda) 
@@ -16435,6 +16679,85 @@ async def migrate_audio_features(db: Session = Depends(get_db)):
         return {
             "status": "success",
             "message": "Migração de Áudio + Mídia concluída!",
+            "details": log_msgs
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"❌ Erro crítico na migração: {str(e)}"
+        }
+# ============================================================
+# 🔒 MIGRAÇÃO: VERSÃO PRIME - AJUSTES E MELHORIAS
+# ============================================================
+@app.get("/migrate-prime-v1")
+async def migrate_prime_v1(db: Session = Depends(get_db)):
+    """
+    Migração para adicionar novas colunas da Versão Prime:
+    1. tracking_folders.owner_id (Integer FK users.id)
+    2. bots.notificar_no_bot (Boolean DEFAULT TRUE)
+    3. leads.origem_entrada (VARCHAR DEFAULT 'bot_direto')
+    
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-prime-v1
+    """
+    try:
+        from sqlalchemy import text
+        
+        log_msgs = []
+        
+        # 1. tracking_folders.owner_id
+        try:
+            db.execute(text("ALTER TABLE tracking_folders ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id);"))
+            log_msgs.append("✅ tracking_folders: owner_id adicionado")
+        except Exception as e:
+            log_msgs.append(f"⚠️ tracking_folders.owner_id: {str(e)}")
+        
+        # 2. bots.notificar_no_bot
+        try:
+            db.execute(text("ALTER TABLE bots ADD COLUMN IF NOT EXISTS notificar_no_bot BOOLEAN DEFAULT TRUE;"))
+            log_msgs.append("✅ bots: notificar_no_bot adicionado")
+        except Exception as e:
+            log_msgs.append(f"⚠️ bots.notificar_no_bot: {str(e)}")
+        
+        # 3. leads.origem_entrada
+        try:
+            db.execute(text("ALTER TABLE leads ADD COLUMN IF NOT EXISTS origem_entrada VARCHAR DEFAULT 'bot_direto';"))
+            log_msgs.append("✅ leads: origem_entrada adicionado")
+        except Exception as e:
+            log_msgs.append(f"⚠️ leads.origem_entrada: {str(e)}")
+        
+        # 4. Atribuir owner_id às pastas existentes baseado nos links dentro delas
+        try:
+            # Para cada pasta sem owner, tenta detectar o dono pelos links
+            pastas_sem_dono = db.execute(text("SELECT id FROM tracking_folders WHERE owner_id IS NULL")).fetchall()
+            pastas_corrigidas = 0
+            
+            for row in pastas_sem_dono:
+                pasta_id = row[0]
+                # Busca o owner do primeiro bot que tem link nessa pasta
+                result = db.execute(text("""
+                    SELECT DISTINCT b.owner_id 
+                    FROM tracking_links tl 
+                    JOIN bots b ON tl.bot_id = b.id 
+                    WHERE tl.folder_id = :pid AND b.owner_id IS NOT NULL 
+                    LIMIT 1
+                """), {"pid": pasta_id}).fetchone()
+                
+                if result:
+                    db.execute(text("UPDATE tracking_folders SET owner_id = :uid WHERE id = :pid"), 
+                              {"uid": result[0], "pid": pasta_id})
+                    pastas_corrigidas += 1
+            
+            log_msgs.append(f"✅ {pastas_corrigidas} pastas existentes receberam owner_id")
+        except Exception as e:
+            log_msgs.append(f"⚠️ Atribuição de owner_id: {str(e)}")
+        
+        db.commit()
+        
+        return {
+            "status": "success",
+            "message": "🚀 Migração Prime V1 concluída!",
             "details": log_msgs
         }
         

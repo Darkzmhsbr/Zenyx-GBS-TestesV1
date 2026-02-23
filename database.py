@@ -100,6 +100,7 @@ class Bot(Base):
     
     # ✅ Canal de Notificações (onde o bot envia avisos de vendas, toggle, etc)
     id_canal_notificacao = Column(String, nullable=True)
+    notificar_no_bot = Column(Boolean, default=True)  # 🔥 NOVO: Toggle notificação no bot
     
     status = Column(String, default="ativo")
     
@@ -451,9 +452,11 @@ class TrackingFolder(Base):
     id = Column(Integer, primary_key=True, index=True)
     nome = Column(String)      # Ex: "Facebook Ads"
     plataforma = Column(String) # Ex: "facebook", "instagram"
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # 🔥 NOVO: Dono da pasta
     created_at = Column(DateTime, default=now_brazil)
     
     links = relationship("TrackingLink", back_populates="folder", cascade="all, delete-orphan")
+    owner = relationship("User", backref="tracking_folders")
 
 class TrackingLink(Base):
     __tablename__ = "tracking_links"
@@ -560,6 +563,7 @@ class Lead(Base):
     
     # Rastreamento
     tracking_id = Column(Integer, ForeignKey("tracking_links.id"), nullable=True)
+    origem_entrada = Column(String, default="bot_direto")  # 🔥 NOVO: "bot_direto" ou "canal_free"
     
     # 🔥 CAMPO NOVO (CORREÇÃO DO VITALÍCIO/ERRO 500)
     expiration_date = Column(DateTime, nullable=True)
