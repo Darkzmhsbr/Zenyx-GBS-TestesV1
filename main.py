@@ -7831,15 +7831,18 @@ def get_tracking_link_metrics(
         
         total_vendas = normais_vendas + upsell_vendas + downsell_vendas + remarketing_vendas + disparo_auto_vendas + order_bump_vendas
         total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat + order_bump_fat
-        leads_count = link.leads if hasattr(link, 'leads') else link.clicks
-        conversao = round((total_vendas / leads_count * 100), 2) if leads_count > 0 else 0.0
+        
+        # 🔥 CORREÇÃO MESTRE: Lógica infalível de conversão (agora usa dados corretos)
+        leads_count = getattr(link, 'leads', 0) or 0
+        base_calculo = leads_count if leads_count > 0 else (link.clicks or 0)
+        conversao = round((total_vendas / base_calculo * 100), 2) if base_calculo > 0 else 0.0
         
         return {
             "link_id": link.id,
             "codigo": link.codigo,
             "nome": link.nome,
             "cliques": link.clicks or 0,
-            "leads": leads_count or 0,
+            "leads": leads_count,
             "vendas_total": total_vendas,
             "faturamento_total": round(total_fat, 2),
             "conversao": conversao,
@@ -8008,15 +8011,18 @@ def get_tracking_ranking(
             
             total_vendas = normais_v + upsell_v + downsell_v + remarketing_v + disparo_auto_v + order_bump_v
             total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat + order_bump_fat
-            leads_count = link.leads if hasattr(link, 'leads') else link.clicks
-            conversao = round((total_vendas / leads_count * 100), 2) if leads_count and leads_count > 0 else 0.0
+            
+            # 🔥 CORREÇÃO MESTRE: Lógica infalível para conversão
+            leads_count = getattr(link, 'leads', 0) or 0
+            base_calculo = leads_count if leads_count > 0 else (link.clicks or 0)
+            conversao = round((total_vendas / base_calculo * 100), 2) if base_calculo > 0 else 0.0
             
             result.append({
                 "id": link.id,
                 "codigo": link.codigo,
                 "nome": link.nome,
                 "cliques": link.clicks or 0,
-                "leads": leads_count or 0,
+                "leads": leads_count,
                 "vendas_total": total_vendas,
                 "faturamento_total": round(total_fat, 2),
                 "conversao": conversao,
@@ -8035,7 +8041,6 @@ def get_tracking_ranking(
     except Exception as e:
         logger.error(f"Erro tracking ranking: {e}")
         return []
-
 
 # =========================================================
 # 🧩 ROTAS DE PASSOS DINÂMICOS (FLOW V2)
@@ -9777,6 +9782,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 
                 # Tracking
                 track_id = None
+                tl = None
                 parts = txt.split()
                 if len(parts) > 1:
                     code = parts[1]
@@ -9785,7 +9791,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         # 🔥 CORREÇÃO: Não contabiliza clique no /start para links de remarketing (rmkt_)
                         # O clique de remarketing é contabilizado quando o usuário clica no botão da oferta
                         if not code.startswith("rmkt_"):
-                            tl.clicks += 1
+                            tl.clicks = (tl.clicks or 0) + 1
                         track_id = tl.id
                         db.commit()
 
@@ -9795,6 +9801,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     if not lead:
                         lead = Lead(user_id=user_id_str, nome=first_name, username=username_raw, bot_id=bot_db.id, tracking_id=track_id)
                         db.add(lead)
+                        
+                        # 🔥 CORREÇÃO MESTRE: Contabilizar o Lead gerado na tabela de Rastreamento!
+                        if tl and track_id:
+                            tl.leads = (tl.leads or 0) + 1
+                            
                     db.commit()
                 except: pass
 
@@ -10161,7 +10172,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         return {"status": "error"}
                     
                     lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
-                    track_id_pedido = lead_origem.tracking_id if lead_origem else None
+                    # 🔥 CORREÇÃO MESTRE: Vendas de remarketing não devem ser atribuídas ao link antigo do lead.
+                    track_id_pedido = None
                     
                     # Calcula desconto visual
                     desconto_percentual = 0
@@ -10335,7 +10347,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     # Gera PIX com valor promocional
                     lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
-                    track_id_pedido = lead_origem.tracking_id if lead_origem else None
+                    # 🔥 CORREÇÃO MESTRE: Disparos automáticos não devem sujar o link original
+                    track_id_pedido = None
                     
                     desconto_percentual = 0
                     if plano.preco_atual > valor_final:
