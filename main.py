@@ -11551,7 +11551,7 @@ async def resend_user_access(
         
         if plano_id:
             # Buscar o plano específico para usar seu canal destino
-            plano_obj = db.query(Plano).filter(Plano.id == plano_id, Plano.bot_id == bot_data.id).first()
+            plano_obj = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id, PlanoConfig.bot_id == bot_data.id).first()
             if plano_obj and plano_obj.id_canal_destino:
                 canal_id_str = str(plano_obj.id_canal_destino).strip()
                 plano_nome_reenvio = plano_obj.nome_exibicao or f"Plano #{plano_id}"
@@ -11746,7 +11746,7 @@ def listar_planos_com_canais(
         if not bot:
             raise HTTPException(404, "Bot não encontrado")
         
-        planos = db.query(Plano).filter(Plano.bot_id == bot_id).all()
+        planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
         
         result = []
         
