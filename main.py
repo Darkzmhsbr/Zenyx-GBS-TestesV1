@@ -5697,8 +5697,7 @@ async def enviar_push_onesignal(bot_id: int, nome_cliente: str, plano: str, valo
         payload = {
             "app_id": app_id.strip(),
             "target_channel": "push",
-            "include_external_user_ids": [str(owner.username)],
-            "include_aliases": {"external_id": [str(owner.username)]},
+            "included_segments": ["Subscribed Users"],
             "headings": {"en": titulo, "pt": titulo},
             "contents": {"en": mensagem, "pt": mensagem}
         }
