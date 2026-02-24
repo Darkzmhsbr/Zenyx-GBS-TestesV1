@@ -24,16 +24,16 @@ if DATABASE_URL:
     engine = create_engine(
         DATABASE_URL,
         poolclass=QueuePool,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=10,
+        max_overflow=20,
         pool_timeout=30,
-        pool_recycle=600,       # 🔧 Recicla conexões a cada 10 min (era 30min - Railway pode dropar antes)
+        pool_recycle=300,       # 🔧 Recicla conexões a cada 5 min (Railway pode dropar antes)
         pool_pre_ping=True      # 🔧 CRÍTICO: Testa conexão antes de usar (evita "connection closed")
     )
 else:
     engine = create_engine("sqlite:///./sql_app.db")
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
 Base = declarative_base()
 
 def init_db():

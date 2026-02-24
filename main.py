@@ -2121,7 +2121,11 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
     return encoded_jwt
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
-    """Decodifica token e retorna usuário atual"""
+    """
+    Decodifica token e retorna usuário atual.
+    🔥 FIX CRÍTICO: Usa expunge() para desconectar o objeto da sessão de forma segura,
+    permitindo que ele seja usado em outras sessões sem DetachedInstanceError.
+    """
     credentials_exception = HTTPException(
         status_code=401,
         detail="Não foi possível validar as credenciais",
@@ -2141,20 +2145,32 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     
     db = SessionLocal()
     try:
-        from sqlalchemy.orm import joinedload
+        from sqlalchemy.orm import joinedload, subqueryload
         
-        # 🔥 EAGER LOADING para carregar bots ANTES de fechar sessão
+        # 🔥 EAGER LOADING COMPLETO: Carrega bots E relações críticas ANTES de fechar sessão
         user = db.query(User).options(
-            joinedload(User.bots)
+            subqueryload(User.bots)
         ).filter(User.id == user_id).first()
         
         if user is None:
             raise credentials_exception
         
-        # 🔥 Forçar o carregamento da relação bots
-        _ = user.bots  # Isso garante que está carregado
+        # 🔥 Forçar o carregamento COMPLETO de todas as relações necessárias
+        _ = user.bots  # Garante que está carregado
+        _ = [b.id for b in user.bots]  # Itera para materializar completamente
+        
+        # 🔥 FIX: Expunge remove o objeto da sessão mas MANTÉM os dados carregados
+        # Isso evita DetachedInstanceError quando a sessão é fechada
+        db.expunge(user)
+        for bot in user.bots:
+            db.expunge(bot)
         
         return user
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao carregar usuário (ID: {user_id}): {e}")
+        raise credentials_exception
     finally:
         db.close()
 
@@ -7832,10 +7848,25 @@ def get_tracking_link_metrics(
         total_vendas = normais_vendas + upsell_vendas + downsell_vendas + remarketing_vendas + disparo_auto_vendas + order_bump_vendas
         total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat + order_bump_fat
         
-        # 🔥 CORREÇÃO MESTRE: Lógica infalível de conversão (agora usa dados corretos)
+        # 🔥 CORREÇÃO: Lógica infalível de conversão
+        # Se vendas > leads, significa que leads não é uma base confiável → usa cliques
+        # Conversão NUNCA deve ultrapassar 100%
         leads_count = getattr(link, 'leads', 0) or 0
-        base_calculo = leads_count if leads_count > 0 else (link.clicks or 0)
-        conversao = round((total_vendas / base_calculo * 100), 2) if base_calculo > 0 else 0.0
+        clicks_count = link.clicks or 0
+        
+        if total_vendas <= 0:
+            conversao = 0.0
+        elif leads_count > 0 and leads_count >= total_vendas:
+            # Leads é uma base confiável (mais leads que vendas)
+            conversao = round((total_vendas / leads_count * 100), 2)
+        elif clicks_count > 0:
+            # Fallback para cliques quando leads < vendas ou leads = 0
+            conversao = round((total_vendas / clicks_count * 100), 2)
+        else:
+            conversao = 0.0
+        
+        # Cap em 100% para não mostrar valores absurdos
+        conversao = min(conversao, 100.0)
         
         return {
             "link_id": link.id,
@@ -8622,6 +8653,11 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
     print("🔔 WEBHOOK PIX CHEGOU!")
     
     try:
+        # 🔥 FIX: Força refresh da conexão do banco para evitar stale connection
+        try:
+            db.execute(text("SELECT 1"))
+        except Exception:
+            db.rollback()
         # 1. EXTRAIR PAYLOAD
         body_bytes = await request.body()
         body_str = body_bytes.decode("utf-8")
@@ -13165,10 +13201,13 @@ def dashboard_stats(
         # 📊 OUTRAS MÉTRICAS
         # ============================================
         
-        # Usuários ativos (assinaturas não expiradas)
+        # Usuários ativos (assinaturas não expiradas OU vitalícios sem data de expiração)
         query_active = db.query(Pedido).filter(
             Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
-            Pedido.data_expiracao > now_brazil()
+            or_(
+                Pedido.data_expiracao > now_brazil(),    # Planos com data: ainda não expirou
+                Pedido.data_expiracao == None              # Planos vitalícios: sem data = ativo para sempre
+            )
         )
         if not is_super_with_split or bot_id:
              if bots_ids: query_active = query_active.filter(Pedido.bot_id.in_(bots_ids))
@@ -13379,11 +13418,14 @@ def advanced_statistics(
             q_leads = q_leads.filter(Lead.bot_id.in_(bots_ids))
         total_leads = q_leads.count()
 
-        # Usuários ativos (assinatura não expirada)
+        # Usuários ativos (assinatura não expirada OU vitalício sem data)
         q_ativos = apply_bot_filter(
             db.query(Pedido).filter(
                 Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
-                Pedido.data_expiracao > agora
+                or_(
+                    Pedido.data_expiracao > agora,       # Planos com prazo: ainda válidos
+                    Pedido.data_expiracao == None          # Planos vitalícios: sempre ativos
+                )
             )
         )
         total_ativos = q_ativos.count()
@@ -13931,14 +13973,15 @@ def get_user_profile(
         total_members = db.query(Lead).filter(Lead.bot_id.in_(bot_ids)).count()
 
         # 3. Calcular Vendas e Receita apenas dos bots do usuário
+        # 🔥 FIX: Incluir TODOS os status de vendas aprovadas (não apenas 'approved')
         total_sales = db.query(Pedido).filter(
             Pedido.bot_id.in_(bot_ids), 
-            Pedido.status == 'approved'
+            Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
         ).count()
 
         total_revenue = db.query(func.sum(Pedido.valor)).filter(
             Pedido.bot_id.in_(bot_ids), 
-            Pedido.status == 'approved'
+            Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
         ).scalar() or 0.0
 
         # 4. Lógica de Gamificação (Níveis baseados no Faturamento do Usuário)
@@ -15401,11 +15444,12 @@ def obter_ranking(
             db.query(
                 User.username,
                 func.sum(Pedido.valor).label("total_faturado"),
-                func.count(Pedido.id).label("total_vendas")  # 🔥 NOVO: Conta a quantidade de vendas
+                func.count(Pedido.id).label("total_vendas")  # 🔥 Conta a quantidade de vendas
             )
             .join(BotModel, BotModel.owner_id == User.id)
             .join(Pedido, Pedido.bot_id == BotModel.id)
             .filter(Pedido.data_aprovacao != None)
+            .filter(Pedido.status.in_(['approved', 'paid', 'active', 'expired']))  # 🔥 FIX: Filtrar apenas vendas reais
             .filter(User.is_superuser == False)
             .filter(extract('month', Pedido.data_aprovacao) == mes)
             .filter(extract('year', Pedido.data_aprovacao) == ano)
