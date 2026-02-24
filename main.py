@@ -2967,6 +2967,12 @@ def registrar_remarketing(
             logger.info("🔧 [STARTUP] Verificando integridade completa do banco...")
             
             comandos_sql = [
+                # ============================================================
+                # 🔥 [CORREÇÃO 0 - NOVO] SISTEMA DE LIMITES E PLANO DA PLATAFORMA
+                # ============================================================
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS plano_plataforma VARCHAR DEFAULT 'free';",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS max_bots INTEGER DEFAULT 20;",
+
                 # --- [CORREÇÃO 1] TABELA DE PLANOS ---
                 "ALTER TABLE planos_config ADD COLUMN IF NOT EXISTS key_id VARCHAR;",
                 "ALTER TABLE planos_config ADD COLUMN IF NOT EXISTS descricao TEXT;",
