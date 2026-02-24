@@ -2123,8 +2123,8 @@ def create_access_token(data: dict, expires_delta: timedelta = None):
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     """
     Decodifica token e retorna usuário atual.
-    🔥 FIX CRÍTICO: Usa expunge() para desconectar o objeto da sessão de forma segura,
-    permitindo que ele seja usado em outras sessões sem DetachedInstanceError.
+    🔥 FIX DEFINITIVO: Usa make_transient() para desconectar o objeto da sessão
+    mantendo TODOS os atributos carregados acessíveis após fechar a sessão.
     """
     credentials_exception = HTTPException(
         status_code=401,
@@ -2145,30 +2145,44 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     
     db = SessionLocal()
     try:
-        from sqlalchemy.orm import joinedload, subqueryload
+        from sqlalchemy.orm import joinedload
+        from sqlalchemy.orm.session import make_transient
         
-        # 🔥 EAGER LOADING COMPLETO: Carrega bots E relações críticas ANTES de fechar sessão
+        # 🔥 EAGER LOADING para carregar bots ANTES de fechar sessão
         user = db.query(User).options(
-            subqueryload(User.bots)
+            joinedload(User.bots)
         ).filter(User.id == user_id).first()
         
         if user is None:
             raise credentials_exception
         
-        # 🔥 Forçar o carregamento COMPLETO de todas as relações necessárias
+        # 🔥 Forçar o carregamento COMPLETO de relações e atributos escalares
         _ = user.bots
         _ = [b.id for b in user.bots]
+        _ = user.is_superuser
+        _ = user.username
+        _ = user.is_active
+        _ = user.id
+        _ = getattr(user, 'pushin_pay_id', None)
+        _ = getattr(user, 'taxa_venda', None)
+        _ = getattr(user, 'full_name', None)
+        _ = getattr(user, 'plano_plataforma', 'free')
+        _ = getattr(user, 'max_bots', 20)
         
-        # 🔥 FIX: Expunge remove o objeto da sessão mas MANTÉM os dados carregados
+        # 🔥 FIX DEFINITIVO: Expunge + make_transient
         db.expunge(user)
+        make_transient(user)
         for bot in user.bots:
             db.expunge(bot)
+            make_transient(bot)
         
         return user
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"❌ Erro ao carregar usuário (ID: {user_id}): {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise credentials_exception
     finally:
         db.close()
@@ -5992,6 +6006,21 @@ def criar_bot(
     e devolve o ID para o Frontend continuar o fluxo (Step 1 -> Step 2).
     """
     
+    # 🆕 VALIDAÇÃO DE LIMITE DE BOTS
+    if not current_user.is_superuser:
+        max_bots = getattr(current_user, 'max_bots', 20) or 20
+        bots_ativos = db.query(BotModel).filter(
+            BotModel.owner_id == current_user.id,
+            BotModel.status != 'deletado'
+        ).count()
+        
+        if bots_ativos >= max_bots:
+            plano = getattr(current_user, 'plano_plataforma', 'free') or 'free'
+            raise HTTPException(
+                status_code=403, 
+                detail=f"Limite de {max_bots} bots atingido no plano {plano.upper()}. Exclua bots inativos ou faça upgrade do seu plano."
+            )
+    
     # 1. VERIFICAÇÃO PREVENTIVA (Evita explosão de erro 500 no banco)
     bot_existente = db.query(BotModel).filter(BotModel.token == bot_data.token).first()
     if bot_existente:
@@ -6876,8 +6905,13 @@ def listar_bots(
     🔥 [CORRIGIDO] Lista bots + Revenue (Pagos/Expirados) + Suporte Username
     🔒 PROTEGIDO: Apenas bots do usuário logado
     """
-    # 🔒 FILTRA APENAS BOTS DO USUÁRIO
-    bots = db.query(BotModel).filter(BotModel.owner_id == current_user.id).all()
+    # 🔒 FILTRA APENAS BOTS DO USUÁRIO (ordenados pela ordem do seletor)
+    bots = db.query(BotModel).filter(
+        BotModel.owner_id == current_user.id
+    ).order_by(
+        BotModel.selector_order.asc(),
+        BotModel.created_at.desc()
+    ).all()
     
     # ... RESTO DO CÓDIGO PERMANECE IGUAL (não mude nada abaixo daqui)
     result = []
@@ -6919,10 +6953,67 @@ def listar_bots(
             "status": bot.status,
             "leads": leads_count,
             "revenue": revenue,
-            "created_at": bot.created_at
+            "created_at": bot.created_at,
+            "selector_order": getattr(bot, 'selector_order', 0) or 0
         })
     
     return result
+
+# 🆕 ENDPOINT: CONSULTAR LIMITE DE BOTS DO USUÁRIO
+@app.get("/api/admin/bot-limit")
+def get_bot_limit(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Retorna quantos bots o usuário tem e seu limite máximo"""
+    bots_ativos = db.query(BotModel).filter(
+        BotModel.owner_id == current_user.id,
+        BotModel.status != 'deletado'
+    ).count()
+    
+    max_bots = getattr(current_user, 'max_bots', 20) or 20
+    plano = getattr(current_user, 'plano_plataforma', 'free') or 'free'
+    
+    # Super admin = ilimitado
+    if current_user.is_superuser:
+        max_bots = 9999
+        plano = 'admin'
+    
+    return {
+        "current": bots_ativos,
+        "max": max_bots,
+        "plano": plano,
+        "can_create": bots_ativos < max_bots
+    }
+
+# 🆕 ENDPOINT: SALVAR ORDEM DOS BOTS NO SELETOR (drag-and-drop)
+@app.put("/api/admin/bots/selector-order")
+def update_selector_order(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Recebe { order: [bot_id_1, bot_id_2, ...] }
+    Salva a ordem para exibir no seletor (os primeiros 7 aparecem no dropdown)
+    """
+    order_list = payload.get("order", [])
+    
+    if not order_list:
+        raise HTTPException(400, "Lista de ordem vazia")
+    
+    updated = 0
+    for idx, bot_id in enumerate(order_list):
+        bot = db.query(BotModel).filter(
+            BotModel.id == int(bot_id),
+            BotModel.owner_id == current_user.id
+        ).first()
+        if bot:
+            bot.selector_order = idx + 1  # 1-based order
+            updated += 1
+    
+    db.commit()
+    return {"status": "ok", "updated": updated}
 
 # ===========================
 # 💎 PLANOS & FLUXO
@@ -16848,6 +16939,84 @@ async def migrate_prime_v1(db: Session = Depends(get_db)):
         return {
             "status": "success",
             "message": "🚀 Migração Prime V1 concluída!",
+            "details": log_msgs
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"❌ Erro crítico na migração: {str(e)}"
+        }
+
+# ============================================================
+# 🔒 MIGRAÇÃO: SISTEMA DE LIMITES DE BOTS + SELETOR INTELIGENTE
+# ============================================================
+@app.get("/migrate-bot-limits-v1")
+async def migrate_bot_limits_v1(db: Session = Depends(get_db)):
+    """
+    Migração para o sistema de limites de bots e seletor inteligente:
+    1. users.plano_plataforma (VARCHAR DEFAULT 'free')
+    2. users.max_bots (INTEGER DEFAULT 20)
+    3. bots.selector_order (INTEGER DEFAULT 0)
+    
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-bot-limits-v1
+    """
+    try:
+        from sqlalchemy import text
+        
+        log_msgs = []
+        
+        # 1. users.plano_plataforma
+        try:
+            db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS plano_plataforma VARCHAR DEFAULT 'free';"))
+            db.commit()
+            log_msgs.append("✅ users.plano_plataforma adicionado (default: 'free')")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ users.plano_plataforma: {str(e)}")
+        
+        # 2. users.max_bots
+        try:
+            db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_bots INTEGER DEFAULT 20;"))
+            db.commit()
+            log_msgs.append("✅ users.max_bots adicionado (default: 20)")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ users.max_bots: {str(e)}")
+        
+        # 3. bots.selector_order
+        try:
+            db.execute(text("ALTER TABLE bots ADD COLUMN IF NOT EXISTS selector_order INTEGER DEFAULT 0;"))
+            db.commit()
+            log_msgs.append("✅ bots.selector_order adicionado (default: 0)")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ bots.selector_order: {str(e)}")
+        
+        # 4. Definir ordem inicial para bots existentes (por data de criação)
+        try:
+            owners = db.execute(text("SELECT DISTINCT owner_id FROM bots WHERE owner_id IS NOT NULL")).fetchall()
+            total_updated = 0
+            for row in owners:
+                owner_id = row[0]
+                bots = db.execute(text(
+                    "SELECT id FROM bots WHERE owner_id = :oid ORDER BY created_at ASC"
+                ), {"oid": owner_id}).fetchall()
+                for idx, bot_row in enumerate(bots):
+                    db.execute(text(
+                        "UPDATE bots SET selector_order = :order WHERE id = :bid"
+                    ), {"order": idx + 1, "bid": bot_row[0]})
+                    total_updated += 1
+            db.commit()
+            log_msgs.append(f"✅ {total_updated} bots receberam ordem inicial no seletor")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ Ordem inicial: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "🚀 Migração Bot Limits V1 concluída!",
             "details": log_msgs
         }
         

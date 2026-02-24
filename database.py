@@ -66,6 +66,10 @@ class User(Base):
     
     taxa_venda = Column(Integer, default=60)         # Taxa em centavos (Padrão: 60)
 
+    # 🆕 SISTEMA DE LIMITES DE BOTS
+    plano_plataforma = Column(String, default="free")  # 'free', 'vip', 'enterprise'
+    max_bots = Column(Integer, default=20)             # Limite de bots (Free=20, VIP=100, Enterprise=ilimitado)
+
     # RELACIONAMENTO: Um usuário possui vários bots
     bots = relationship("Bot", back_populates="owner")
     
@@ -131,6 +135,9 @@ class Bot(Base):
     protect_content = Column(Boolean, default=False)
 
     created_at = Column(DateTime, default=now_brazil)
+    
+    # 🆕 ORDEM NO SELETOR DE BOTS (drag-and-drop)
+    selector_order = Column(Integer, default=0)  # 0 = sem ordem definida, menor = aparece primeiro
     
     # 🆕 RELACIONAMENTO COM USUÁRIO (OWNER)
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # nullable=True para migração
