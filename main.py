@@ -2156,11 +2156,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
             raise credentials_exception
         
         # 🔥 Forçar o carregamento COMPLETO de todas as relações necessárias
-        _ = user.bots  # Garante que está carregado
-        _ = [b.id for b in user.bots]  # Itera para materializar completamente
+        _ = user.bots
+        _ = [b.id for b in user.bots]
         
         # 🔥 FIX: Expunge remove o objeto da sessão mas MANTÉM os dados carregados
-        # Isso evita DetachedInstanceError quando a sessão é fechada
         db.expunge(user)
         for bot in user.bots:
             db.expunge(bot)
@@ -7857,15 +7856,12 @@ def get_tracking_link_metrics(
         if total_vendas <= 0:
             conversao = 0.0
         elif leads_count > 0 and leads_count >= total_vendas:
-            # Leads é uma base confiável (mais leads que vendas)
             conversao = round((total_vendas / leads_count * 100), 2)
         elif clicks_count > 0:
-            # Fallback para cliques quando leads < vendas ou leads = 0
             conversao = round((total_vendas / clicks_count * 100), 2)
         else:
             conversao = 0.0
         
-        # Cap em 100% para não mostrar valores absurdos
         conversao = min(conversao, 100.0)
         
         return {
@@ -9095,6 +9091,21 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                                 except:
                                     pass
                             
+                            # 🔥 FIX: Se pedido não tem tracking_id, tenta buscar via Lead
+                            if not tracking_info and pedido.telegram_id:
+                                try:
+                                    lead_track = db.query(Lead).filter(
+                                        Lead.user_id == str(pedido.telegram_id),
+                                        Lead.bot_id == pedido.bot_id,
+                                        Lead.tracking_id != None
+                                    ).first()
+                                    if lead_track and lead_track.tracking_id:
+                                        tl_fallback = db.query(TrackingLink).filter(TrackingLink.id == lead_track.tracking_id).first()
+                                        if tl_fallback and tl_fallback.codigo:
+                                            tracking_info = f"\n📊 Origem: <b>{tl_fallback.codigo}</b> (via lead)"
+                                except:
+                                    pass
+                            
                             msg_admin = (
                                 f"💰 <b>VENDA REALIZADA!</b>\n\n"
                                 f"🤖 Bot: <b>{bot_data.nome}</b>\n"
@@ -10208,8 +10219,18 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         return {"status": "error"}
                     
                     lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
-                    # 🔥 CORREÇÃO MESTRE: Vendas de remarketing não devem ser atribuídas ao link antigo do lead.
+                    # 🔥 FIX: Busca tracking do remarketing automático (não do link original do lead)
                     track_id_pedido = None
+                    try:
+                        _rmkt_track = db.query(TrackingLink).filter(
+                            TrackingLink.bot_id == bot_db.id,
+                            TrackingLink.origem == 'remarketing'
+                        ).order_by(TrackingLink.created_at.desc()).first()
+                        if _rmkt_track:
+                            track_id_pedido = _rmkt_track.id
+                            logger.info(f"📊 [CHECKOUT-PROMO] Tracking #{_rmkt_track.id} vinculado ao pedido de {chat_id}")
+                    except Exception as e_track:
+                        logger.warning(f"⚠️ Erro ao buscar tracking checkout promo: {e_track}")
                     
                     # Calcula desconto visual
                     desconto_percentual = 0
@@ -10383,8 +10404,20 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     # Gera PIX com valor promocional
                     lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
-                    # 🔥 CORREÇÃO MESTRE: Disparos automáticos não devem sujar o link original
+                    # 🔥 FIX: Busca tracking do remarketing automático (não do link original do lead)
+                    # Tenta buscar o TrackingLink vinculado ao remarketing automático desse bot
                     track_id_pedido = None
+                    try:
+                        # Busca o tracking link de remarketing automático mais recente para esse bot
+                        _rmkt_track = db.query(TrackingLink).filter(
+                            TrackingLink.bot_id == bot_db.id,
+                            TrackingLink.origem == 'remarketing'
+                        ).order_by(TrackingLink.created_at.desc()).first()
+                        if _rmkt_track:
+                            track_id_pedido = _rmkt_track.id
+                            logger.info(f"📊 [REMARKETING-AUTO] Tracking #{_rmkt_track.id} vinculado ao pedido de {chat_id}")
+                    except Exception as e_track:
+                        logger.warning(f"⚠️ Erro ao buscar tracking remarketing auto: {e_track}")
                     
                     desconto_percentual = 0
                     if plano.preco_atual > valor_final:
@@ -13205,8 +13238,8 @@ def dashboard_stats(
         query_active = db.query(Pedido).filter(
             Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
             or_(
-                Pedido.data_expiracao > now_brazil(),    # Planos com data: ainda não expirou
-                Pedido.data_expiracao == None              # Planos vitalícios: sem data = ativo para sempre
+                Pedido.data_expiracao > now_brazil(),
+                Pedido.data_expiracao == None
             )
         )
         if not is_super_with_split or bot_id:
@@ -13423,8 +13456,8 @@ def advanced_statistics(
             db.query(Pedido).filter(
                 Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
                 or_(
-                    Pedido.data_expiracao > agora,       # Planos com prazo: ainda válidos
-                    Pedido.data_expiracao == None          # Planos vitalícios: sempre ativos
+                    Pedido.data_expiracao > agora,
+                    Pedido.data_expiracao == None
                 )
             )
         )
@@ -15444,12 +15477,12 @@ def obter_ranking(
             db.query(
                 User.username,
                 func.sum(Pedido.valor).label("total_faturado"),
-                func.count(Pedido.id).label("total_vendas")  # 🔥 Conta a quantidade de vendas
+                func.count(Pedido.id).label("total_vendas")
             )
             .join(BotModel, BotModel.owner_id == User.id)
             .join(Pedido, Pedido.bot_id == BotModel.id)
             .filter(Pedido.data_aprovacao != None)
-            .filter(Pedido.status.in_(['approved', 'paid', 'active', 'expired']))  # 🔥 FIX: Filtrar apenas vendas reais
+            .filter(Pedido.status.in_(['approved', 'paid', 'active', 'expired']))
             .filter(User.is_superuser == False)
             .filter(extract('month', Pedido.data_aprovacao) == mes)
             .filter(extract('year', Pedido.data_aprovacao) == ano)
