@@ -15712,6 +15712,46 @@ def impersonate_user(
 
 
 # =========================================================
+# ✨ SCHEMAS: EMOJIS PREMIUM
+# =========================================================
+class PremiumEmojiPackCreate(BaseModel):
+    name: str
+    icon: Optional[str] = "📦"
+    description: Optional[str] = None
+    sort_order: int = 0
+
+class PremiumEmojiPackUpdate(BaseModel):
+    name: Optional[str] = None
+    icon: Optional[str] = None
+    description: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+class PremiumEmojiCreate(BaseModel):
+    emoji_id: str
+    fallback: str
+    name: str
+    shortcode: str
+    pack_id: Optional[int] = None
+    sort_order: int = 0
+    emoji_type: str = "static"
+    thumbnail_url: Optional[str] = None
+
+class PremiumEmojiBulkCreate(BaseModel):
+    emojis: List[PremiumEmojiCreate]
+
+class PremiumEmojiUpdate(BaseModel):
+    emoji_id: Optional[str] = None
+    fallback: Optional[str] = None
+    name: Optional[str] = None
+    shortcode: Optional[str] = None
+    pack_id: Optional[int] = None
+    sort_order: Optional[int] = None
+    emoji_type: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    is_active: Optional[bool] = None
+
+# =========================================================
 # ✨ EMOJIS PREMIUM - ROTAS SUPER ADMIN (CRUD COMPLETO)
 # =========================================================
 
@@ -16147,47 +16187,6 @@ class BroadcastSchema(BaseModel):
     title: str
     message: str
     type: str = "info"
-
-# =========================================================
-# ✨ SCHEMAS: EMOJIS PREMIUM
-# =========================================================
-class PremiumEmojiPackCreate(BaseModel):
-    name: str
-    icon: Optional[str] = "📦"
-    description: Optional[str] = None
-    sort_order: int = 0
-
-class PremiumEmojiPackUpdate(BaseModel):
-    name: Optional[str] = None
-    icon: Optional[str] = None
-    description: Optional[str] = None
-    sort_order: Optional[int] = None
-    is_active: Optional[bool] = None
-
-class PremiumEmojiCreate(BaseModel):
-    emoji_id: str                       # ID do Telegram: "5408846744727334338"
-    fallback: str                        # Emoji fallback: "🔥"
-    name: str                            # Nome amigável: "Fogo Animado"
-    shortcode: str                       # Shortcode: ":fire_premium:"
-    pack_id: Optional[int] = None        # Pacote/Categoria
-    sort_order: int = 0
-    emoji_type: str = "static"           # "static" ou "animated"
-    thumbnail_url: Optional[str] = None
-
-class PremiumEmojiBulkCreate(BaseModel):
-    """Para cadastrar vários emojis de uma vez."""
-    emojis: List[PremiumEmojiCreate]
-
-class PremiumEmojiUpdate(BaseModel):
-    emoji_id: Optional[str] = None
-    fallback: Optional[str] = None
-    name: Optional[str] = None
-    shortcode: Optional[str] = None
-    pack_id: Optional[int] = None
-    sort_order: Optional[int] = None
-    emoji_type: Optional[str] = None
-    thumbnail_url: Optional[str] = None
-    is_active: Optional[bool] = None
 
 
 @app.get("/api/admin/config")
