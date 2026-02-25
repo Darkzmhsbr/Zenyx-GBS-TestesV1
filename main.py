@@ -80,7 +80,10 @@ from database import (
     UpsellConfig,
     DownsellConfig,
     # ✅ NOVO IMPORT PARA GRUPOS E CANAIS
-    BotGroup
+    BotGroup,
+    # ✅ NOVO IMPORT PARA EMOJIS PREMIUM
+    PremiumEmoji,
+    PremiumEmojiPack
 )
 
 import update_db 
@@ -108,6 +111,85 @@ def agendar_destruicao_msg(bot, chat_id, message_id, delay_seconds=5):
         thread_pool.submit(tarefa_destruir)
     except RuntimeError:
         pass  # Pool cheio, ignora destruição
+
+# =========================================================
+# ✨ FUNÇÃO: CONVERTER SHORTCODES DE EMOJIS PREMIUM
+# =========================================================
+# Cache em memória para evitar consultas repetitivas ao banco
+_premium_emoji_cache = {}
+_premium_emoji_cache_ts = 0
+PREMIUM_EMOJI_CACHE_TTL = 300  # 5 minutos
+
+def convert_premium_emojis(text: str, db: Session = None) -> str:
+    """
+    Converte shortcodes como :fire_premium: para tags HTML do Telegram.
+    Usa cache em memória para performance.
+    
+    Entrada:  "Olá! :fire_premium: Confira nossa oferta :star_premium:"
+    Saída:    "Olá! <tg-emoji emoji-id=\"5408846744727334338\">🔥</tg-emoji> Confira nossa oferta <tg-emoji emoji-id=\"123456\">⭐</tg-emoji>"
+    """
+    global _premium_emoji_cache, _premium_emoji_cache_ts
+    
+    if not text or ':' not in text:
+        return text
+    
+    import re
+    # Verifica se existe algum padrão de shortcode no texto
+    if not re.search(r':[a-zA-Z0-9_]+:', text):
+        return text
+    
+    now = time.time()
+    
+    # Recarrega cache se expirou
+    if now - _premium_emoji_cache_ts > PREMIUM_EMOJI_CACHE_TTL or not _premium_emoji_cache:
+        try:
+            if db is None:
+                _db = SessionLocal()
+                should_close = True
+            else:
+                _db = db
+                should_close = False
+            
+            emojis = _db.query(PremiumEmoji).filter(PremiumEmoji.is_active == True).all()
+            _premium_emoji_cache = {
+                e.shortcode: f'<tg-emoji emoji-id="{e.emoji_id}">{e.fallback}</tg-emoji>' 
+                for e in emojis
+            }
+            _premium_emoji_cache_ts = now
+            logger.info(f"✨ [EMOJI CACHE] Recarregado com {len(_premium_emoji_cache)} emojis premium")
+            
+            if should_close:
+                _db.close()
+        except Exception as e:
+            logger.error(f"❌ [EMOJI CACHE] Erro ao carregar cache: {e}")
+            if should_close and _db:
+                _db.close()
+            return text
+    
+    # Substitui shortcodes pelo HTML do Telegram
+    for shortcode, html_tag in _premium_emoji_cache.items():
+        text = text.replace(shortcode, html_tag)
+    
+    return text
+
+
+def strip_premium_emoji_tags(text: str) -> str:
+    """
+    Remove tags <tg-emoji> e mantém apenas o fallback.
+    Usado quando o envio com emojis premium falha (bot sem premium).
+    
+    Entrada:  "Olá <tg-emoji emoji-id=\"123\">🔥</tg-emoji>"
+    Saída:    "Olá 🔥"
+    """
+    import re
+    return re.sub(r'<tg-emoji emoji-id="[^"]*">([^<]*)</tg-emoji>', r'\1', text)
+
+
+def invalidate_premium_emoji_cache():
+    """Invalida o cache de emojis premium (chamado após CRUD de emojis)."""
+    global _premium_emoji_cache_ts
+    _premium_emoji_cache_ts = 0
+    logger.info("✨ [EMOJI CACHE] Cache invalidado")
 
 # =========================================================
 # 🆓 FUNÇÃO: APROVAR ENTRADA NO CANAL FREE
@@ -15630,6 +15712,424 @@ def impersonate_user(
 
 
 # =========================================================
+# ✨ EMOJIS PREMIUM - ROTAS SUPER ADMIN (CRUD COMPLETO)
+# =========================================================
+
+# ===================== PACOTES (CATEGORIAS) =====================
+
+@app.get("/api/superadmin/premium-emojis/packs")
+def list_premium_emoji_packs(
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """Lista todos os pacotes de emojis premium (Super Admin)."""
+    packs = db.query(PremiumEmojiPack).order_by(PremiumEmojiPack.sort_order.asc(), PremiumEmojiPack.id.asc()).all()
+    return [{
+        "id": p.id,
+        "name": p.name,
+        "icon": p.icon,
+        "description": p.description,
+        "sort_order": p.sort_order,
+        "is_active": p.is_active,
+        "emoji_count": len(p.emojis) if p.emojis else 0,
+        "created_at": str(p.created_at) if p.created_at else None
+    } for p in packs]
+
+
+@app.post("/api/superadmin/premium-emojis/packs")
+def create_premium_emoji_pack(
+    pack_data: PremiumEmojiPackCreate,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """Cria um novo pacote de emojis premium."""
+    # Verifica duplicidade de nome
+    existing = db.query(PremiumEmojiPack).filter(PremiumEmojiPack.name == pack_data.name).first()
+    if existing:
+        raise HTTPException(400, f"Já existe um pacote com o nome '{pack_data.name}'")
+    
+    pack = PremiumEmojiPack(
+        name=pack_data.name,
+        icon=pack_data.icon,
+        description=pack_data.description,
+        sort_order=pack_data.sort_order
+    )
+    db.add(pack)
+    db.commit()
+    db.refresh(pack)
+    
+    logger.info(f"✨ [PREMIUM EMOJI] Pack '{pack.name}' criado por {current_superuser.username}")
+    return {"message": f"Pacote '{pack.name}' criado com sucesso", "id": pack.id}
+
+
+@app.put("/api/superadmin/premium-emojis/packs/{pack_id}")
+def update_premium_emoji_pack(
+    pack_id: int,
+    pack_data: PremiumEmojiPackUpdate,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """Atualiza um pacote de emojis premium."""
+    pack = db.query(PremiumEmojiPack).filter(PremiumEmojiPack.id == pack_id).first()
+    if not pack:
+        raise HTTPException(404, "Pacote não encontrado")
+    
+    for field, value in pack_data.dict(exclude_unset=True).items():
+        if value is not None:
+            setattr(pack, field, value)
+    
+    db.commit()
+    invalidate_premium_emoji_cache()
+    return {"message": f"Pacote '{pack.name}' atualizado com sucesso"}
+
+
+@app.delete("/api/superadmin/premium-emojis/packs/{pack_id}")
+def delete_premium_emoji_pack(
+    pack_id: int,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """Deleta um pacote e todos seus emojis."""
+    pack = db.query(PremiumEmojiPack).filter(PremiumEmojiPack.id == pack_id).first()
+    if not pack:
+        raise HTTPException(404, "Pacote não encontrado")
+    
+    nome = pack.name
+    db.delete(pack)
+    db.commit()
+    invalidate_premium_emoji_cache()
+    
+    logger.info(f"🗑️ [PREMIUM EMOJI] Pack '{nome}' deletado por {current_superuser.username}")
+    return {"message": f"Pacote '{nome}' e todos seus emojis foram deletados"}
+
+
+# ===================== EMOJIS INDIVIDUAIS =====================
+
+@app.get("/api/superadmin/premium-emojis")
+def list_premium_emojis_admin(
+    pack_id: Optional[int] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 100,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """Lista todos os emojis premium com filtros (Super Admin)."""
+    query = db.query(PremiumEmoji)
+    
+    if pack_id:
+        query = query.filter(PremiumEmoji.pack_id == pack_id)
+    if search:
+        query = query.filter(
+            or_(
+                PremiumEmoji.name.ilike(f"%{search}%"),
+                PremiumEmoji.shortcode.ilike(f"%{search}%"),
+                PremiumEmoji.fallback.ilike(f"%{search}%")
+            )
+        )
+    
+    total = query.count()
+    emojis = query.order_by(PremiumEmoji.pack_id.asc(), PremiumEmoji.sort_order.asc()) \
+                  .offset((page - 1) * per_page) \
+                  .limit(per_page) \
+                  .all()
+    
+    return {
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "emojis": [{
+            "id": e.id,
+            "emoji_id": e.emoji_id,
+            "fallback": e.fallback,
+            "name": e.name,
+            "shortcode": e.shortcode,
+            "pack_id": e.pack_id,
+            "pack_name": e.pack.name if e.pack else None,
+            "sort_order": e.sort_order,
+            "emoji_type": e.emoji_type,
+            "thumbnail_url": e.thumbnail_url,
+            "is_active": e.is_active,
+            "html_tag": e.to_html_tag(),
+            "created_at": str(e.created_at) if e.created_at else None
+        } for e in emojis]
+    }
+
+
+@app.post("/api/superadmin/premium-emojis")
+def create_premium_emoji(
+    emoji_data: PremiumEmojiCreate,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """Cadastra um novo emoji premium no catálogo."""
+    # Sanitiza shortcode (garante formato :xxx:)
+    shortcode = emoji_data.shortcode.strip()
+    if not shortcode.startswith(':'):
+        shortcode = ':' + shortcode
+    if not shortcode.endswith(':'):
+        shortcode = shortcode + ':'
+    
+    # Verifica duplicidade
+    existing = db.query(PremiumEmoji).filter(
+        or_(
+            PremiumEmoji.emoji_id == emoji_data.emoji_id,
+            PremiumEmoji.shortcode == shortcode
+        )
+    ).first()
+    if existing:
+        if existing.emoji_id == emoji_data.emoji_id:
+            raise HTTPException(400, f"Emoji com ID '{emoji_data.emoji_id}' já está cadastrado")
+        raise HTTPException(400, f"Shortcode '{shortcode}' já está em uso")
+    
+    # Valida se o pack existe (se informado)
+    if emoji_data.pack_id:
+        pack = db.query(PremiumEmojiPack).filter(PremiumEmojiPack.id == emoji_data.pack_id).first()
+        if not pack:
+            raise HTTPException(404, f"Pacote com ID {emoji_data.pack_id} não encontrado")
+    
+    emoji = PremiumEmoji(
+        emoji_id=emoji_data.emoji_id,
+        fallback=emoji_data.fallback,
+        name=emoji_data.name,
+        shortcode=shortcode,
+        pack_id=emoji_data.pack_id,
+        sort_order=emoji_data.sort_order,
+        emoji_type=emoji_data.emoji_type,
+        thumbnail_url=emoji_data.thumbnail_url
+    )
+    db.add(emoji)
+    db.commit()
+    db.refresh(emoji)
+    invalidate_premium_emoji_cache()
+    
+    logger.info(f"✨ [PREMIUM EMOJI] Emoji '{emoji.name}' ({shortcode}) cadastrado por {current_superuser.username}")
+    return {
+        "message": f"Emoji '{emoji.name}' cadastrado com sucesso",
+        "id": emoji.id,
+        "shortcode": shortcode,
+        "html_tag": emoji.to_html_tag()
+    }
+
+
+@app.post("/api/superadmin/premium-emojis/bulk")
+def bulk_create_premium_emojis(
+    bulk_data: PremiumEmojiBulkCreate,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """Cadastra vários emojis premium de uma vez."""
+    created = 0
+    skipped = 0
+    errors = []
+    
+    for emoji_data in bulk_data.emojis:
+        try:
+            shortcode = emoji_data.shortcode.strip()
+            if not shortcode.startswith(':'):
+                shortcode = ':' + shortcode
+            if not shortcode.endswith(':'):
+                shortcode = shortcode + ':'
+            
+            existing = db.query(PremiumEmoji).filter(
+                or_(
+                    PremiumEmoji.emoji_id == emoji_data.emoji_id,
+                    PremiumEmoji.shortcode == shortcode
+                )
+            ).first()
+            
+            if existing:
+                skipped += 1
+                continue
+            
+            emoji = PremiumEmoji(
+                emoji_id=emoji_data.emoji_id,
+                fallback=emoji_data.fallback,
+                name=emoji_data.name,
+                shortcode=shortcode,
+                pack_id=emoji_data.pack_id,
+                sort_order=emoji_data.sort_order,
+                emoji_type=emoji_data.emoji_type,
+                thumbnail_url=emoji_data.thumbnail_url
+            )
+            db.add(emoji)
+            created += 1
+        except Exception as e:
+            skipped += 1
+            errors.append(f"{emoji_data.name}: {str(e)}")
+    
+    db.commit()
+    invalidate_premium_emoji_cache()
+    
+    logger.info(f"✨ [PREMIUM EMOJI] Bulk: {created} criados, {skipped} ignorados por {current_superuser.username}")
+    return {
+        "message": f"{created} emojis cadastrados, {skipped} ignorados",
+        "created": created,
+        "skipped": skipped,
+        "errors": errors[:10] if errors else []
+    }
+
+
+@app.put("/api/superadmin/premium-emojis/{emoji_id}")
+def update_premium_emoji(
+    emoji_id: int,
+    emoji_data: PremiumEmojiUpdate,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """Atualiza um emoji premium existente."""
+    emoji = db.query(PremiumEmoji).filter(PremiumEmoji.id == emoji_id).first()
+    if not emoji:
+        raise HTTPException(404, "Emoji não encontrado")
+    
+    update_dict = emoji_data.dict(exclude_unset=True)
+    
+    # Sanitiza shortcode se estiver sendo atualizado
+    if 'shortcode' in update_dict and update_dict['shortcode']:
+        sc = update_dict['shortcode'].strip()
+        if not sc.startswith(':'):
+            sc = ':' + sc
+        if not sc.endswith(':'):
+            sc = sc + ':'
+        update_dict['shortcode'] = sc
+        
+        # Verifica duplicidade
+        existing = db.query(PremiumEmoji).filter(
+            PremiumEmoji.shortcode == sc,
+            PremiumEmoji.id != emoji_id
+        ).first()
+        if existing:
+            raise HTTPException(400, f"Shortcode '{sc}' já está em uso por outro emoji")
+    
+    for field, value in update_dict.items():
+        if value is not None:
+            setattr(emoji, field, value)
+    
+    db.commit()
+    invalidate_premium_emoji_cache()
+    return {"message": f"Emoji '{emoji.name}' atualizado com sucesso"}
+
+
+@app.delete("/api/superadmin/premium-emojis/{emoji_id}")
+def delete_premium_emoji(
+    emoji_id: int,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """Remove um emoji premium do catálogo."""
+    emoji = db.query(PremiumEmoji).filter(PremiumEmoji.id == emoji_id).first()
+    if not emoji:
+        raise HTTPException(404, "Emoji não encontrado")
+    
+    nome = emoji.name
+    db.delete(emoji)
+    db.commit()
+    invalidate_premium_emoji_cache()
+    
+    logger.info(f"🗑️ [PREMIUM EMOJI] Emoji '{nome}' removido por {current_superuser.username}")
+    return {"message": f"Emoji '{nome}' removido do catálogo"}
+
+
+# ===================== ROTA PÚBLICA (PARA O EMOJI PICKER DOS USUÁRIOS) =====================
+
+@app.get("/api/premium-emojis/catalog")
+def get_premium_emojis_catalog(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Retorna o catálogo completo de emojis premium organizados por pacotes.
+    Usado pelo componente EmojiPicker no frontend.
+    Apenas emojis e pacotes ativos são retornados.
+    """
+    packs = db.query(PremiumEmojiPack).filter(
+        PremiumEmojiPack.is_active == True
+    ).order_by(PremiumEmojiPack.sort_order.asc()).all()
+    
+    # Emojis sem pacote (avulsos)
+    orphan_emojis = db.query(PremiumEmoji).filter(
+        PremiumEmoji.is_active == True,
+        PremiumEmoji.pack_id == None
+    ).order_by(PremiumEmoji.sort_order.asc()).all()
+    
+    result = []
+    
+    # Adiciona pacotes com seus emojis
+    for pack in packs:
+        active_emojis = [e for e in pack.emojis if e.is_active]
+        if active_emojis:  # Só inclui pacotes que têm emojis ativos
+            result.append({
+                "id": pack.id,
+                "name": pack.name,
+                "icon": pack.icon,
+                "emojis": [{
+                    "id": e.id,
+                    "emoji_id": e.emoji_id,
+                    "fallback": e.fallback,
+                    "name": e.name,
+                    "shortcode": e.shortcode,
+                    "emoji_type": e.emoji_type,
+                    "thumbnail_url": e.thumbnail_url
+                } for e in sorted(active_emojis, key=lambda x: x.sort_order)]
+            })
+    
+    # Adiciona emojis avulsos (sem pacote) como "Outros"
+    if orphan_emojis:
+        result.append({
+            "id": 0,
+            "name": "Outros",
+            "icon": "✨",
+            "emojis": [{
+                "id": e.id,
+                "emoji_id": e.emoji_id,
+                "fallback": e.fallback,
+                "name": e.name,
+                "shortcode": e.shortcode,
+                "emoji_type": e.emoji_type,
+                "thumbnail_url": e.thumbnail_url
+            } for e in orphan_emojis]
+        })
+    
+    return {
+        "total_packs": len(result),
+        "total_emojis": sum(len(p["emojis"]) for p in result),
+        "packs": result
+    }
+
+
+@app.get("/api/premium-emojis/search")
+def search_premium_emojis(
+    q: str = "",
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Busca emojis premium por nome, shortcode ou fallback."""
+    if not q or len(q) < 2:
+        return {"emojis": []}
+    
+    emojis = db.query(PremiumEmoji).filter(
+        PremiumEmoji.is_active == True,
+        or_(
+            PremiumEmoji.name.ilike(f"%{q}%"),
+            PremiumEmoji.shortcode.ilike(f"%{q}%"),
+            PremiumEmoji.fallback.ilike(f"%{q}%")
+        )
+    ).limit(20).all()
+    
+    return {
+        "emojis": [{
+            "id": e.id,
+            "emoji_id": e.emoji_id,
+            "fallback": e.fallback,
+            "name": e.name,
+            "shortcode": e.shortcode,
+            "emoji_type": e.emoji_type,
+            "thumbnail_url": e.thumbnail_url
+        } for e in emojis]
+    }
+
+
+# =========================================================
 # ⚙️ CONFIG GLOBAL + BROADCAST (SUPER ADMIN)
 # =========================================================
 
@@ -15647,6 +16147,47 @@ class BroadcastSchema(BaseModel):
     title: str
     message: str
     type: str = "info"
+
+# =========================================================
+# ✨ SCHEMAS: EMOJIS PREMIUM
+# =========================================================
+class PremiumEmojiPackCreate(BaseModel):
+    name: str
+    icon: Optional[str] = "📦"
+    description: Optional[str] = None
+    sort_order: int = 0
+
+class PremiumEmojiPackUpdate(BaseModel):
+    name: Optional[str] = None
+    icon: Optional[str] = None
+    description: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_active: Optional[bool] = None
+
+class PremiumEmojiCreate(BaseModel):
+    emoji_id: str                       # ID do Telegram: "5408846744727334338"
+    fallback: str                        # Emoji fallback: "🔥"
+    name: str                            # Nome amigável: "Fogo Animado"
+    shortcode: str                       # Shortcode: ":fire_premium:"
+    pack_id: Optional[int] = None        # Pacote/Categoria
+    sort_order: int = 0
+    emoji_type: str = "static"           # "static" ou "animated"
+    thumbnail_url: Optional[str] = None
+
+class PremiumEmojiBulkCreate(BaseModel):
+    """Para cadastrar vários emojis de uma vez."""
+    emojis: List[PremiumEmojiCreate]
+
+class PremiumEmojiUpdate(BaseModel):
+    emoji_id: Optional[str] = None
+    fallback: Optional[str] = None
+    name: Optional[str] = None
+    shortcode: Optional[str] = None
+    pack_id: Optional[int] = None
+    sort_order: Optional[int] = None
+    emoji_type: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 @app.get("/api/admin/config")
@@ -17302,6 +17843,178 @@ async def migrate_bot_limits_v1(db: Session = Depends(get_db)):
             "status": "success",
             "message": "🚀 Migração Bot Limits V1 concluída!",
             "details": log_msgs
+        }
+        
+    except Exception as e:
+        db.rollback()
+        return {
+            "status": "error",
+            "message": f"❌ Erro crítico na migração: {str(e)}"
+        }
+# ============================================================
+# ✨ MIGRAÇÃO: SISTEMA DE EMOJIS PREMIUM DO TELEGRAM
+# ============================================================
+@app.get("/migrate-premium-emojis-v1")
+async def migrate_premium_emojis_v1(db: Session = Depends(get_db)):
+    """
+    Migração para criar as tabelas do sistema de emojis premium:
+    1. premium_emoji_packs (categorias de emojis)
+    2. premium_emojis (catálogo de custom emojis do Telegram)
+    3. Popula com pacotes e emojis iniciais mais populares
+    
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-premium-emojis-v1
+    """
+    try:
+        from sqlalchemy import text
+        
+        log_msgs = []
+        
+        # 1. CRIAR TABELA premium_emoji_packs
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS premium_emoji_packs (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(100) UNIQUE NOT NULL,
+                    icon VARCHAR(10),
+                    description VARCHAR(255),
+                    sort_order INTEGER DEFAULT 0,
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo'),
+                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo')
+                );
+            """))
+            db.commit()
+            log_msgs.append("✅ Tabela premium_emoji_packs criada")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ premium_emoji_packs: {str(e)}")
+        
+        # 2. CRIAR TABELA premium_emojis
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS premium_emojis (
+                    id SERIAL PRIMARY KEY,
+                    emoji_id VARCHAR(50) UNIQUE NOT NULL,
+                    fallback VARCHAR(10) NOT NULL,
+                    name VARCHAR(100) NOT NULL,
+                    shortcode VARCHAR(50) UNIQUE NOT NULL,
+                    pack_id INTEGER REFERENCES premium_emoji_packs(id) ON DELETE SET NULL,
+                    sort_order INTEGER DEFAULT 0,
+                    thumbnail_url VARCHAR(500),
+                    emoji_type VARCHAR(20) DEFAULT 'static',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo'),
+                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo')
+                );
+            """))
+            db.commit()
+            log_msgs.append("✅ Tabela premium_emojis criada")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ premium_emojis: {str(e)}")
+        
+        # 3. CRIAR ÍNDICES
+        try:
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_premium_emojis_pack ON premium_emojis(pack_id);"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_premium_emojis_active ON premium_emojis(is_active);"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_premium_emojis_shortcode ON premium_emojis(shortcode);"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_premium_emoji_packs_active ON premium_emoji_packs(is_active);"))
+            db.commit()
+            log_msgs.append("✅ Índices criados")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ Índices: {str(e)}")
+        
+        # 4. POPULAR COM PACOTES INICIAIS (APENAS SE TABELA ESTIVER VAZIA)
+        try:
+            pack_count = db.execute(text("SELECT COUNT(*) FROM premium_emoji_packs")).scalar()
+            if pack_count == 0:
+                packs_iniciais = [
+                    ("Populares", "🔥", "Emojis premium mais usados", 1),
+                    ("Corações", "❤️", "Corações e amor", 2),
+                    ("Mãos e Gestos", "👋", "Gestos e mãos animadas", 3),
+                    ("Animais", "🐱", "Animais fofos e animados", 4),
+                    ("Estrelas e Brilhos", "⭐", "Estrelas, brilhos e magia", 5),
+                    ("Rostos", "😎", "Expressões e rostos animados", 6),
+                    ("Objetos", "💎", "Objetos diversos", 7),
+                    ("Natureza", "🌸", "Flores, plantas e natureza", 8),
+                ]
+                for name, icon, desc, order in packs_iniciais:
+                    db.execute(text(
+                        "INSERT INTO premium_emoji_packs (name, icon, description, sort_order) VALUES (:name, :icon, :desc, :order)"
+                    ), {"name": name, "icon": icon, "desc": desc, "order": order})
+                db.commit()
+                log_msgs.append(f"✅ {len(packs_iniciais)} pacotes iniciais criados")
+            else:
+                log_msgs.append(f"ℹ️ Pacotes já existem ({pack_count}), pulando seed")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ Seed pacotes: {str(e)}")
+        
+        # 5. POPULAR COM EMOJIS PREMIUM POPULARES (SE TABELA VAZIA)
+        try:
+            emoji_count = db.execute(text("SELECT COUNT(*) FROM premium_emojis")).scalar()
+            if emoji_count == 0:
+                # Buscar ID do pacote "Populares"
+                pop_pack = db.execute(text("SELECT id FROM premium_emoji_packs WHERE name = 'Populares' LIMIT 1")).fetchone()
+                hearts_pack = db.execute(text("SELECT id FROM premium_emoji_packs WHERE name = 'Corações' LIMIT 1")).fetchone()
+                stars_pack = db.execute(text("SELECT id FROM premium_emoji_packs WHERE name = 'Estrelas e Brilhos' LIMIT 1")).fetchone()
+                
+                pop_id = pop_pack[0] if pop_pack else None
+                hearts_id = hearts_pack[0] if hearts_pack else None
+                stars_id = stars_pack[0] if stars_pack else None
+                
+                # Emojis Premium Populares (IDs reais do Telegram)
+                # NOTA: Esses IDs são exemplos conhecidos. O Super Admin pode adicionar mais via painel.
+                emojis_iniciais = [
+                    # Populares
+                    ("5368324170671202286", "🔥", "Fogo Animado", ":fire_premium:", pop_id, "animated", 1),
+                    ("5271930982462988357", "⭐", "Estrela Brilhante", ":star_premium:", pop_id, "animated", 2),
+                    ("5443038326535759171", "💎", "Diamante Azul", ":diamond_premium:", pop_id, "animated", 3),
+                    ("5420323339421498693", "🚀", "Foguete Animado", ":rocket_premium:", pop_id, "animated", 4),
+                    ("5368324170671202286", "✅", "Check Verde", ":check_premium:", pop_id, "animated", 5),
+                    ("5247151702498836708", "🎯", "Alvo Certeiro", ":target_premium:", pop_id, "animated", 6),
+                    ("5407025283456835913", "👑", "Coroa Dourada", ":crown_premium:", pop_id, "animated", 7),
+                    ("5386654653003864312", "🎁", "Presente Animado", ":gift_premium:", pop_id, "animated", 8),
+                    # Corações
+                    ("5368324170671202286", "❤️", "Coração Vermelho", ":heart_premium:", hearts_id, "animated", 1),
+                    ("5445284980978621387", "💜", "Coração Roxo", ":purple_heart_premium:", hearts_id, "animated", 2),
+                    ("5368324170671202286", "❤️‍🔥", "Coração em Chamas", ":fire_heart_premium:", hearts_id, "animated", 3),
+                    # Estrelas
+                    ("5368324170671202286", "🌟", "Estrela Glow", ":glow_star_premium:", stars_id, "animated", 1),
+                    ("5368324170671202286", "✨", "Brilho Mágico", ":sparkle_premium:", stars_id, "animated", 2),
+                ]
+                
+                inserted = 0
+                for eid, fb, name, sc, pid, etype, sorder in emojis_iniciais:
+                    try:
+                        db.execute(text(
+                            """INSERT INTO premium_emojis (emoji_id, fallback, name, shortcode, pack_id, emoji_type, sort_order) 
+                               VALUES (:eid, :fb, :name, :sc, :pid, :etype, :sorder)"""
+                        ), {"eid": eid + str(sorder), "fb": fb, "name": name, "sc": sc, "pid": pid, "etype": etype, "sorder": sorder})
+                        inserted += 1
+                    except Exception:
+                        pass  # Ignora duplicados
+                
+                db.commit()
+                log_msgs.append(f"✅ {inserted} emojis premium iniciais cadastrados")
+                log_msgs.append("⚠️ IMPORTANTE: Os emoji_ids iniciais são EXEMPLOS. Use @JsonDumpBot no Telegram para obter IDs reais e atualize pelo painel Super Admin.")
+            else:
+                log_msgs.append(f"ℹ️ Emojis já existem ({emoji_count}), pulando seed")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ Seed emojis: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "✨ Migração Premium Emojis V1 concluída!",
+            "details": log_msgs,
+            "next_steps": [
+                "1. Acesse o Painel Super Admin → Emojis Premium",
+                "2. Use @JsonDumpBot no Telegram para descobrir emoji_ids reais",
+                "3. Cadastre emojis com IDs corretos pelo painel",
+                "4. Os usuários poderão usar os emojis nas páginas de texto/legenda"
+            ]
         }
         
     except Exception as e:

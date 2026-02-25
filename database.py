@@ -943,3 +943,83 @@ class BotGroup(Base):
 
     def __repr__(self):
         return f"<BotGroup(id={self.id}, bot_id={self.bot_id}, title='{self.title}', group_id='{self.group_id}', active={self.is_active})>"
+
+# =========================================================
+# ✨ EMOJIS PREMIUM (CUSTOM EMOJIS DO TELEGRAM)
+# =========================================================
+class PremiumEmojiPack(Base):
+    """
+    Pacotes/Categorias de emojis premium.
+    Permite organizar emojis em categorias como "Populares", "Corações", "Animais", etc.
+    Gerenciado exclusivamente pelo Super Admin.
+    """
+    __tablename__ = "premium_emoji_packs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True)  # Ex: "Populares", "Corações", "Animais"
+    icon = Column(String(10), nullable=True)                   # Emoji fallback do pacote: "🔥", "❤️", "🐱"
+    description = Column(String(255), nullable=True)           # Descrição breve
+    sort_order = Column(Integer, default=0)                    # Ordem de exibição
+    is_active = Column(Boolean, default=True, index=True)
+    
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
+    
+    # Relacionamento com emojis
+    emojis = relationship("PremiumEmoji", back_populates="pack", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<PremiumEmojiPack(id={self.id}, name='{self.name}', emojis={len(self.emojis) if self.emojis else 0})>"
+
+
+class PremiumEmoji(Base):
+    """
+    Catálogo de custom emojis premium do Telegram.
+    Cada emoji tem um ID numérico (custom_emoji_id) que é usado na tag <tg-emoji>.
+    O shortcode é o que o usuário digita/insere no campo de texto (ex: :fire_premium:).
+    O fallback é o emoji padrão exibido se o premium falhar.
+    
+    Uso no Telegram (HTML):
+        <tg-emoji emoji-id="5408846744727334338">🔥</tg-emoji>
+    
+    O Super Admin cadastra esses emojis via painel, e os usuários da plataforma
+    inserem via Emoji Picker visual nas páginas de texto/legenda.
+    """
+    __tablename__ = "premium_emojis"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Identificação do Emoji no Telegram
+    emoji_id = Column(String(50), unique=True, nullable=False, index=True)  # ID numérico do Telegram: "5408846744727334338"
+    
+    # Display
+    fallback = Column(String(10), nullable=False)            # Emoji padrão como fallback: "🔥"
+    name = Column(String(100), nullable=False)                # Nome amigável: "Fogo Animado"
+    shortcode = Column(String(50), unique=True, nullable=False, index=True)  # Shortcode: ":fire_premium:"
+    
+    # Organização
+    pack_id = Column(Integer, ForeignKey('premium_emoji_packs.id', ondelete='SET NULL'), nullable=True, index=True)
+    sort_order = Column(Integer, default=0)  # Ordem dentro do pacote
+    
+    # Thumbnail (URL da preview - pode ser preenchida via API getCustomEmojiStickers)
+    thumbnail_url = Column(String(500), nullable=True)
+    
+    # Tipo do emoji: 'static' ou 'animated'
+    emoji_type = Column(String(20), default='static')
+    
+    # Status
+    is_active = Column(Boolean, default=True, index=True)
+    
+    # Auditoria
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
+    
+    # Relacionamento com pacote
+    pack = relationship("PremiumEmojiPack", back_populates="emojis")
+    
+    def to_html_tag(self):
+        """Retorna a tag HTML do Telegram para este emoji premium."""
+        return f'<tg-emoji emoji-id="{self.emoji_id}">{self.fallback}</tg-emoji>'
+    
+    def __repr__(self):
+        return f"<PremiumEmoji(id={self.id}, name='{self.name}', shortcode='{self.shortcode}', emoji_id='{self.emoji_id}')>"
