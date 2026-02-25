@@ -6992,28 +6992,35 @@ def get_bot_limit(
         "can_create": bots_ativos < max_bots
     }
 
+# 1. CRIAMOS O "MOLDE" PARA O FASTAPI ENTENDER O JSON DO FRONTEND
+class SelectorOrderUpdate(BaseModel):
+    order: List[int]
+
 # 🆕 ENDPOINT: SALVAR ORDEM DOS BOTS NO SELETOR (drag-and-drop)
 @app.put("/api/admin/bots/selector-order")
 def update_selector_order(
-    payload: dict,
+    payload: SelectorOrderUpdate,  # Usamos o molde aqui em vez de 'dict'
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """
-    Recebe { order: [bot_id_1, bot_id_2, ...] }
+    Recebe { "order": [bot_id_1, bot_id_2, ...] }
     Salva a ordem para exibir no seletor (os primeiros 7 aparecem no dropdown)
     """
-    order_list = payload.get("order", [])
+    # Como usamos o molde, acessamos a lista diretamente com ".order"
+    order_list = payload.order
     
     if not order_list:
         raise HTTPException(400, "Lista de ordem vazia")
     
     updated = 0
     for idx, bot_id in enumerate(order_list):
+        # Mantive a sua lógica original de busca no banco!
         bot = db.query(BotModel).filter(
             BotModel.id == int(bot_id),
             BotModel.owner_id == current_user.id
         ).first()
+        
         if bot:
             bot.selector_order = idx + 1  # 1-based order
             updated += 1
