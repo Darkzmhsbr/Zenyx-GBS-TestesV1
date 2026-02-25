@@ -6997,7 +6997,7 @@ class SelectorOrderUpdate(BaseModel):
     order: List[int]
 
 # 🆕 ENDPOINT: SALVAR ORDEM DOS BOTS NO SELETOR (drag-and-drop)
-@app.put("/api/admin/bots/selector-order")
+@app.put("/api/admin/bot-selector-order")
 def update_selector_order(
     payload: SelectorOrderUpdate,  # Usamos o molde aqui em vez de 'dict'
     db: Session = Depends(get_db),
