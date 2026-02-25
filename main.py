@@ -6936,14 +6936,14 @@ def listar_bots(
         contatos_unicos = leads_ids.union(pedidos_ids)
         leads_count = len(contatos_unicos)
         
-        # 2. REVENUE (PAGOS + EXPIRADOS)
-        status_financeiro = ["approved", "paid", "active", "completed", "succeeded", "expired"]
+        # 2. REVENUE (em CENTAVOS - CONSISTENTE com dashboard/profile/statistics)
+        status_financeiro = ["approved", "paid", "active", "expired"]
         vendas_aprovadas = db.query(Pedido).filter(
             Pedido.bot_id == bot.id,
             Pedido.status.in_(status_financeiro)
         ).all()
         
-        revenue = sum([v.valor for v in vendas_aprovadas]) if vendas_aprovadas else 0.0
+        revenue = sum(int((v.valor or 0) * 100) for v in vendas_aprovadas)
         
         result.append({
             "id": bot.id,
@@ -7027,6 +7027,131 @@ def update_selector_order(
     
     db.commit()
     return {"status": "ok", "updated": updated}
+
+# 🆕 ENDPOINT: MÉTRICAS AVANÇADAS POR BOT (para modal "Visão Geral")
+@app.get("/api/admin/bots/{bot_id}/overview")
+def get_bot_overview(
+    bot_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Retorna métricas avançadas de um bot específico:
+    - Leads, faturamento total, assinantes ativos, conversão, plano mais vendido, etc.
+    Todos os valores monetários em CENTAVOS (frontend divide por 100).
+    """
+    bot = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    # ============================================
+    # 📊 STATUS PADRÃO (CONSISTENTE COM TODOS OS ENDPOINTS)
+    # ============================================
+    STATUS_FINANCEIRO = ['approved', 'paid', 'active', 'expired']
+    
+    # 1. VENDAS APROVADAS (ALL TIME)
+    vendas = db.query(Pedido).filter(
+        Pedido.bot_id == bot_id,
+        Pedido.status.in_(STATUS_FINANCEIRO)
+    ).all()
+    
+    # 2. FATURAMENTO TOTAL (em centavos, consistente com dashboard/profile)
+    faturamento_total = sum(int((p.valor or 0) * 100) for p in vendas)
+    total_vendas = len(vendas)
+    
+    # 3. LEADS TOTAIS (mesma lógica do listar_bots)
+    leads_ids = set()
+    leads_query = db.query(Lead.user_id).filter(Lead.bot_id == bot_id).all()
+    for lead in leads_query:
+        leads_ids.add(str(lead.user_id))
+    
+    pedidos_ids = set()
+    pedidos_query = db.query(Pedido.telegram_id).filter(Pedido.bot_id == bot_id).all()
+    for pedido in pedidos_query:
+        pedidos_ids.add(str(pedido.telegram_id))
+    
+    leads_totais = len(leads_ids.union(pedidos_ids))
+    
+    # 4. ASSINANTES ATIVOS (não expirados OU vitalícios)
+    assinantes_ativos = db.query(Pedido).filter(
+        Pedido.bot_id == bot_id,
+        Pedido.status.in_(STATUS_FINANCEIRO),
+        or_(
+            Pedido.data_expiracao > now_brazil(),
+            Pedido.data_expiracao == None
+        )
+    ).count()
+    
+    # 5. TAXA DE CONVERSÃO (vendas / leads * 100)
+    taxa_conversao = round((total_vendas / leads_totais) * 100, 2) if leads_totais > 0 else 0
+    if taxa_conversao > 100:
+        taxa_conversao = 100.0
+    
+    # 6. PLANO MAIS VENDIDO
+    plano_mais_vendido = None
+    try:
+        from sqlalchemy import func as sqlfunc
+        top_plano = db.query(
+            Pedido.plano_nome,
+            sqlfunc.count(Pedido.id).label('count')
+        ).filter(
+            Pedido.bot_id == bot_id,
+            Pedido.status.in_(STATUS_FINANCEIRO),
+            Pedido.plano_nome != None,
+            Pedido.plano_nome != ''
+        ).group_by(Pedido.plano_nome).order_by(sqlfunc.count(Pedido.id).desc()).first()
+        
+        if top_plano:
+            plano_mais_vendido = {
+                "nome": top_plano[0],
+                "vendas": top_plano[1]
+            }
+    except Exception:
+        pass
+    
+    # 7. TICKET MÉDIO (em centavos)
+    ticket_medio = int(faturamento_total / total_vendas) if total_vendas > 0 else 0
+    
+    # 8. VENDAS HOJE
+    hoje_start = now_brazil().replace(hour=0, minute=0, second=0, microsecond=0)
+    vendas_hoje = db.query(Pedido).filter(
+        Pedido.bot_id == bot_id,
+        Pedido.status.in_(STATUS_FINANCEIRO),
+        Pedido.data_aprovacao >= hoje_start
+    ).count()
+    
+    # 9. FATURAMENTO ÚLTIMOS 30 DIAS (em centavos)
+    data_30d = now_brazil() - timedelta(days=30)
+    vendas_30d = db.query(Pedido).filter(
+        Pedido.bot_id == bot_id,
+        Pedido.status.in_(STATUS_FINANCEIRO),
+        Pedido.data_aprovacao >= data_30d
+    ).all()
+    faturamento_30d = sum(int((p.valor or 0) * 100) for p in vendas_30d)
+    
+    # 10. VENDAS POR GATEWAY
+    gateways = {}
+    for v in vendas:
+        gw = getattr(v, 'gateway_usada', None) or 'desconhecida'
+        gateways[gw] = gateways.get(gw, 0) + 1
+    
+    return {
+        "bot_id": bot_id,
+        "bot_nome": bot.nome,
+        "bot_username": bot.username or None,
+        "status": bot.status,
+        "created_at": str(bot.created_at) if bot.created_at else None,
+        
+        # Métricas principais (monetários em centavos)
+        "leads_totais": leads_totais,
+        "faturamento_total": faturamento_total,
+        "faturamento_30d": faturamento_30d,
+        "total_vendas": total_vendas,
+        "vendas_hoje": vendas_hoje,
+        "assinantes_ativos": assinantes_ativos,
+        "taxa_conversao": taxa_conversao,
+        "ticket_medio": ticket_medio,
+        "plano_mais_vendido": plano_mais_vendido,
+        "vendas_por_gateway": gateways
+    }
 
 # ===========================
 # 💎 PLANOS & FLUXO
