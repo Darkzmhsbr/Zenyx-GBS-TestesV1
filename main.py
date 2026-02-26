@@ -1129,6 +1129,9 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
         primeira_msg = messages[0]
         texto_primeira = primeira_msg if isinstance(primeira_msg, str) else primeira_msg.get('content', '')
         
+        # ✨ CONVERTE EMOJIS PREMIUM
+        texto_primeira = convert_premium_emojis(texto_primeira)
+        
         if not texto_primeira or not texto_primeira.strip():
             logger.error(f"❌ [ALTERNATING] Primeira mensagem está vazia!")
             return
@@ -1171,6 +1174,9 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
             # ✅ EDITAR A MENSAGEM COM O PRÓXIMO CONTEÚDO
             mensagem_atual = messages[mensagem_index]
             texto_atual = mensagem_atual if isinstance(mensagem_atual, str) else mensagem_atual.get('content', '')
+            
+            # ✨ CONVERTE EMOJIS PREMIUM
+            texto_atual = convert_premium_emojis(texto_atual)
             
             if not texto_atual or not texto_atual.strip():
                 logger.warning(f"⚠️ [ALTERNATING] Mensagem {mensagem_index + 1} vazia, pulando...")
@@ -12369,6 +12375,96 @@ def listar_planos_com_canais(
     except Exception as e:
         logger.error(f"Erro ao listar planos: {e}")
         return []
+
+# =========================================================
+# 🧪 ENDPOINT GENÉRICO: ENVIAR TESTE (para qualquer página)
+# =========================================================
+class TestSendRequest(BaseModel):
+    """Envio de teste genérico - funciona para todas as páginas"""
+    message: str                          # Texto HTML (com shortcodes de emoji premium)
+    media_url: Optional[str] = None       # URL da mídia (foto/vídeo/áudio)
+    media_type: Optional[str] = None      # "photo", "video", "audio"
+    source: Optional[str] = "generic"     # "remarketing", "auto_remarketing", "canal_free", "order_bump", "upsell", "downsell"
+    buttons: Optional[list] = None        # [{"text": "...", "url": "..."}, ...] ou [{"text": "...", "callback_data": "..."}]
+
+@app.post("/api/admin/bots/{bot_id}/send-test-message")
+def send_test_message(
+    bot_id: int,
+    req: TestSendRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Envia uma mensagem de teste para o admin_principal do bot.
+    Funciona para: Remarketing, Auto Remarketing, Canal Free, Order Bump, Upsell, Downsell.
+    Converte emojis premium automaticamente.
+    """
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    bot_db = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot_db:
+        raise HTTPException(404, "Bot não encontrado")
+    
+    admin_id = bot_db.admin_principal_id
+    if not admin_id:
+        raise HTTPException(400, "Nenhum admin principal configurado para este bot. Vá em Configurações do Bot e defina o Admin.")
+    
+    try:
+        bot_sender = TeleBot(bot_db.token, threaded=False)
+        
+        # ✨ Converte emojis premium
+        texto = convert_premium_emojis(req.message or "", db)
+        
+        # Monta markup se tiver botões
+        markup = None
+        if req.buttons and len(req.buttons) > 0:
+            markup = types.InlineKeyboardMarkup()
+            for btn in req.buttons:
+                if btn.get("url"):
+                    markup.add(types.InlineKeyboardButton(btn["text"], url=btn["url"]))
+                elif btn.get("callback_data"):
+                    markup.add(types.InlineKeyboardButton(btn["text"], callback_data=btn["callback_data"]))
+                else:
+                    markup.add(types.InlineKeyboardButton(btn["text"], callback_data="test_noop"))
+        
+        # 🔒 Flag de proteção de conteúdo
+        protect = getattr(bot_db, 'protect_content', False) or False
+        
+        # Envio baseado no tipo de mídia
+        sent = False
+        if req.media_url and req.media_type:
+            try:
+                if req.media_type == 'video' or req.media_url.lower().endswith(('.mp4', '.mov')):
+                    bot_sender.send_video(admin_id, req.media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+                    sent = True
+                elif req.media_type == 'audio' or req.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
+                    audio_bytes, _, _ = _download_audio_bytes(req.media_url)
+                    bot_sender.send_chat_action(admin_id, 'record_voice')
+                    time.sleep(2)
+                    if audio_bytes:
+                        bot_sender.send_voice(admin_id, audio_bytes, protect_content=protect)
+                    else:
+                        bot_sender.send_voice(admin_id, req.media_url, protect_content=protect)
+                    if texto or markup:
+                        time.sleep(1)
+                        bot_sender.send_message(admin_id, texto or "⬇️", reply_markup=markup, parse_mode="HTML", protect_content=protect)
+                    sent = True
+                else:
+                    bot_sender.send_photo(admin_id, req.media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+                    sent = True
+            except Exception as e_media:
+                logger.warning(f"⚠️ [TEST-SEND] Falha ao enviar mídia: {e_media}")
+        
+        if not sent:
+            bot_sender.send_message(admin_id, texto or "🧪 Teste", reply_markup=markup, parse_mode="HTML", protect_content=protect)
+        
+        logger.info(f"🧪 [TEST-SEND] Teste enviado para admin {admin_id} (bot={bot_id}, source={req.source})")
+        
+        return {"status": "sent", "message": f"Teste enviado para o admin {admin_id}!", "admin_id": admin_id}
+        
+    except Exception as e:
+        logger.error(f"❌ [TEST-SEND] Erro: {e}")
+        raise HTTPException(500, detail=f"Erro ao enviar teste: {str(e)}")
 
 # --- ROTAS FLOW V2 (HÍBRIDO) ---
 @app.get("/api/admin/bots/{bot_id}/flow")
