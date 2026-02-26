@@ -16065,7 +16065,7 @@ def import_emoji_pack_from_telegram(
     logger.info(f"✨ [IMPORT PACK] Importando pack '{short_name}' por {current_superuser.username}")
     
     # 2. Buscar um bot ativo no sistema para usar a Bot API
-    bot_for_api = db.query(BotModel).filter(BotModel.is_active == True).first()
+    bot_for_api = db.query(BotModel).filter(BotModel.status == "ativo").first()
     if not bot_for_api:
         raise HTTPException(status_code=400, detail="Nenhum bot ativo encontrado no sistema para consultar a API do Telegram.")
     
@@ -16074,15 +16074,21 @@ def import_emoji_pack_from_telegram(
     # 3. Chamar getStickerSet via Bot API
     try:
         import httpx as _httpx
+        api_url = f"https://api.telegram.org/bot{bot_token}/getStickerSet"
+        logger.info(f"✨ [IMPORT PACK] Chamando getStickerSet name={short_name}")
+        
         resp = _httpx.get(
-            f"https://api.telegram.org/bot{bot_token}/getStickerSet",
+            api_url,
             params={"name": short_name},
             timeout=15
         )
         data = resp.json()
         
+        logger.info(f"✨ [IMPORT PACK] Resposta Telegram ok={data.get('ok')}, keys={list(data.get('result', {}).keys()) if data.get('ok') else 'N/A'}")
+        
         if not data.get("ok"):
             error_desc = data.get("description", "Pack não encontrado")
+            logger.error(f"❌ [IMPORT PACK] Telegram retornou erro: {error_desc}")
             raise HTTPException(status_code=400, detail=f"Erro do Telegram: {error_desc}")
         
         sticker_set = data["result"]
@@ -16093,10 +16099,19 @@ def import_emoji_pack_from_telegram(
         raise HTTPException(status_code=500, detail=f"Erro ao comunicar com Telegram: {str(e)}")
     
     pack_title = sticker_set.get("title", short_name)
+    sticker_type = sticker_set.get("sticker_type", "unknown")
     stickers = sticker_set.get("stickers", [])
+    
+    logger.info(f"✨ [IMPORT PACK] Pack '{pack_title}', type={sticker_type}, stickers={len(stickers)}")
     
     if not stickers:
         raise HTTPException(status_code=400, detail="Pack está vazio ou não contém emojis.")
+    
+    # Log do primeiro sticker para debug
+    if stickers:
+        first = stickers[0]
+        logger.info(f"✨ [IMPORT PACK] Primeiro sticker keys: {list(first.keys())}")
+        logger.info(f"✨ [IMPORT PACK] custom_emoji_id={first.get('custom_emoji_id', 'AUSENTE')}, emoji={first.get('emoji', 'N/A')}, type={first.get('type', 'N/A')}")
     
     # 4. Filtrar apenas custom emojis (que têm custom_emoji_id)
     custom_emojis = []
@@ -16110,8 +16125,15 @@ def import_emoji_pack_from_telegram(
                 "sticker_type": s.get("type", "custom_emoji")
             })
     
+    logger.info(f"✨ [IMPORT PACK] {len(custom_emojis)} de {len(stickers)} stickers têm custom_emoji_id")
+    
     if not custom_emojis:
-        raise HTTPException(status_code=400, detail="Este pack não contém emojis premium (custom_emoji_id ausente). Pode ser um pack de stickers normal.")
+        # Se nenhum tem custom_emoji_id, retorna erro detalhado com sample
+        sample_keys = list(stickers[0].keys()) if stickers else []
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Este pack ({sticker_type}) não retornou custom_emoji_id. Tipo: {sticker_type}. Keys do sticker: {sample_keys}. Se for um pack de emojis premium, o bot pode não ter permissão."
+        )
     
     logger.info(f"✨ [IMPORT PACK] Pack '{pack_title}' tem {len(custom_emojis)} custom emojis")
     
