@@ -10824,6 +10824,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             msg_pix += "👆 Toque na chave PIX para copiar\n"
                             msg_pix += "⚡ Acesso liberado automaticamente!"
                         
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
+                        msg_pix = convert_premium_emojis(msg_pix)
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                         
                     else:
@@ -11012,6 +11014,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         # Agenda remarketing novamente (se configurado)
                         agendar_remarketing_automatico(bot_temp, chat_id, bot_db.id)
                         
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
+                        msg_pix = convert_premium_emojis(msg_pix)
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                         
                     else:
@@ -11137,6 +11141,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 f"⚡ Acesso liberado automaticamente!"
                             )
                         
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
+                        msg_pix = convert_premium_emojis(msg_pix)
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                         
                     else:
@@ -11248,6 +11254,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     # 🔥 LÓGICA DE MÍDIA ATUALIZADA NO FINAL (Se houver mídia no PIX/BUMP)
                     # NOTA: O fluxo original apenas enviava a msg de texto do PIX. 
                     # Mas se você quiser garantir que se por acaso tiver mídia ele leia:
+                    # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
+                    msg_pix = convert_premium_emojis(msg_pix)
                     bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                     
                 else:
@@ -11427,6 +11435,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             msg_pix += f"{oferta_block}\n"
                             msg_pix += f"\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
 
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
+                        msg_pix = convert_premium_emojis(msg_pix)
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                     else:
                         try: bot_temp.delete_message(chat_id, msg_wait.message_id)
@@ -11517,6 +11527,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             f"⚡ Acesso liberado automaticamente!"
                         )
                         
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX (Upsell)
+                        msg_pix_txt = convert_premium_emojis(msg_pix_txt)
                         bot_temp.send_message(chat_id, msg_pix_txt, parse_mode="HTML", reply_markup=markup_pix)
                     
                 except Exception as e:
@@ -11620,6 +11632,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             f"⚡ Acesso liberado automaticamente!"
                         )
                         
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX (Downsell)
+                        msg_pix_txt = convert_premium_emojis(msg_pix_txt)
                         bot_temp.send_message(chat_id, msg_pix_txt, parse_mode="HTML", reply_markup=markup_pix)
                     
                 except Exception as e:
