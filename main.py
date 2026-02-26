@@ -16033,6 +16033,163 @@ def bulk_create_premium_emojis(
     }
 
 
+# ===================== IMPORTAR PACK COMPLETO DO TELEGRAM =====================
+
+class ImportPackRequest(BaseModel):
+    pack_link: str                  # Ex: "https://t.me/addemoji/DecorationEmojiPack" ou apenas "DecorationEmojiPack"
+    pack_name: Optional[str] = None # Nome customizado para o pacote (se None, usa o título do Telegram)
+    pack_icon: Optional[str] = "📦"
+    auto_create_pack: bool = True   # Cria o pacote automaticamente no sistema
+
+@app.post("/api/superadmin/premium-emojis/import-pack")
+def import_emoji_pack_from_telegram(
+    req: ImportPackRequest,
+    db: Session = Depends(get_db),
+    current_superuser = Depends(get_current_superuser)
+):
+    """
+    Importa um pack COMPLETO de emojis premium do Telegram.
+    Usa a Bot API (getStickerSet) para buscar todos os emojis do pack.
+    Aceita link (https://t.me/addemoji/NomeDoPack) ou shortname direto.
+    """
+    import re as _re
+    
+    # 1. Extrair shortname do link
+    raw = req.pack_link.strip()
+    # Suporta: https://t.me/addemoji/NomeDoPack, t.me/addemoji/NomeDoPack, ou apenas NomeDoPack
+    match = _re.search(r'(?:t\.me/addemoji/|^)([A-Za-z0-9_]+)$', raw.split('?')[0].rstrip('/'))
+    if not match:
+        raise HTTPException(status_code=400, detail="Link inválido. Use formato: https://t.me/addemoji/NomeDoPack ou apenas o nome do pack.")
+    
+    short_name = match.group(1)
+    logger.info(f"✨ [IMPORT PACK] Importando pack '{short_name}' por {current_superuser.username}")
+    
+    # 2. Buscar um bot ativo no sistema para usar a Bot API
+    bot_for_api = db.query(BotModel).filter(BotModel.is_active == True).first()
+    if not bot_for_api:
+        raise HTTPException(status_code=400, detail="Nenhum bot ativo encontrado no sistema para consultar a API do Telegram.")
+    
+    bot_token = bot_for_api.token
+    
+    # 3. Chamar getStickerSet via Bot API
+    try:
+        import httpx as _httpx
+        resp = _httpx.get(
+            f"https://api.telegram.org/bot{bot_token}/getStickerSet",
+            params={"name": short_name},
+            timeout=15
+        )
+        data = resp.json()
+        
+        if not data.get("ok"):
+            error_desc = data.get("description", "Pack não encontrado")
+            raise HTTPException(status_code=400, detail=f"Erro do Telegram: {error_desc}")
+        
+        sticker_set = data["result"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [IMPORT PACK] Erro ao buscar pack: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao comunicar com Telegram: {str(e)}")
+    
+    pack_title = sticker_set.get("title", short_name)
+    stickers = sticker_set.get("stickers", [])
+    
+    if not stickers:
+        raise HTTPException(status_code=400, detail="Pack está vazio ou não contém emojis.")
+    
+    # 4. Filtrar apenas custom emojis (que têm custom_emoji_id)
+    custom_emojis = []
+    for s in stickers:
+        eid = s.get("custom_emoji_id")
+        if eid:
+            fallback = s.get("emoji", "⭐")
+            custom_emojis.append({
+                "emoji_id": str(eid),
+                "fallback": fallback,
+                "sticker_type": s.get("type", "custom_emoji")
+            })
+    
+    if not custom_emojis:
+        raise HTTPException(status_code=400, detail="Este pack não contém emojis premium (custom_emoji_id ausente). Pode ser um pack de stickers normal.")
+    
+    logger.info(f"✨ [IMPORT PACK] Pack '{pack_title}' tem {len(custom_emojis)} custom emojis")
+    
+    # 5. Criar pacote no sistema (se auto_create_pack)
+    target_pack_id = None
+    if req.auto_create_pack:
+        nome_pacote = req.pack_name or pack_title
+        existing_pack = db.query(PremiumEmojiPack).filter(PremiumEmojiPack.name == nome_pacote).first()
+        
+        if existing_pack:
+            target_pack_id = existing_pack.id
+            logger.info(f"✨ [IMPORT PACK] Pacote '{nome_pacote}' já existe (id={target_pack_id}), adicionando emojis a ele")
+        else:
+            new_pack = PremiumEmojiPack(
+                name=nome_pacote,
+                icon=req.pack_icon or "📦",
+                description=f"Importado de t.me/addemoji/{short_name}",
+                sort_order=db.query(PremiumEmojiPack).count() + 1,
+                is_active=True
+            )
+            db.add(new_pack)
+            db.flush()
+            target_pack_id = new_pack.id
+            logger.info(f"✨ [IMPORT PACK] Pacote '{nome_pacote}' criado (id={target_pack_id})")
+    
+    # 6. Cadastrar emojis em massa (skip duplicados)
+    created = 0
+    skipped = 0
+    
+    for idx, ce in enumerate(custom_emojis):
+        # Gerar shortcode automático baseado no nome do pack + índice
+        safe_name = _re.sub(r'[^a-zA-Z0-9]', '_', short_name.lower()).strip('_')
+        auto_shortcode = f":{safe_name}_{idx + 1}:"
+        auto_name = f"{pack_title} #{idx + 1}"
+        
+        # Verificar se emoji_id já existe
+        existing = db.query(PremiumEmoji).filter(PremiumEmoji.emoji_id == ce["emoji_id"]).first()
+        if existing:
+            skipped += 1
+            continue
+        
+        # Verificar se shortcode já existe (incrementa se necessário)
+        sc = auto_shortcode
+        attempts = 0
+        while db.query(PremiumEmoji).filter(PremiumEmoji.shortcode == sc).first():
+            attempts += 1
+            sc = f":{safe_name}_{idx + 1}_{attempts}:"
+        
+        emoji = PremiumEmoji(
+            emoji_id=ce["emoji_id"],
+            fallback=ce["fallback"],
+            name=auto_name,
+            shortcode=sc,
+            pack_id=target_pack_id,
+            sort_order=idx + 1,
+            emoji_type="animated",  # Custom emojis premium são geralmente animados
+            is_active=True
+        )
+        db.add(emoji)
+        created += 1
+    
+    db.commit()
+    invalidate_premium_emoji_cache()
+    
+    logger.info(f"✨ [IMPORT PACK] Finalizado: {created} criados, {skipped} ignorados de '{pack_title}'")
+    
+    return {
+        "status": "success",
+        "message": f"Pack '{pack_title}' importado com sucesso!",
+        "pack_title": pack_title,
+        "short_name": short_name,
+        "total_in_pack": len(custom_emojis),
+        "created": created,
+        "skipped": skipped,
+        "pack_id": target_pack_id
+    }
+
+
 @app.put("/api/superadmin/premium-emojis/{emoji_id}")
 def update_premium_emoji(
     emoji_id: int,
