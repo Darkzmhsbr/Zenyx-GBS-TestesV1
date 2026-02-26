@@ -560,6 +560,9 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
         # Prepara mensagem
         mensagem = config.message_text or "🔥 OFERTA ESPECIAL! Não perca essa chance!"
         
+        # ✨ CONVERTE EMOJIS PREMIUM
+        mensagem = convert_premium_emojis(mensagem)
+        
         # 🔒 Carrega flag de proteção
         _protect_auto = False
         try:
@@ -1302,6 +1305,9 @@ async def send_remarketing_job(
                 msg_text = msg_text.replace('{first_name}', user_info.get('first_name', ''))
                 msg_text = msg_text.replace('{plano_original}', user_info.get('plano', 'VIP'))
                 msg_text = msg_text.replace('{valor_original}', str(user_info.get('valor', '')))
+
+            # ✨ CONVERTE EMOJIS PREMIUM
+            msg_text = convert_premium_emojis(msg_text)
 
             # ✅ NOVO: Aplicar preço promocional temporariamente
             db_session = SessionLocal()
@@ -8893,6 +8899,9 @@ async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: in
         # Envia mensagem
         msg_texto = config.msg_texto or f"{'🚀' if offer_type == 'upsell' else '🎁'} Oferta especial!"
         
+        # ✨ CONVERTE EMOJIS PREMIUM
+        msg_texto = convert_premium_emojis(msg_texto)
+        
         try:
             # 🔊 COMBO: Se tem audio_url separado, envia áudio primeiro
             _audio_url_up = getattr(config, 'audio_url', None)
@@ -9815,6 +9824,9 @@ def enviar_oferta_final(bot_temp, chat_id, fluxo, bot_id, db):
     texto = fluxo.msg_2_texto if (fluxo and fluxo.msg_2_texto) else "Escolha seu plano:"
     media = fluxo.msg_2_media if fluxo else None
     
+    # ✨ CONVERTE EMOJIS PREMIUM
+    texto = convert_premium_emojis(texto)
+    
     # 🔥 ENVIO COM TRATAMENTO DE ERRO
     # 🔥 ENVIO COM TRATAMENTO DE ERRO E ÁUDIO
     try:
@@ -10006,6 +10018,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 # 3. Substitui {id}
                 final_message = final_message.replace("{id}", str(user_id))
                 # -----------------------------------------------------------
+                
+                # ✨ CONVERTE EMOJIS PREMIUM
+                final_message = convert_premium_emojis(final_message)
 
                 # Enviar mensagem de boas-vindas
                 try:
@@ -10319,6 +10334,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 msg_txt = flow.msg_boas_vindas if flow else "Olá!"
                 media = flow.media_url if flow else None
                 
+                # ✨ CONVERTE SHORTCODES DE EMOJIS PREMIUM → TAGS HTML DO TELEGRAM
+                msg_txt = convert_premium_emojis(msg_txt, db)
+                
                 mk = types.InlineKeyboardMarkup()
                 
                 # SE FOR MINI APP
@@ -10568,29 +10586,32 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     if target_step.mostrar_botao:
                         mk.add(types.InlineKeyboardButton(target_step.btn_texto or "Próximo ▶️", callback_data=f"step_{current_step + 1}"))
                     
+                    # ✨ CONVERTE EMOJIS PREMIUM no texto do step
+                    _step_txt = convert_premium_emojis(target_step.msg_texto) if target_step.msg_texto else target_step.msg_texto
+                    
                     sent_msg = None
                     try:
                         if target_step.msg_media:
                             media_step_low = target_step.msg_media.lower()
                             if media_step_low.endswith(('.mp4', '.mov', '.avi')):
-                                sent_msg = bot_temp.send_video(chat_id, target_step.msg_media, caption=target_step.msg_texto, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
+                                sent_msg = bot_temp.send_video(chat_id, target_step.msg_media, caption=_step_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                             elif is_audio_file(target_step.msg_media):
                                 # 🔊 ÁUDIO: Envia sozinho sem caption/markup
                                 audio_msgs = enviar_audio_inteligente(
                                     bot_temp, chat_id, target_step.msg_media,
-                                    texto=target_step.msg_texto if target_step.msg_texto and target_step.msg_texto.strip() else None,
+                                    texto=_step_txt if _step_txt and _step_txt.strip() else None,
                                     markup=mk if target_step.mostrar_botao else None,
                                     protect_content=_protect,
                                     delay_pos_audio=2
                                 )
                                 sent_msg = audio_msgs[-1] if audio_msgs else None
                             else:
-                                sent_msg = bot_temp.send_photo(chat_id, target_step.msg_media, caption=target_step.msg_texto, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
+                                sent_msg = bot_temp.send_photo(chat_id, target_step.msg_media, caption=_step_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                         else:
-                            sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
+                            sent_msg = bot_temp.send_message(chat_id, _step_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                     except:
                         # Fallback caso falhe HTML ou Mídia
-                        sent_msg = bot_temp.send_message(chat_id, target_step.msg_texto or "...", reply_markup=mk, protect_content=_protect)
+                        sent_msg = bot_temp.send_message(chat_id, strip_premium_emoji_tags(_step_txt) or "...", reply_markup=mk, protect_content=_protect)
 
                     # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão
                     # if sent_msg and target_step.autodestruir:
@@ -11005,6 +11026,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         types.InlineKeyboardButton(bump.btn_recusar, callback_data=f"bump_no_{plano.id}")
                     )
                     txt_bump = bump.msg_texto or f"Levar {bump.nome_produto} junto?"
+                    # ✨ CONVERTE EMOJIS PREMIUM
+                    txt_bump = convert_premium_emojis(txt_bump)
                     try:
                         if bump.msg_media:
                             if bump.msg_media.lower().endswith(('.mp4','.mov')):
