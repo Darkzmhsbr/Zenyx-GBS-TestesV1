@@ -135,8 +135,11 @@ def convert_premium_emojis(text: str, db: Session = None) -> str:
     
     import re
     # Verifica se existe algum padrão de shortcode no texto
-    if not re.search(r':[a-zA-Z0-9_]+:', text):
+    shortcodes_found = re.findall(r':[a-zA-Z0-9_]+:', text)
+    if not shortcodes_found:
         return text
+    
+    logger.info(f"✨ [EMOJI CONVERT] Encontrados {len(shortcodes_found)} shortcodes no texto: {shortcodes_found[:5]}...")
     
     now = time.time()
     
@@ -156,19 +159,33 @@ def convert_premium_emojis(text: str, db: Session = None) -> str:
                 for e in emojis
             }
             _premium_emoji_cache_ts = now
-            logger.info(f"✨ [EMOJI CACHE] Recarregado com {len(_premium_emoji_cache)} emojis premium")
+            logger.info(f"✨ [EMOJI CACHE] Recarregado com {len(_premium_emoji_cache)} emojis premium. Shortcodes: {list(_premium_emoji_cache.keys())[:10]}...")
             
             if should_close:
                 _db.close()
         except Exception as e:
             logger.error(f"❌ [EMOJI CACHE] Erro ao carregar cache: {e}")
-            if should_close and _db:
-                _db.close()
+            import traceback
+            logger.error(traceback.format_exc())
+            if 'should_close' in dir() and should_close and '_db' in dir() and _db:
+                try: _db.close()
+                except: pass
             return text
     
     # Substitui shortcodes pelo HTML do Telegram
-    for shortcode, html_tag in _premium_emoji_cache.items():
-        text = text.replace(shortcode, html_tag)
+    converted_count = 0
+    not_found = []
+    for sc in shortcodes_found:
+        if sc in _premium_emoji_cache:
+            text = text.replace(sc, _premium_emoji_cache[sc])
+            converted_count += 1
+        else:
+            not_found.append(sc)
+    
+    if converted_count > 0:
+        logger.info(f"✨ [EMOJI CONVERT] Convertidos {converted_count}/{len(shortcodes_found)} emojis premium")
+    if not_found:
+        logger.warning(f"⚠️ [EMOJI CONVERT] Shortcodes NÃO encontrados no cache: {not_found[:10]}")
     
     return text
 
@@ -12539,6 +12556,9 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
             try:
                 midia_ok = False
                 texto_envio = payload.mensagem.replace("{nome}", "Cliente")
+                
+                # ✨ CONVERTE EMOJIS PREMIUM (shortcodes → tg-emoji HTML tags)
+                texto_envio = convert_premium_emojis(texto_envio)
 
                 if payload.media_url and len(payload.media_url) > 5:
                     try:
@@ -12861,6 +12881,9 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
     # Busca chaves novas OU antigas (Compatibilidade Total)
     msg = config.get("mensagem") or config.get("msg", "")
     media = config.get("media_url") or config.get("media", "")
+    
+    # ✨ CONVERTE EMOJIS PREMIUM
+    msg = convert_premium_emojis(msg)
 
     # 3. Configura Bot
     bot_db = db.query(BotModel).filter(BotModel.id == payload.bot_id).first()
