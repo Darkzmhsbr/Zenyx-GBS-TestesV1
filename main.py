@@ -12505,7 +12505,7 @@ def send_test_message(
                 if not markup:
                     markup = types.InlineKeyboardMarkup()
                 markup.add(types.InlineKeyboardButton(
-                    f"🔥 ASSINAR {plano.nome_exibicao} - R$ {preco:.2f}",
+                    f"🔥{plano.nome_exibicao} - R$ {preco:.2f}",
                     callback_data="test_oferta_noop"
                 ))
         
