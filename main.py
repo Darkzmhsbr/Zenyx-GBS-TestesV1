@@ -892,22 +892,55 @@ async def verificar_vencimentos():
                     tb = telebot.TeleBot(bot_data.token, threaded=False)
                     
                     # === REMOÇÃO DO CANAL VIP PRINCIPAL ===
-                    if bot_data.id_canal_vip:
+                    # 🔥 V2: Remove do canal CORRETO (específico do plano ou padrão do bot)
+                    canal_remocao = None
+                    canal_source = "nenhum"
+                    
+                    # 1. Primeiro tenta o canal específico do plano
+                    if pedido.plano_id:
                         try:
-                            raw_id = str(bot_data.id_canal_vip).strip()
-                            canal_id = int(raw_id)
-                            
-                            tb.ban_chat_member(canal_id, int(pedido.telegram_id))
+                            plano_exp = db.query(PlanoConfig).filter(PlanoConfig.id == int(pedido.plano_id)).first()
+                            if plano_exp and plano_exp.id_canal_destino and str(plano_exp.id_canal_destino).strip() not in ("", "None", "null"):
+                                canal_remocao = int(str(plano_exp.id_canal_destino).strip())
+                                canal_source = f"plano_{plano_exp.nome_exibicao}"
+                                logger.info(f"🎯 [JOB] Canal específico do plano '{plano_exp.nome_exibicao}': {canal_remocao}")
+                        except Exception as e_plano:
+                            logger.warning(f"⚠️ [JOB] Erro ao buscar plano {pedido.plano_id}: {e_plano}")
+                    
+                    # 2. Fallback para canal padrão do bot
+                    if not canal_remocao and bot_data.id_canal_vip:
+                        try:
+                            canal_remocao = int(str(bot_data.id_canal_vip).strip())
+                            canal_source = "bot_default"
+                        except:
+                            pass
+                    
+                    # 3. Executar remoção
+                    if canal_remocao:
+                        try:
+                            tb.ban_chat_member(canal_remocao, int(pedido.telegram_id))
                             time.sleep(0.5)
-                            tb.unban_chat_member(canal_id, int(pedido.telegram_id))
+                            tb.unban_chat_member(canal_remocao, int(pedido.telegram_id))
                             
-                            logger.info(f"👋 [JOB] Usuário {pedido.first_name} ({pedido.telegram_id}) removido do canal VIP (Bot: {bot_data.nome})")
+                            logger.info(f"👋 [JOB] Usuário {pedido.first_name} ({pedido.telegram_id}) removido do canal {canal_remocao} ({canal_source}) (Bot: {bot_data.nome})")
                         except Exception as e_kick:
                             err_msg = str(e_kick).lower()
                             if "participant_id_invalid" in err_msg or "user not found" in err_msg or "user_not_participant" in err_msg:
-                                logger.info(f"ℹ️ [JOB] Usuário {pedido.telegram_id} já havia saído do canal VIP.")
+                                logger.info(f"ℹ️ [JOB] Usuário {pedido.telegram_id} já havia saído do canal {canal_remocao}.")
                             else:
-                                logger.warning(f"⚠️ [JOB] Erro ao remover {pedido.telegram_id} do canal VIP: {e_kick}")
+                                logger.warning(f"⚠️ [JOB] Erro ao remover {pedido.telegram_id} do canal {canal_remocao}: {e_kick}")
+                        
+                        # 🔥 Se removeu do canal do plano, TAMBÉM remove do canal padrão por segurança
+                        if canal_source != "bot_default" and bot_data.id_canal_vip:
+                            try:
+                                canal_padrao = int(str(bot_data.id_canal_vip).strip())
+                                if canal_padrao != canal_remocao:
+                                    tb.ban_chat_member(canal_padrao, int(pedido.telegram_id))
+                                    time.sleep(0.3)
+                                    tb.unban_chat_member(canal_padrao, int(pedido.telegram_id))
+                                    logger.info(f"👋 [JOB] Também removido do canal padrão {canal_padrao}")
+                            except:
+                                pass  # Pode não estar no canal padrão
                     
                     # === REMOÇÃO DOS GRUPOS EXTRAS (BotGroup) ===
                     if pedido.plano_id:
@@ -3451,10 +3484,31 @@ def verificar_expiracao_massa():
                     try:
                         logger.info(f"💀 Removendo usuário vencido: {u.first_name} (Bot: {bot_data.nome})")
                         
-                        # 1. Kick Suave do Canal VIP Principal
-                        tb.ban_chat_member(canal_id, int(u.telegram_id))
+                        # 🔥 V2: Determinar canal correto (específico do plano ou padrão)
+                        canal_remocao_ceifador = canal_id  # Default do bot
+                        if u.plano_id:
+                            try:
+                                plano_ceif = db.query(PlanoConfig).filter(PlanoConfig.id == int(u.plano_id)).first()
+                                if plano_ceif and plano_ceif.id_canal_destino and str(plano_ceif.id_canal_destino).strip() not in ("", "None", "null"):
+                                    canal_remocao_ceifador = int(str(plano_ceif.id_canal_destino).strip())
+                                    logger.info(f"🎯 [CEIFADOR] Canal específico do plano '{plano_ceif.nome_exibicao}': {canal_remocao_ceifador}")
+                            except:
+                                pass
+                        
+                        # 1. Kick Suave do Canal VIP (correto por plano)
+                        tb.ban_chat_member(canal_remocao_ceifador, int(u.telegram_id))
                         time.sleep(0.5)
-                        tb.unban_chat_member(canal_id, int(u.telegram_id))
+                        tb.unban_chat_member(canal_remocao_ceifador, int(u.telegram_id))
+                        
+                        # 1b. Se canal do plano é diferente do padrão, remove do padrão também
+                        if canal_remocao_ceifador != canal_id:
+                            try:
+                                tb.ban_chat_member(canal_id, int(u.telegram_id))
+                                time.sleep(0.3)
+                                tb.unban_chat_member(canal_id, int(u.telegram_id))
+                                logger.info(f"👋 [CEIFADOR] Também removido do canal padrão {canal_id}")
+                            except:
+                                pass
                         
                         # 2. Kick dos Grupos Extras (BotGroup) vinculados ao plano
                         if u.plano_id and grupos_extras:
@@ -9427,14 +9481,20 @@ async def webhook_pix(request: Request, db: Session = Depends(get_db)):
                         if not is_upsell_or_downsell:
                             # Entrega principal (APENAS para planos normais)
                             try:
-                                # 🔥 LÓGICA V7: DEFINIÇÃO INTELIGENTE DO CANAL DE DESTINO 🔥
+                                # 🔥 LÓGICA V8: DEFINIÇÃO INTELIGENTE DO CANAL DE DESTINO 🔥
                                 canal_id_final = bot_data.id_canal_vip # Default
+                                canal_source = "bot_default"
                                 
-                                if plano and plano.id_canal_destino and str(plano.id_canal_destino).strip() != "":
+                                if plano and plano.id_canal_destino and str(plano.id_canal_destino).strip() not in ("", "None", "null"):
                                     canal_id_final = plano.id_canal_destino
-                                    logger.info(f"🎯 Usando Canal Específico do Plano: {canal_id_final}")
+                                    canal_source = "plano_especifico"
+                                    logger.info(f"🎯 [ENTREGA] Usando Canal Específico do Plano '{plano.nome_exibicao}': {canal_id_final}")
                                 else:
-                                    logger.info(f"🎯 Usando Canal Padrão do Bot: {canal_id_final}")
+                                    logger.info(f"🎯 [ENTREGA] Usando Canal Padrão do Bot: {canal_id_final}")
+                                    if plano:
+                                        logger.warning(f"⚠️ [ENTREGA] Plano '{plano.nome_exibicao}' (ID:{plano.id}) NÃO tem id_canal_destino configurado! Defina um canal específico para cada plano na página de Planos.")
+                                
+                                logger.info(f"📊 [ENTREGA-DEBUG] pedido.plano_id={pedido.plano_id} | plano={plano.nome_exibicao if plano else 'None'} | plano.id_canal_destino={plano.id_canal_destino if plano else 'N/A'} | canal_final={canal_id_final} | source={canal_source}")
 
                                 # Tratamento do ID do canal (remove traços extras se houver)
                                 if str(canal_id_final).replace("-", "").isdigit():
@@ -12381,11 +12441,17 @@ def listar_planos_com_canais(
 # =========================================================
 class TestSendRequest(BaseModel):
     """Envio de teste genérico - funciona para todas as páginas"""
-    message: str                          # Texto HTML (com shortcodes de emoji premium)
-    media_url: Optional[str] = None       # URL da mídia (foto/vídeo/áudio)
+    message: Optional[str] = ""           # Texto HTML (com shortcodes de emoji premium)
+    media_url: Optional[str] = None       # URL da mídia (foto/vídeo)
     media_type: Optional[str] = None      # "photo", "video", "audio"
+    audio_url: Optional[str] = None       # URL de áudio separado (voice note)
     source: Optional[str] = "generic"     # "remarketing", "auto_remarketing", "canal_free", "order_bump", "upsell", "downsell"
-    buttons: Optional[list] = None        # [{"text": "...", "url": "..."}, ...] ou [{"text": "...", "callback_data": "..."}]
+    buttons: Optional[list] = None        # [{"text": "...", "url": "..."}, ...]
+    # Campos específicos do remarketing com oferta
+    incluir_oferta: Optional[bool] = False
+    plano_oferta_id: Optional[int] = None
+    preco_custom: Optional[float] = None
+    price_mode: Optional[str] = "original"
 
 @app.post("/api/admin/bots/{bot_id}/send-test-message")
 def send_test_message(
@@ -12395,9 +12461,8 @@ def send_test_message(
     current_user = Depends(get_current_user)
 ):
     """
-    Envia uma mensagem de teste para o admin_principal do bot.
-    Funciona para: Remarketing, Auto Remarketing, Canal Free, Order Bump, Upsell, Downsell.
-    Converte emojis premium automaticamente.
+    Envia uma mensagem de teste COMPLETA para o admin_principal do bot.
+    Inclui: mídia, texto com emojis premium, botões, e oferta simulada.
     """
     verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
@@ -12412,10 +12477,15 @@ def send_test_message(
     try:
         bot_sender = TeleBot(bot_db.token, threaded=False)
         
-        # ✨ Converte emojis premium
-        texto = convert_premium_emojis(req.message or "", db)
+        # ✨ Converte emojis premium e variáveis
+        texto = req.message or ""
+        texto = texto.replace("{first_name}", "Usuário Teste").replace("{nome}", "Teste").replace("{username}", "@teste").replace("{id}", str(admin_id))
+        texto = convert_premium_emojis(texto)
         
-        # Monta markup se tiver botões
+        # 🔒 Proteção de conteúdo
+        protect = getattr(bot_db, 'protect_content', False) or False
+        
+        # Monta markup de botões
         markup = None
         if req.buttons and len(req.buttons) > 0:
             markup = types.InlineKeyboardMarkup()
@@ -12427,17 +12497,44 @@ def send_test_message(
                 else:
                     markup.add(types.InlineKeyboardButton(btn["text"], callback_data="test_noop"))
         
-        # 🔒 Flag de proteção de conteúdo
-        protect = getattr(bot_db, 'protect_content', False) or False
+        # Se remarketing com oferta, adiciona botão simulado
+        if req.incluir_oferta and req.plano_oferta_id:
+            plano = db.query(PlanoConfig).filter(PlanoConfig.id == req.plano_oferta_id).first()
+            if plano:
+                preco = req.preco_custom if req.price_mode == "custom" and req.preco_custom else plano.valor
+                if not markup:
+                    markup = types.InlineKeyboardMarkup()
+                markup.add(types.InlineKeyboardButton(
+                    f"🔥 ASSINAR {plano.nome_exibicao} - R$ {preco:.2f}",
+                    callback_data="test_oferta_noop"
+                ))
         
-        # Envio baseado no tipo de mídia
+        # ===== ENVIO =====
         sent = False
-        if req.media_url and req.media_type:
+        
+        # 1. Áudio/voice note separado (chega primeiro)
+        if req.audio_url:
             try:
-                if req.media_type == 'video' or req.media_url.lower().endswith(('.mp4', '.mov')):
+                audio_bytes, _, _ = _download_audio_bytes(req.audio_url)
+                bot_sender.send_chat_action(admin_id, 'record_voice')
+                time.sleep(1)
+                if audio_bytes:
+                    bot_sender.send_voice(admin_id, audio_bytes, protect_content=protect)
+                else:
+                    bot_sender.send_voice(admin_id, req.audio_url, protect_content=protect)
+            except Exception as e_audio:
+                logger.warning(f"⚠️ [TEST-SEND] Falha ao enviar áudio: {e_audio}")
+        
+        # 2. Mídia com caption
+        if req.media_url:
+            try:
+                url_lower = req.media_url.lower()
+                media_type = req.media_type or ""
+                
+                if media_type == 'video' or url_lower.endswith(('.mp4', '.mov')):
                     bot_sender.send_video(admin_id, req.media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
                     sent = True
-                elif req.media_type == 'audio' or req.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
+                elif media_type == 'audio' or url_lower.endswith(('.ogg', '.mp3', '.wav')):
                     audio_bytes, _, _ = _download_audio_bytes(req.media_url)
                     bot_sender.send_chat_action(admin_id, 'record_voice')
                     time.sleep(2)
@@ -12455,15 +12552,18 @@ def send_test_message(
             except Exception as e_media:
                 logger.warning(f"⚠️ [TEST-SEND] Falha ao enviar mídia: {e_media}")
         
+        # 3. Só texto (se não enviou mídia)
         if not sent:
-            bot_sender.send_message(admin_id, texto or "🧪 Teste", reply_markup=markup, parse_mode="HTML", protect_content=protect)
+            if not texto and not markup:
+                texto = "🧪 Mensagem de teste"
+            bot_sender.send_message(admin_id, texto or "🧪", reply_markup=markup, parse_mode="HTML", protect_content=protect)
         
-        logger.info(f"🧪 [TEST-SEND] Teste enviado para admin {admin_id} (bot={bot_id}, source={req.source})")
+        logger.info(f"🧪 [TEST-SEND] Teste completo enviado para admin {admin_id} (bot={bot_id}, source={req.source})")
         
         return {"status": "sent", "message": f"Teste enviado para o admin {admin_id}!", "admin_id": admin_id}
         
     except Exception as e:
-        logger.error(f"❌ [TEST-SEND] Erro: {e}")
+        logger.error(f"❌ [TEST-SEND] Erro: {e}", exc_info=True)
         raise HTTPException(500, detail=f"Erro ao enviar teste: {str(e)}")
 
 # --- ROTAS FLOW V2 (HÍBRIDO) ---
