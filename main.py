@@ -12501,7 +12501,7 @@ def send_test_message(
         if req.incluir_oferta and req.plano_oferta_id:
             plano = db.query(PlanoConfig).filter(PlanoConfig.id == req.plano_oferta_id).first()
             if plano:
-                preco = req.preco_custom if req.price_mode == "custom" and req.preco_custom else plano.valor
+                preco = req.preco_custom if req.price_mode == "custom" and req.preco_custom else (plano.preco_atual or plano.preco_cheio or 0)
                 if not markup:
                     markup = types.InlineKeyboardMarkup()
                 markup.add(types.InlineKeyboardButton(
