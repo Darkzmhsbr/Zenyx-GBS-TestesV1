@@ -12512,6 +12512,10 @@ def send_test_message(
         # ===== ENVIO =====
         sent = False
         
+        # Para auto_remarketing: botões vão em mensagem SEPARADA (igual envio real)
+        separate_buttons = req.source == 'auto_remarketing' and markup is not None
+        markup_for_media = None if separate_buttons else markup
+        
         # 1. Áudio/voice note separado (chega primeiro)
         if req.audio_url:
             try:
@@ -12532,7 +12536,7 @@ def send_test_message(
                 media_type = req.media_type or ""
                 
                 if media_type == 'video' or url_lower.endswith(('.mp4', '.mov')):
-                    bot_sender.send_video(admin_id, req.media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+                    bot_sender.send_video(admin_id, req.media_url, caption=texto, reply_markup=markup_for_media, parse_mode="HTML", protect_content=protect)
                     sent = True
                 elif media_type == 'audio' or url_lower.endswith(('.ogg', '.mp3', '.wav')):
                     audio_bytes, _, _ = _download_audio_bytes(req.media_url)
@@ -12542,12 +12546,12 @@ def send_test_message(
                         bot_sender.send_voice(admin_id, audio_bytes, protect_content=protect)
                     else:
                         bot_sender.send_voice(admin_id, req.media_url, protect_content=protect)
-                    if texto or markup:
+                    if texto:
                         time.sleep(1)
-                        bot_sender.send_message(admin_id, texto or "⬇️", reply_markup=markup, parse_mode="HTML", protect_content=protect)
+                        bot_sender.send_message(admin_id, texto, reply_markup=markup_for_media, parse_mode="HTML", protect_content=protect)
                     sent = True
                 else:
-                    bot_sender.send_photo(admin_id, req.media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+                    bot_sender.send_photo(admin_id, req.media_url, caption=texto, reply_markup=markup_for_media, parse_mode="HTML", protect_content=protect)
                     sent = True
             except Exception as e_media:
                 logger.warning(f"⚠️ [TEST-SEND] Falha ao enviar mídia: {e_media}")
@@ -12556,7 +12560,15 @@ def send_test_message(
         if not sent:
             if not texto and not markup:
                 texto = "🧪 Mensagem de teste"
-            bot_sender.send_message(admin_id, texto or "🧪", reply_markup=markup, parse_mode="HTML", protect_content=protect)
+            bot_sender.send_message(admin_id, texto or "🧪", reply_markup=markup_for_media, parse_mode="HTML", protect_content=protect)
+        
+        # 4. Botões separados (para auto_remarketing - igual envio real)
+        if separate_buttons:
+            try:
+                time.sleep(0.5)
+                bot_sender.send_message(admin_id, "👇 Escolha seu plano com desconto:", reply_markup=markup, protect_content=protect)
+            except Exception as e_btns:
+                logger.warning(f"⚠️ [TEST-SEND] Falha ao enviar botões separados: {e_btns}")
         
         logger.info(f"🧪 [TEST-SEND] Teste completo enviado para admin {admin_id} (bot={bot_id}, source={req.source})")
         
