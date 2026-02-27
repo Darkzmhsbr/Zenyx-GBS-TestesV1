@@ -669,27 +669,42 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
         promo_values = config.promo_values or {}
         
         for plano in planos:
-            # Usa valor promocional se existir, senão usa valor normal
-            valor_promo = promo_values.get(str(plano.id), plano.preco_atual)
+            plano_id_str = str(plano.id)
+            # 🔥 SÓ adiciona botão se o plano está ATIVADO no promo_values
+            if plano_id_str not in promo_values:
+                continue
             
-            botao_texto = f"🔥 {plano.nome_exibicao} - R$ {valor_promo:.2f}"
+            promo_data = promo_values[plano_id_str]
+            
+            # Suporta tanto valor direto (float) quanto objeto {value, button_text}
+            if isinstance(promo_data, dict):
+                valor_promo = promo_data.get('value', plano.preco_atual) or plano.preco_atual
+                botao_texto = promo_data.get('button_text', '').strip()
+                if not botao_texto:
+                    botao_texto = f"🔥 {plano.nome_exibicao} - R$ {float(valor_promo):.2f}"
+            else:
+                valor_promo = promo_data if promo_data else plano.preco_atual
+                botao_texto = f"🔥 {plano.nome_exibicao} - R$ {float(valor_promo):.2f}"
+            
             botao = types.InlineKeyboardButton(
                 botao_texto,
                 callback_data=f"remarketing_plano_{plano.id}"
             )
             markup.add(botao)
         
-        # Envia botões (em mensagem separada para garantir visibilidade)
+        # Envia botões inline com a última mensagem (mídia ou texto)
+        # Se já enviou mídia sem markup, envia botões em mensagem separada
         buttons_message_id = None
-        try:
-            buttons_msg = bot_instance.send_message(
-                chat_id,
-                "👇 Escolha seu plano com desconto:",
-                reply_markup=markup
-            )
-            buttons_message_id = buttons_msg.message_id
-        except Exception as e:
-            logger.error(f"Erro ao enviar botões: {e}")
+        if len(markup.keyboard) > 0:
+            try:
+                buttons_msg = bot_instance.send_message(
+                    chat_id,
+                    "👇 Escolha seu plano com desconto:",
+                    reply_markup=markup
+                )
+                buttons_message_id = buttons_msg.message_id
+            except Exception as e:
+                logger.error(f"Erro ao enviar botões: {e}")
         
         # ✅ MARCA COMO ENVIADO PARA BLOQUEAR REENVIO
         usuarios_com_remarketing_enviado.add(chat_id)
@@ -12512,10 +12527,6 @@ def send_test_message(
         # ===== ENVIO =====
         sent = False
         
-        # Para auto_remarketing: botões vão em mensagem SEPARADA (igual envio real)
-        separate_buttons = req.source == 'auto_remarketing' and markup is not None
-        markup_for_media = None if separate_buttons else markup
-        
         # 1. Áudio/voice note separado (chega primeiro)
         if req.audio_url:
             try:
@@ -12529,14 +12540,14 @@ def send_test_message(
             except Exception as e_audio:
                 logger.warning(f"⚠️ [TEST-SEND] Falha ao enviar áudio: {e_audio}")
         
-        # 2. Mídia com caption
+        # 2. Mídia com caption + botões inline
         if req.media_url:
             try:
                 url_lower = req.media_url.lower()
                 media_type = req.media_type or ""
                 
                 if media_type == 'video' or url_lower.endswith(('.mp4', '.mov')):
-                    bot_sender.send_video(admin_id, req.media_url, caption=texto, reply_markup=markup_for_media, parse_mode="HTML", protect_content=protect)
+                    bot_sender.send_video(admin_id, req.media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
                     sent = True
                 elif media_type == 'audio' or url_lower.endswith(('.ogg', '.mp3', '.wav')):
                     audio_bytes, _, _ = _download_audio_bytes(req.media_url)
@@ -12546,29 +12557,21 @@ def send_test_message(
                         bot_sender.send_voice(admin_id, audio_bytes, protect_content=protect)
                     else:
                         bot_sender.send_voice(admin_id, req.media_url, protect_content=protect)
-                    if texto:
+                    if texto or markup:
                         time.sleep(1)
-                        bot_sender.send_message(admin_id, texto, reply_markup=markup_for_media, parse_mode="HTML", protect_content=protect)
+                        bot_sender.send_message(admin_id, texto or "⬇️", reply_markup=markup, parse_mode="HTML", protect_content=protect)
                     sent = True
                 else:
-                    bot_sender.send_photo(admin_id, req.media_url, caption=texto, reply_markup=markup_for_media, parse_mode="HTML", protect_content=protect)
+                    bot_sender.send_photo(admin_id, req.media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
                     sent = True
             except Exception as e_media:
                 logger.warning(f"⚠️ [TEST-SEND] Falha ao enviar mídia: {e_media}")
         
-        # 3. Só texto (se não enviou mídia)
+        # 3. Só texto + botões (se não enviou mídia)
         if not sent:
             if not texto and not markup:
                 texto = "🧪 Mensagem de teste"
-            bot_sender.send_message(admin_id, texto or "🧪", reply_markup=markup_for_media, parse_mode="HTML", protect_content=protect)
-        
-        # 4. Botões separados (para auto_remarketing - igual envio real)
-        if separate_buttons:
-            try:
-                time.sleep(0.5)
-                bot_sender.send_message(admin_id, "👇 Escolha seu plano com desconto:", reply_markup=markup, protect_content=protect)
-            except Exception as e_btns:
-                logger.warning(f"⚠️ [TEST-SEND] Falha ao enviar botões separados: {e_btns}")
+            bot_sender.send_message(admin_id, texto or "🧪", reply_markup=markup, parse_mode="HTML", protect_content=protect)
         
         logger.info(f"🧪 [TEST-SEND] Teste completo enviado para admin {admin_id} (bot={bot_id}, source={req.source})")
         
