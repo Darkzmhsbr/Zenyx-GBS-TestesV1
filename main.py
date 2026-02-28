@@ -6234,7 +6234,8 @@ def configurar_menu_bot(token):
         tb.set_my_commands([
             telebot.types.BotCommand("start", "🚀 Iniciar"),
             telebot.types.BotCommand("suporte", "💬 Falar com Suporte"),
-            telebot.types.BotCommand("status", "⭐ Minha Assinatura")
+            telebot.types.BotCommand("status", "⭐ Minha Assinatura"),
+            telebot.types.BotCommand("denunciar", "🚨 Fazer Denúncia")
         ])
         logger.info(f"✅ Menu de comandos configurado para o token {token[:10]}...")
     except Exception as e:
@@ -10429,15 +10430,21 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     "🚨 <b>Canal de Denúncias</b>\n\n"
                     "Se você identificou conteúdo ilegal ou abusivo em algum bot desta plataforma, "
                     "você pode fazer uma denúncia de forma <b>segura e anônima</b>.\n\n"
-                    "⚠️ <b>Seu nome e dados NÃO serão expostos.</b>\n\n"
+                    "⚠️ <b>Seu nome e dados NÃO serão expostos ao denunciado.</b>\n\n"
                     "👉 Acesse o portal de denúncias:\n"
-                    "🔗 https://zenyxvips.com/denunciar\n\n"
+                    "🔗 https://www.zenyxvips.com/denunciar\n\n"
                     "📋 <b>Como denunciar:</b>\n"
                     "1. Acesse o link acima\n"
                     "2. Informe o @username do bot\n"
                     "3. Selecione o motivo\n"
                     "4. Descreva o ocorrido\n"
                     "5. Envie a denúncia\n\n"
+                    "⚠️ <b>Importante sobre reembolsos:</b>\n"
+                    "Questões relacionadas a reembolso <b>não</b> são tratadas por este canal, pois não temos "
+                    "controle sobre as transações financeiras entre compradores e vendedores. "
+                    "Para solicitar um reembolso, entre em contato diretamente com o dono do bot "
+                    "ou com a sua instituição financeira (banco/app de pagamento). "
+                    "Sua instituição poderá intermediar a solicitação junto ao meio de pagamento utilizado.\n\n"
                     "✅ Todas as denúncias são analisadas pela equipe de segurança."
                 )
                 bot_temp.send_message(chat_id, msg_denuncia, parse_mode="HTML", disable_web_page_preview=True)
@@ -18641,7 +18648,7 @@ def submit_report(data: ReportSubmit, request: Request, db: Session = Depends(ge
     
     # Notifica Super Admins
     try:
-        super_admins = db.query(User).filter(User.is_superadmin == True).all()
+        super_admins = db.query(User).filter(User.is_superuser == True).all()
         reason_labels = {
             'cp': '🔴 Pornografia Infantil', 'fraud': '🟠 Fraude', 'scam': '🟠 Golpe',
             'spam': '🟡 Spam', 'illegal': '🔴 Conteúdo Ilegal', 'harassment': '🟡 Assédio', 'other': '⚪ Outro'
@@ -18677,7 +18684,7 @@ def list_reports(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    if not getattr(current_user, 'is_superadmin', False):
+    if not getattr(current_user, 'is_superuser', False):
         raise HTTPException(403, "Acesso negado")
     
     query = db.query(Report).order_by(desc(Report.created_at))
@@ -18724,7 +18731,7 @@ def resolve_report(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    if not getattr(current_user, 'is_superadmin', False):
+    if not getattr(current_user, 'is_superuser', False):
         raise HTTPException(403, "Acesso negado")
     
     report = db.query(Report).filter(Report.id == report_id).first()
