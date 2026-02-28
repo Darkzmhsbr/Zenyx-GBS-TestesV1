@@ -1088,3 +1088,19 @@ class UserStrike(Base):
     
     def __repr__(self):
         return f"<UserStrike(user_id={self.user_id}, strike={self.strike_number}, action='{self.action}')>"
+
+# =========================================================
+# 📓 TABELA: DIÁRIO DE MUDANÇAS (CHANGELOG)
+# =========================================================
+class ChangeLog(Base):
+    __tablename__ = "change_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'))
+    bot_id = Column(Integer, ForeignKey('bots.id', ondelete='SET NULL'), nullable=True)
+    date = Column(DateTime, default=now_brazil)
+    category = Column(String(50), default='geral')  # geral, upsell, downsell, fluxo, preco, remarketing, plano
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=now_brazil)
+
+    def __repr__(self):
+        return f"<ChangeLog(id={self.id}, category='{self.category}')>"

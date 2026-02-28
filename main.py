@@ -86,7 +86,9 @@ from database import (
     PremiumEmojiPack,
     # ✅ NOVO IMPORT PARA DENÚNCIAS
     Report,
-    UserStrike
+    UserStrike,
+    # ✅ NOVO IMPORT PARA DIÁRIO DE MUDANÇAS
+    ChangeLog
 )
 
 import update_db 
@@ -14431,10 +14433,10 @@ def advanced_statistics(
         )[:5]
 
         # ============================================
-        # 📊 NOVAS MÉTRICAS AVANÇADAS
+        # 📊 NOVAS MÉTRICAS AVANÇADAS (COMPLETAS)
         # ============================================
         
-        # Taxa Retenção: compradores que compraram mais de 1 vez / total compradores
+        # === MAPA DE COMPRADORES ===
         compradores_map = {}
         for v in todas_vendas:
             tid = v.telegram_id or 'unknown'
@@ -14442,11 +14444,9 @@ def advanced_statistics(
         total_compradores = len(compradores_map)
         recorrentes = sum(1 for c in compradores_map.values() if c > 1)
         taxa_retencao = round((recorrentes / total_compradores) * 100, 1) if total_compradores > 0 else 0
-
-        # Vendas por Usuário (média)
         vendas_por_usuario = round(len(todas_vendas) / total_compradores, 1) if total_compradores > 0 else 0
 
-        # Tempo Médio Retorno (dias entre compras para compradores recorrentes)
+        # Tempo Médio Retorno (dias entre recompras)
         tempo_retorno_dias = 0
         retorno_count = 0
         for tid, count in compradores_map.items():
@@ -14459,25 +14459,110 @@ def advanced_statistics(
                         retorno_count += 1
         avg_retorno = round(tempo_retorno_dias / retorno_count, 1) if retorno_count > 0 else 0
 
-        # VIPs Ativos (assinaturas ativas agora)
         vips_ativos = total_ativos
 
-        # --- GRÁFICO: Vendas por Hora (24h heatmap data) ---
-        chart_horas = []
-        for h in range(24):
-            cnt = horas_count.get(h, 0)
-            chart_horas.append({"hour": f"{h:02d}:00", "count": cnt})
+        # === 8 TAXAS DO CONCORRENTE ===
         
-        # --- GRÁFICO: Vendas por Dia da Semana (7 barras) ---
-        chart_semana = []
-        for d in range(7):
-            chart_semana.append({
-                "day": dias_semana_map.get(d, "?"),
-                "day_short": dias_semana_map.get(d, "?")[:3],
-                "count": dias_count.get(d, 0)
+        # Taxa Upsell: pedidos com origem upsell / total vendas
+        upsell_vendas = sum(1 for v in vendas if getattr(v, 'origem', '') == 'upsell')
+        taxa_upsell = round((upsell_vendas / total_vendas) * 100, 1) if total_vendas > 0 else 0
+        
+        # Taxa Downsell: pedidos com origem downsell / total recusas (pendentes expirados)
+        downsell_vendas = sum(1 for v in vendas if getattr(v, 'origem', '') == 'downsell')
+        total_recusas = max(total_pendentes, 1)
+        taxa_downsell = round((downsell_vendas / total_recusas) * 100, 1) if total_recusas > 0 else 0
+        
+        # Taxa OrderBump: pedidos com order bump / total checkouts
+        orderbump_vendas = sum(1 for v in vendas if getattr(v, 'tem_order_bump', False))
+        total_checkouts = total_geradas if total_geradas > 0 else 1
+        taxa_orderbump = round((orderbump_vendas / total_checkouts) * 100, 1) if total_checkouts > 0 else 0
+        
+        # Taxa Recuperação: vendas de remarketing / total pendentes antigos
+        remarketing_vendas = sum(1 for v in vendas if getattr(v, 'origem', '') == 'remarketing')
+        taxa_recuperacao = round((remarketing_vendas / max(total_pendentes, 1)) * 100, 1) if total_pendentes > 0 else 0
+        
+        # Taxa Recorrência: compradores recorrentes / total compradores
+        taxa_recorrencia = round((recorrentes / total_compradores) * 100, 1) if total_compradores > 0 else 0
+        
+        # Taxa Upgrade (= taxa_upsell but from buyers perspective)
+        taxa_upgrade = round((upsell_vendas / total_compradores) * 100, 1) if total_compradores > 0 else 0
+        
+        # Taxa Abandono: ex-VIPs que não renovaram / total compradores
+        expirados_count = sum(1 for v in todas_vendas if v.status == 'expired' and v.data_expiracao and v.data_expiracao < agora)
+        expirados_unicos = len(set(v.telegram_id for v in todas_vendas if v.status == 'expired' and v.data_expiracao and v.data_expiracao < agora and v.telegram_id))
+        taxa_abandono = round((expirados_unicos / total_compradores) * 100, 1) if total_compradores > 0 else 0
+
+        # === TEMPO MÉDIO /START → PAGAMENTO ===
+        tempos_start_pag = []
+        for v in vendas:
+            pc = getattr(v, 'primeiro_contato', None)
+            pa = v.data_aprovacao
+            if pc and pa:
+                diff_sec = (pa - pc).total_seconds()
+                if 0 < diff_sec < 86400 * 30:  # Ignora >30 dias (outliers)
+                    tempos_start_pag.append(diff_sec)
+        
+        if tempos_start_pag:
+            avg_tempo_sec = sum(tempos_start_pag) / len(tempos_start_pag)
+            tempo_medio = {
+                "segundos": int(avg_tempo_sec % 60),
+                "minutos": int((avg_tempo_sec // 60) % 60),
+                "horas": int(avg_tempo_sec // 3600),
+                "dataset": len(tempos_start_pag)
+            }
+        else:
+            tempo_medio = {"segundos": 0, "minutos": 0, "horas": 0, "dataset": 0}
+
+        # === CALENDÁRIO DE VENDAS (dias do mês atual) ===
+        hoje = agora
+        primeiro_dia_mes = hoje.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if primeiro_dia_mes.tzinfo is None:
+            primeiro_dia_mes = tz_br.localize(primeiro_dia_mes)
+            
+        import calendar as cal_module
+        dias_no_mes = cal_module.monthrange(hoje.year, hoje.month)[1]
+        
+        calendario = []
+        for dia_num in range(1, dias_no_mes + 1):
+            dia_date = primeiro_dia_mes.replace(day=dia_num)
+            dia_end = dia_date.replace(hour=23, minute=59, second=59)
+            vendas_dia_cal = 0
+            receita_dia_cal = 0
+            for v in vendas:
+                if v.data_aprovacao:
+                    da = v.data_aprovacao
+                    if da.tzinfo is None:
+                        da = tz_br.localize(da)
+                    if dia_date <= da <= dia_end:
+                        vendas_dia_cal += 1
+                        if is_super_split and not bot_id:
+                            receita_dia_cal += taxa_centavos
+                        else:
+                            receita_dia_cal += int((v.valor or 0) * 100)
+            calendario.append({
+                "day": dia_num,
+                "weekday": dia_date.weekday(),
+                "vendas": vendas_dia_cal,
+                "receita": receita_dia_cal,
+                "is_today": dia_num == hoje.day,
             })
+
+        # === CONTADORES EXPANDIDOS ===
+        contadores_usuarios = {
+            "total_compradores": total_compradores,
+            "recorrentes": recorrentes,
+            "vips_ativos": vips_ativos,
+            "upsellers": sum(1 for tid in compradores_map if any(getattr(v, 'origem', '') == 'upsell' for v in todas_vendas if (v.telegram_id or '') == tid)),
+            "downsellers": sum(1 for tid in compradores_map if any(getattr(v, 'origem', '') == 'downsell' for v in todas_vendas if (v.telegram_id or '') == tid)),
+            "remarketing": sum(1 for tid in compradores_map if any(getattr(v, 'origem', '') == 'remarketing' for v in todas_vendas if (v.telegram_id or '') == tid)),
+        }
+
+        # === GRÁFICOS TEMPORAIS ===
+        chart_horas = [{"hour": f"{h:02d}:00", "count": horas_count.get(h, 0)} for h in range(24)]
         
-        # --- TOP 5 BOTS (se tiver mais de 1 bot) ---
+        chart_semana = [{"day": dias_semana_map.get(d, "?"), "day_short": dias_semana_map.get(d, "?")[:3], "count": dias_count.get(d, 0)} for d in range(7)]
+        
+        # === TOP 5 BOTS ===
         top_bots = []
         if not bot_id:
             bots_count = {}
@@ -14494,12 +14579,19 @@ def advanced_statistics(
                         bots_count[bid]["revenue"] += int((v.valor or 0) * 100)
             top_bots = sorted(bots_count.values(), key=lambda x: x["count"], reverse=True)[:5]
 
-        # --- CONTADORES DE USUÁRIOS ---
-        contadores_usuarios = {
-            "total_compradores": total_compradores,
-            "recorrentes": recorrentes,
-            "vips_ativos": vips_ativos,
-        }
+        # === DIÁRIO DE MUDANÇAS ===
+        try:
+            changelogs = db.query(ChangeLog).filter(
+                ChangeLog.user_id == current_user.id
+            ).order_by(desc(ChangeLog.date)).limit(20).all()
+            diario = [{
+                "id": cl.id,
+                "date": cl.date.strftime("%d/%m/%Y") if cl.date else "",
+                "category": cl.category,
+                "content": cl.content,
+            } for cl in changelogs]
+        except:
+            diario = []
 
         # ============================================
         # 🍩 GRÁFICO DONUT: TAXA DE CONVERSÃO
@@ -14542,7 +14634,22 @@ def advanced_statistics(
                 "total_compradores": total_compradores,
                 "recorrentes": recorrentes,
                 "vips_ativos": vips_ativos,
+                "taxa_upsell": taxa_upsell,
+                "taxa_downsell": taxa_downsell,
+                "taxa_orderbump": taxa_orderbump,
+                "taxa_recuperacao": taxa_recuperacao,
+                "taxa_recorrencia": taxa_recorrencia,
+                "taxa_upgrade": taxa_upgrade,
+                "taxa_abandono": taxa_abandono,
+                "upsell_vendas": upsell_vendas,
+                "downsell_vendas": downsell_vendas,
+                "orderbump_vendas": orderbump_vendas,
+                "remarketing_vendas": remarketing_vendas,
+                "expirados_unicos": expirados_unicos,
             },
+            "tempo_medio": tempo_medio,
+            "calendario": calendario,
+            "diario": diario,
             "periodo": {
                 "inicio": start.strftime("%d/%m/%Y"),
                 "fim": end.strftime("%d/%m/%Y"),
@@ -19170,6 +19277,105 @@ async def migrate_scheduled_remarketing_v1(db: Session = Depends(get_db)):
             "message": "📅 Migração Remarketing Agendado V1 concluída!",
             "details": log_msgs
         }
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+
+
+# =========================================================
+# 📓 DIÁRIO DE MUDANÇAS - ENDPOINTS
+# =========================================================
+
+class ChangeLogCreate(BaseModel):
+    date: Optional[str] = None
+    category: Optional[str] = "geral"
+    content: str
+
+@app.post("/api/admin/changelog")
+def create_changelog(
+    data: ChangeLogCreate,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    from datetime import datetime as dt
+    note_date = now_brazil()
+    if data.date:
+        try:
+            note_date = dt.strptime(data.date, "%Y-%m-%d")
+            note_date = timezone('America/Sao_Paulo').localize(note_date)
+        except:
+            pass
+    
+    cl = ChangeLog(
+        user_id=current_user.id,
+        date=note_date,
+        category=data.category or "geral",
+        content=data.content
+    )
+    db.add(cl)
+    db.commit()
+    db.refresh(cl)
+    return {"id": cl.id, "date": cl.date.strftime("%d/%m/%Y"), "category": cl.category, "content": cl.content}
+
+@app.get("/api/admin/changelog")
+def list_changelog(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    logs = db.query(ChangeLog).filter(
+        ChangeLog.user_id == current_user.id
+    ).order_by(desc(ChangeLog.date)).limit(50).all()
+    return [{
+        "id": cl.id,
+        "date": cl.date.strftime("%d/%m/%Y") if cl.date else "",
+        "category": cl.category,
+        "content": cl.content,
+    } for cl in logs]
+
+@app.delete("/api/admin/changelog/{log_id}")
+def delete_changelog(
+    log_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    cl = db.query(ChangeLog).filter(ChangeLog.id == log_id, ChangeLog.user_id == current_user.id).first()
+    if not cl:
+        raise HTTPException(404, "Nota não encontrada")
+    db.delete(cl)
+    db.commit()
+    return {"ok": True}
+
+
+# =========================================================
+# 🗄️ MIGRAÇÃO V2: Diário de Mudanças
+# =========================================================
+@app.get("/migrate-changelog-v1")
+def migrate_changelog_v1(db: Session = Depends(get_db)):
+    """
+    Cria tabela change_logs para o Diário de Mudanças.
+    Acesse UMA VEZ:https://zenyx-gbs-testesv1-production.up.railway.app/migrate-changelog-v1
+    """
+    log_msgs = []
+    try:
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS change_logs (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                bot_id INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+                date TIMESTAMP DEFAULT NOW(),
+                category VARCHAR(50) DEFAULT 'geral',
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT NOW()
+            );
+        """))
+        db.commit()
+        log_msgs.append("✅ Tabela change_logs criada")
+        
+        db.execute(text("CREATE INDEX IF NOT EXISTS idx_changelog_user ON change_logs(user_id);"))
+        db.commit()
+        log_msgs.append("✅ Índice criado")
+        
+        return {"status": "success", "message": "📓 Migração Diário de Mudanças V1 concluída!", "details": log_msgs}
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
