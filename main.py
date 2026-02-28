@@ -14262,6 +14262,13 @@ def advanced_statistics(
         # ============================================
         # 📦 QUERIES BASE
         # ============================================
+        
+        # 🔧 Helper: normalizar timezone para comparações seguras
+        def _safe_tz(dt_val):
+            if dt_val is None: return None
+            if dt_val.tzinfo is None: return tz_br.localize(dt_val)
+            return dt_val
+        
         def apply_bot_filter(query):
             if bots_ids:
                 return query.filter(Pedido.bot_id.in_(bots_ids))
@@ -14454,7 +14461,13 @@ def advanced_statistics(
                 pedidos_user = sorted([v for v in todas_vendas if (v.telegram_id or '') == tid], key=lambda x: x.data_aprovacao or datetime(2020,1,1))
                 for i in range(1, len(pedidos_user)):
                     if pedidos_user[i].data_aprovacao and pedidos_user[i-1].data_aprovacao:
-                        diff = (pedidos_user[i].data_aprovacao - pedidos_user[i-1].data_aprovacao).days
+                        try:
+                            da_i = pedidos_user[i].data_aprovacao
+                            da_prev = pedidos_user[i-1].data_aprovacao
+                            if da_i.tzinfo is None: da_i = tz_br.localize(da_i)
+                            if da_prev.tzinfo is None: da_prev = tz_br.localize(da_prev)
+                            diff = (da_i - da_prev).days
+                        except: diff = 0
                         tempo_retorno_dias += diff
                         retorno_count += 1
         avg_retorno = round(tempo_retorno_dias / retorno_count, 1) if retorno_count > 0 else 0
@@ -14488,8 +14501,18 @@ def advanced_statistics(
         taxa_upgrade = round((upsell_vendas / total_compradores) * 100, 1) if total_compradores > 0 else 0
         
         # Taxa Abandono: ex-VIPs que não renovaram / total compradores
-        expirados_count = sum(1 for v in todas_vendas if v.status == 'expired' and v.data_expiracao and v.data_expiracao < agora)
-        expirados_unicos = len(set(v.telegram_id for v in todas_vendas if v.status == 'expired' and v.data_expiracao and v.data_expiracao < agora and v.telegram_id))
+        expirados_count = 0
+        expirados_tids = set()
+        for v in todas_vendas:
+            if v.status == 'expired' and v.data_expiracao:
+                try:
+                    de = _safe_tz(v.data_expiracao)
+                    if de < agora:
+                        expirados_count += 1
+                        if v.telegram_id:
+                            expirados_tids.add(v.telegram_id)
+                except: pass
+        expirados_unicos = len(expirados_tids)
         taxa_abandono = round((expirados_unicos / total_compradores) * 100, 1) if total_compradores > 0 else 0
 
         # === TEMPO MÉDIO /START → PAGAMENTO ===
@@ -14498,9 +14521,11 @@ def advanced_statistics(
             pc = getattr(v, 'primeiro_contato', None)
             pa = v.data_aprovacao
             if pc and pa:
-                diff_sec = (pa - pc).total_seconds()
-                if 0 < diff_sec < 86400 * 30:  # Ignora >30 dias (outliers)
-                    tempos_start_pag.append(diff_sec)
+                try:
+                    diff_sec = (_safe_tz(pa) - _safe_tz(pc)).total_seconds()
+                    if 0 < diff_sec < 86400 * 30:
+                        tempos_start_pag.append(diff_sec)
+                except: pass
         
         if tempos_start_pag:
             avg_tempo_sec = sum(tempos_start_pag) / len(tempos_start_pag)
@@ -19353,7 +19378,7 @@ def delete_changelog(
 def migrate_changelog_v1(db: Session = Depends(get_db)):
     """
     Cria tabela change_logs para o Diário de Mudanças.
-    Acesse UMA VEZ:https://zenyx-gbs-testesv1-production.up.railway.app/migrate-changelog-v1
+    Acesse UMA VEZ: /migrate-changelog-v1
     """
     log_msgs = []
     try:
