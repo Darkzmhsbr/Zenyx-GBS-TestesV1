@@ -14618,6 +14618,39 @@ def advanced_statistics(
         except:
             diario = []
 
+        # === TOP TRACKING LINKS (Códigos de Venda) ===
+        top_tracking = []
+        try:
+            tracking_count = {}
+            for v in vendas:
+                tid = getattr(v, 'tracking_id', None)
+                if tid:
+                    if tid not in tracking_count:
+                        tlink = db.query(TrackingLink).filter(TrackingLink.id == tid).first()
+                        tracking_count[tid] = {"name": tlink.slug if tlink else f"Link #{tid}", "count": 0, "revenue": 0}
+                    tracking_count[tid]["count"] += 1
+                    if is_super_split and not bot_id:
+                        tracking_count[tid]["revenue"] += taxa_centavos
+                    else:
+                        tracking_count[tid]["revenue"] += int((v.valor or 0) * 100)
+            top_tracking = sorted(tracking_count.values(), key=lambda x: x["revenue"], reverse=True)[:5]
+        except: pass
+
+        # === TOP CAMPANHAS DE REMARKETING ===
+        top_campanhas = []
+        try:
+            campanha_count = {}
+            for v in vendas:
+                orig = getattr(v, 'origem', '') or ''
+                if orig == 'remarketing':
+                    rmk_id = getattr(v, 'total_remarketings', 0) or 0
+                    key = f"Remarketing #{rmk_id}" if rmk_id else "Remarketing"
+                    if key not in campanha_count:
+                        campanha_count[key] = {"name": key, "count": 0}
+                    campanha_count[key]["count"] += 1
+            top_campanhas = sorted(campanha_count.values(), key=lambda x: x["count"], reverse=True)[:5]
+        except: pass
+
         # ============================================
         # 🍩 GRÁFICO DONUT: TAXA DE CONVERSÃO
         # ============================================
@@ -14651,6 +14684,8 @@ def advanced_statistics(
             "chart_horas": chart_horas,
             "chart_semana": chart_semana,
             "top_bots": top_bots,
+            "top_tracking": top_tracking,
+            "top_campanhas": top_campanhas,
             "contadores_usuarios": contadores_usuarios,
             "metricas_avancadas": {
                 "taxa_retencao": taxa_retencao,
