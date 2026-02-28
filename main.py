@@ -19000,10 +19000,6 @@ async def migrate_premium_emojis_v1(db: Session = Depends(get_db)):
             "message": f"❌ Erro crítico na migração: {str(e)}"
         }
 
-# ============================================================
-# 🚨 SISTEMA DE DENÚNCIAS - ENDPOINTS
-# ============================================================
-
 # --- ENDPOINT PÚBLICO: Enviar Denúncia (sem autenticação) ---
 class ReportSubmit(BaseModel):
     reporter_name: Optional[str] = None
@@ -19026,18 +19022,26 @@ def submit_report(data: ReportSubmit, request: Request, db: Session = Depends(ge
     
     # Tenta encontrar o bot no sistema
     clean_username = data.bot_username.replace("@", "").strip().lower()
+    
+    # 🔥 CORREÇÃO: Busca usando 'or_' para bater com o USERNAME ou com o NOME do Bot
     bot_found = db.query(BotModel).filter(
-        func.lower(BotModel.nome) == clean_username
+        or_(
+            func.lower(BotModel.username) == clean_username,
+            func.lower(BotModel.nome) == clean_username
+        )
     ).first()
     
-    # 🔥 NOVO: Captura os dados do dono do bot
+    # 🔥 NOVO: Captura os dados do dono do bot com segurança tripla
     owner_id = None
     owner_username = None
-    if bot_found and getattr(bot_found, 'owner_id', None):
-        owner = db.query(User).filter(User.id == bot_found.owner_id).first()
-        if owner:
-            owner_id = owner.id
-            owner_username = owner.username
+    if bot_found:
+        # Pega o dono do bot. Alguns sistemas usam owner_id ou user_id
+        bot_owner_id = getattr(bot_found, 'owner_id', None) or getattr(bot_found, 'user_id', None)
+        if bot_owner_id:
+            owner = db.query(User).filter(User.id == bot_owner_id).first()
+            if owner:
+                owner_id = owner.id
+                owner_username = owner.username
     
     # Captura IP do denunciante (para segurança)
     client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
@@ -19048,8 +19052,8 @@ def submit_report(data: ReportSubmit, request: Request, db: Session = Depends(ge
         reporter_name=data.reporter_name,
         bot_username=clean_username,
         bot_id=bot_found.id if bot_found else None,
-        owner_id=owner_id,              # 🔥 INSERIDO
-        owner_username=owner_username,  # 🔥 INSERIDO
+        owner_id=owner_id,              # 🔥 AGORA VAI SALVAR CORRETAMENTE
+        owner_username=owner_username,  # 🔥 AGORA VAI SALVAR CORRETAMENTE
         reason=data.reason,
         description=data.description,
         evidence_url=data.evidence_url,
@@ -19081,14 +19085,13 @@ def submit_report(data: ReportSubmit, request: Request, db: Session = Depends(ge
     except:
         pass
     
-    logger.info(f"🚨 [REPORT] Nova denúncia #{report.id} | Bot: @{clean_username} | Motivo: {data.reason}")
+    logger.info(f"🚨 [REPORT] Nova denúncia #{report.id} | Bot: @{clean_username} | Owner: {owner_username} | Motivo: {data.reason}")
     
     return {
         "status": "success", 
         "message": "Denúncia enviada com sucesso. Nossa equipe irá analisar.",
         "report_id": report.id
     }
-
 
 # --- SUPERADMIN: Listar Denúncias ---
 @app.get("/api/superadmin/reports")
@@ -19689,6 +19692,55 @@ def migrate_statistics_v18(db: Session = Depends(get_db)):
                 if "already exists" not in str(e_cmd):
                     log_msgs.append(f"⚠️ {e_cmd}")
         return {"status": "success", "message": "📊 Migração V18 concluída!", "details": log_msgs}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+
+# ============================================================
+# 🚨 MIGRAÇÃO V3: CORREÇÃO RETROATIVA DOS DONOS DOS BOTS 
+# ============================================================
+@app.get("/migrate-reports-v3")
+async def migrate_reports_v3(db: Session = Depends(get_db)):
+    """
+    Corrige denúncias antigas que ficaram com "Desconhecido" e atualiza 
+    os donos corretos buscando ativamente pelo @username do bot.
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-reports-v3
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        # 1. Pega todas as denúncias onde o dono tá vazio
+        reports = db.execute(text("SELECT id, bot_username FROM reports WHERE owner_id IS NULL")).fetchall()
+        updated = 0
+        
+        for r in reports:
+            r_id = r[0]
+            b_uname = str(r[1]).replace("@", "").strip().lower()
+            
+            # Procura o bot pelo username real
+            bot = db.execute(text("SELECT id, owner_id FROM bots WHERE LOWER(username) = :uname OR LOWER(nome) = :uname LIMIT 1"), {"uname": b_uname}).fetchone()
+            
+            if bot and bot[1]:
+                # Pega os dados do dono
+                user = db.execute(text("SELECT username FROM users WHERE id = :uid"), {"uid": bot[1]}).fetchone()
+                if user:
+                    # Atualiza a denúncia com bot_id, owner_id e owner_username!
+                    db.execute(text("""
+                        UPDATE reports 
+                        SET bot_id = :bid, owner_id = :uid, owner_username = :uname 
+                        WHERE id = :rid
+                    """), {"bid": bot[0], "uid": bot[1], "uname": user[0], "rid": r_id})
+                    updated += 1
+        
+        db.commit()
+        log_msgs.append(f"✅ {updated} denúncias antigas foram corrigidas e vinculadas aos seus donos!")
+        
+        return {
+            "status": "success",
+            "message": "🚨 Correção de Donos V3 concluída!",
+            "details": log_msgs
+        }
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
