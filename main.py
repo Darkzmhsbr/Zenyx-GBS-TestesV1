@@ -14651,18 +14651,157 @@ def advanced_statistics(
             top_campanhas = sorted(campanha_count.values(), key=lambda x: x["count"], reverse=True)[:5]
         except: pass
 
-        # ============================================
-        # 🍩 GRÁFICO DONUT: TAXA DE CONVERSÃO
-        # ============================================
+        # 🍩 DONUT CONVERSÃO
         donut_conversao = {
             "convertidas": total_vendas,
             "pendentes": total_pendentes,
             "perdidas": max(0, total_leads - total_geradas)
         }
 
-        # ============================================
+        # 🆕 CRESCIMENTO vs PERÍODO ANTERIOR
+        crescimento = {}
+        try:
+            periodo_duracao = (end - start).days
+            prev_start = start - timedelta(days=periodo_duracao)
+            prev_end = start
+
+            q_prev_vendas = apply_bot_filter(
+                db.query(Pedido).filter(
+                    Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
+                    Pedido.data_aprovacao >= prev_start,
+                    Pedido.data_aprovacao <= prev_end
+                )
+            )
+            prev_vendas = q_prev_vendas.all()
+            
+            if is_super_split and not bot_id:
+                prev_receita = len(prev_vendas) * taxa_centavos
+            else:
+                prev_receita = sum(int((p.valor or 0) * 100) for p in prev_vendas)
+            
+            prev_total_vendas = len(prev_vendas)
+            prev_ticket = int(prev_receita / prev_total_vendas) if prev_total_vendas > 0 else 0
+            
+            q_prev_leads = db.query(Lead).filter(Lead.created_at >= prev_start, Lead.created_at <= prev_end)
+            if bots_ids:
+                q_prev_leads = q_prev_leads.filter(Lead.bot_id.in_(bots_ids))
+            prev_leads = q_prev_leads.count()
+
+            q_prev_ativos = apply_bot_filter(
+                db.query(Pedido).filter(
+                    Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
+                    or_(Pedido.data_expiracao > prev_end, Pedido.data_expiracao == None)
+                )
+            )
+            prev_ativos = q_prev_ativos.count()
+
+            def calc_growth(current, previous):
+                if previous == 0:
+                    return 100.0 if current > 0 else 0.0
+                return round(((current - previous) / previous) * 100, 1)
+
+            prev_usu_unicos = len(set(p.telegram_id for p in prev_vendas if p.telegram_id))
+            prev_ltv = int(prev_receita / prev_usu_unicos) if prev_usu_unicos > 0 else 0
+
+            crescimento = {
+                "receita": calc_growth(receita_total, prev_receita),
+                "vendas": calc_growth(total_vendas, prev_total_vendas),
+                "ticket_medio": calc_growth(ticket_medio, prev_ticket),
+                "vips": calc_growth(total_ativos, prev_ativos),
+                "ltv": calc_growth(ltv_medio, prev_ltv),
+                "leads": calc_growth(total_leads, prev_leads),
+            }
+        except Exception as e_cresc:
+            logger.warning(f"Erro crescimento: {e_cresc}")
+            crescimento = {}
+
+        # 🆕 FUNIL VISUAL
+        funil_visual = {}
+        try:
+            funil_visual = {
+                "starts": total_leads,
+                "leads": total_leads,
+                "checkouts": total_geradas,
+                "vendas": total_vendas,
+                "taxa_start_lead": round((total_leads / max(total_leads, 1)) * 100, 1) if total_leads > 0 else 0,
+                "taxa_lead_venda": round((total_vendas / max(total_leads, 1)) * 100, 1) if total_leads > 0 else 0,
+                "taxa_aprovacao": round((total_vendas / max(total_geradas, 1)) * 100, 1) if total_geradas > 0 else 0,
+            }
+        except:
+            funil_visual = {"starts":0,"leads":0,"checkouts":0,"vendas":0,"taxa_start_lead":0,"taxa_lead_venda":0,"taxa_aprovacao":0}
+
+        # 🆕 HEATMAP SEMANAL
+        heatmap_semanal = []
+        try:
+            heat_map = {}
+            for v in vendas:
+                if v.data_aprovacao:
+                    heat_map[(v.data_aprovacao.weekday(), v.data_aprovacao.hour)] = heat_map.get((v.data_aprovacao.weekday(), v.data_aprovacao.hour), 0) + 1
+            for wd in range(7):
+                for hr in range(24):
+                    heatmap_semanal.append({"weekday": wd, "hour": hr, "count": heat_map.get((wd, hr), 0)})
+        except:
+            pass
+
+        # 🆕 RECEITA POR GATEWAY
+        receita_por_gateway = {"items": []}
+        try:
+            gw_map = {}
+            for v in vendas:
+                gw = getattr(v, 'gateway_usada', None) or 'desconhecido'
+                if gw not in gw_map:
+                    gw_map[gw] = {"name": gw, "count": 0, "receita": 0}
+                gw_map[gw]["count"] += 1
+                if is_super_split and not bot_id:
+                    gw_map[gw]["receita"] += taxa_centavos
+                else:
+                    gw_map[gw]["receita"] += int((v.valor or 0) * 100)
+            gw_list = sorted(gw_map.values(), key=lambda x: x["receita"], reverse=True)
+            total_gw = sum(g["receita"] for g in gw_list) or 1
+            for gw in gw_list:
+                gw["pct"] = round((gw["receita"] / total_gw) * 100, 1)
+            receita_por_gateway = {"items": gw_list, "total": total_gw}
+        except:
+            pass
+
+        # 🆕 VENDAS POR ORIGEM
+        vendas_por_origem = []
+        try:
+            origem_map = {}
+            for v in vendas:
+                orig = getattr(v, 'origem', 'bot') or 'bot'
+                origem_map[orig] = origem_map.get(orig, 0) + 1
+            labels = {'bot':'Bot Direto','upsell':'Upsell','downsell':'Downsell','remarketing':'Remarketing','order_bump':'Order Bump','canal_free':'Canal Free'}
+            vendas_por_origem = [{"name": labels.get(k, k.replace('_',' ').title()), "value": v} for k, v in sorted(origem_map.items(), key=lambda x: x[1], reverse=True)]
+        except:
+            pass
+
+        # 🆕 PROJEÇÃO MENSAL
+        projecao_mensal = {"receita_projetada": 0, "vendas_projetadas": 0}
+        try:
+            import calendar as cal_mod
+            dias_mes = cal_mod.monthrange(agora.year, agora.month)[1]
+            dia_atual = agora.day
+            inicio_mes = agora.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if inicio_mes.tzinfo is None:
+                inicio_mes = tz_br.localize(inicio_mes)
+            vendas_mes = [v for v in vendas if v.data_aprovacao and _safe_tz(v.data_aprovacao) >= inicio_mes]
+            if is_super_split and not bot_id:
+                receita_mes = len(vendas_mes) * taxa_centavos
+            else:
+                receita_mes = sum(int((v.valor or 0) * 100) for v in vendas_mes)
+            if dia_atual > 0:
+                projecao_mensal = {
+                    "receita_projetada": int((receita_mes / dia_atual) * dias_mes),
+                    "vendas_projetadas": int((len(vendas_mes) / dia_atual) * dias_mes),
+                    "media_diaria_receita": int(receita_mes / dia_atual),
+                    "media_diaria_vendas": round(len(vendas_mes) / dia_atual, 1),
+                    "dias_restantes": dias_mes - dia_atual,
+                }
+        except:
+            pass
+
         # 📊 RETORNO FINAL
-        # ============================================
         return {
             "metricas": {
                 "receita_total": receita_total,
@@ -14710,6 +14849,12 @@ def advanced_statistics(
             "tempo_medio": tempo_medio,
             "calendario": calendario,
             "diario": diario,
+            "crescimento": crescimento,
+            "funil_visual": funil_visual,
+            "heatmap_semanal": heatmap_semanal,
+            "receita_por_gateway": receita_por_gateway,
+            "vendas_por_origem": vendas_por_origem,
+            "projecao_mensal": projecao_mensal,
             "periodo": {
                 "inicio": start.strftime("%d/%m/%Y"),
                 "fim": end.strftime("%d/%m/%Y"),
@@ -14718,26 +14863,29 @@ def advanced_statistics(
         }
 
     except Exception as e:
-        logger.error(f"❌ Erro ao buscar estatísticas avançadas: {e}")
+        logger.error(f"Erro estatisticas: {e}")
         import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Erro nas estatísticas: {str(e)}")
 
 def _empty_statistics():
-    """Retorna objeto vazio para usuários sem bots"""
     return {
-        "metricas": {
-            "receita_total": 0, "ticket_medio": 0, "total_usuarios": 0,
-            "ltv_medio": 0, "total_vendas": 0, "total_pendentes": 0,
-            "receita_pendentes": 0, "total_geradas": 0, "taxa_conversao": 0,
-            "total_leads": 0
-        },
-        "chart_receita": [],
-        "top_planos": [],
-        "top_horas": [],
-        "top_dias": [],
-        "donut_conversao": {"convertidas": 0, "pendentes": 0, "perdidas": 0},
-        "periodo": {"inicio": "", "fim": "", "label": "30d"}
+        "metricas": {"receita_total":0,"ticket_medio":0,"total_usuarios":0,"ltv_medio":0,"total_vendas":0,"total_pendentes":0,"receita_pendentes":0,"total_geradas":0,"taxa_conversao":0,"total_leads":0},
+        "chart_receita":[],"top_planos":[],"top_horas":[],"top_dias":[],
+        "donut_conversao":{"convertidas":0,"pendentes":0,"perdidas":0},
+        "chart_horas":[],"chart_semana":[],"top_bots":[],
+        "top_tracking":[],"top_campanhas":[],
+        "contadores_usuarios":{"total_compradores":0,"recorrentes":0,"vips_ativos":0,"upsellers":0,"downsellers":0,"remarketing":0},
+        "metricas_avancadas":{"taxa_retencao":0,"vendas_por_usuario":0,"avg_retorno_dias":0,"total_compradores":0,"recorrentes":0,"vips_ativos":0,"taxa_upsell":0,"taxa_downsell":0,"taxa_orderbump":0,"taxa_recuperacao":0,"taxa_recorrencia":0,"taxa_upgrade":0,"taxa_abandono":0,"upsell_vendas":0,"downsell_vendas":0,"orderbump_vendas":0,"remarketing_vendas":0,"expirados_unicos":0},
+        "tempo_medio":{"segundos":0,"minutos":0,"horas":0,"dataset":0},
+        "calendario":[],"diario":[],
+        "crescimento":{},
+        "funil_visual":{"starts":0,"leads":0,"checkouts":0,"vendas":0,"taxa_start_lead":0,"taxa_lead_venda":0,"taxa_aprovacao":0},
+        "heatmap_semanal":[],
+        "receita_por_gateway":{"items":[]},
+        "vendas_por_origem":[],
+        "projecao_mensal":{"receita_projetada":0,"vendas_projetadas":0},
+        "periodo":{"inicio":"","fim":"","label":"30d"}
     }
 
 # =========================================================
@@ -16286,7 +16434,7 @@ def delete_bot_force(
             db.add(log)
             db.commit()
         except: pass
-                   
+                    
         return {"message": f"Bot '{nome_bot}' deletado com sucesso"}
         
     except HTTPException:
@@ -16670,7 +16818,7 @@ def import_emoji_pack_from_telegram(
 ):
     """
     Importa um pack COMPLETO de emojis premium do Telegram.
-    Usa a Bot API (getStickerSet) para buscar todos os emojis do pack.
+    Uusa a Bot API (getStickerSet) para buscar todos os emojis do pack.
     Aceita link (https://t.me/addemoji/NomeDoPack) ou shortname direto.
     """
     import re as _re
@@ -19436,6 +19584,34 @@ def migrate_changelog_v1(db: Session = Depends(get_db)):
         log_msgs.append("✅ Índice criado")
         
         return {"status": "success", "message": "📓 Migração Diário de Mudanças V1 concluída!", "details": log_msgs}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+
+@app.get("/migrate-statistics-v18")
+def migrate_statistics_v18(db: Session = Depends(get_db)):
+    """Cria índices para performance V18. Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-statistics-v18"""
+    log_msgs = []
+    try:
+        cmds = [
+            "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS origem VARCHAR(50) DEFAULT 'bot';",
+            "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS gateway_usada VARCHAR;",
+            "CREATE INDEX IF NOT EXISTS idx_pedidos_data_aprov ON pedidos(data_aprovacao);",
+            "CREATE INDEX IF NOT EXISTS idx_pedidos_origem ON pedidos(origem);",
+            "CREATE INDEX IF NOT EXISTS idx_pedidos_gateway ON pedidos(gateway_usada);",
+            "CREATE INDEX IF NOT EXISTS idx_pedidos_status ON pedidos(status);",
+            "CREATE INDEX IF NOT EXISTS idx_leads_created ON leads(created_at);",
+            "CREATE INDEX IF NOT EXISTS idx_pedidos_bot_status ON pedidos(bot_id, status);",
+        ]
+        for cmd in cmds:
+            try:
+                db.execute(text(cmd))
+                db.commit()
+                log_msgs.append(f"✅ OK")
+            except Exception as e_cmd:
+                if "already exists" not in str(e_cmd):
+                    log_msgs.append(f"⚠️ {e_cmd}")
+        return {"status": "success", "message": "📊 Migração V18 concluída!", "details": log_msgs}
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
