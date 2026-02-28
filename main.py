@@ -3125,7 +3125,7 @@ def registrar_remarketing(
         db.commit()
         logger.info(f"📧 Remarketing registrado (MEIO): {pedido.first_name}")
 
-    # 2. FORÇA A CRIAÇÃO DE TODAS AS COLUNAS FALTANTES (TODAS AS VERSÕES)
+   # 2. FORÇA A CRIAÇÃO DE TODAS AS COLUNAS FALTANTES (TODAS AS VERSÕES)
     try:
         with engine.connect() as conn:
             logger.info("🔧 [STARTUP] Verificando integridade completa do banco...")
@@ -3433,6 +3433,10 @@ def registrar_remarketing(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_reason TEXT;",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS bots_paused_until TIMESTAMP WITHOUT TIME ZONE;",
+                
+                # 🔥 [NOVO] COLUNAS V2: Identificação do Dono do Bot nas Denúncias
+                "ALTER TABLE reports ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL;",
+                "ALTER TABLE reports ADD COLUMN IF NOT EXISTS owner_username VARCHAR(100);",
             ]
             
             for cmd in comandos_sql:
@@ -11861,7 +11865,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         logger.error(f"❌ Erro no webhook: {e}")
 
     return {"status": "ok"}
-    
+
 # ============================================================
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
@@ -19026,6 +19030,15 @@ def submit_report(data: ReportSubmit, request: Request, db: Session = Depends(ge
         func.lower(BotModel.nome) == clean_username
     ).first()
     
+    # 🔥 NOVO: Captura os dados do dono do bot
+    owner_id = None
+    owner_username = None
+    if bot_found and getattr(bot_found, 'owner_id', None):
+        owner = db.query(User).filter(User.id == bot_found.owner_id).first()
+        if owner:
+            owner_id = owner.id
+            owner_username = owner.username
+    
     # Captura IP do denunciante (para segurança)
     client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
     if "," in client_ip:
@@ -19035,6 +19048,8 @@ def submit_report(data: ReportSubmit, request: Request, db: Session = Depends(ge
         reporter_name=data.reporter_name,
         bot_username=clean_username,
         bot_id=bot_found.id if bot_found else None,
+        owner_id=owner_id,              # 🔥 INSERIDO
+        owner_username=owner_username,  # 🔥 INSERIDO
         reason=data.reason,
         description=data.description,
         evidence_url=data.evidence_url,
@@ -19101,6 +19116,8 @@ def list_reports(
             "reporter_name": r.reporter_name,
             "bot_username": r.bot_username,
             "bot_id": r.bot_id,
+            "owner_id": getattr(r, 'owner_id', None),              # 🔥 INSERIDO
+            "owner_username": getattr(r, 'owner_username', None),  # 🔥 INSERIDO
             "reason": r.reason,
             "description": r.description,
             "evidence_url": r.evidence_url,
@@ -19144,60 +19161,64 @@ def resolve_report(
     report.resolved_at = now_brazil()
     report.action_taken = data.action
     
-    # Se tem bot vinculado, aplica punição
-    if data.action and data.action != 'none' and report.bot_id:
+    # Se tem bot vinculado (ou owner_id mapeado), aplica punição
+    user_target = None
+    
+    if getattr(report, 'owner_id', None):
+        user_target = db.query(User).filter(User.id == report.owner_id).first()
+    elif report.bot_id:
         bot = db.query(BotModel).filter(BotModel.id == report.bot_id).first()
         if bot:
-            user = db.query(User).filter(User.id == bot.user_id).first()
-            if user:
-                if data.action == 'strike':
-                    # Incrementa strike
-                    current_strikes = getattr(user, 'strike_count', 0) or 0
-                    new_strike = current_strikes + 1
-                    user.strike_count = new_strike
-                    
-                    strike = UserStrike(
-                        user_id=user.id,
-                        report_id=report.id,
-                        reason=data.resolution or f"Denúncia #{report.id}",
-                        strike_number=new_strike,
-                        action='strike',
-                        applied_by=current_user.id
-                    )
-                    db.add(strike)
-                    
-                    # 3 strikes = ban automático
-                    if new_strike >= 3:
-                        user.is_banned = True
-                        user.banned_reason = f"3 strikes atingidos. Última denúncia: #{report.id}"
-                        user.is_active = False
-                        report.action_taken = 'ban_account'
-                        logger.warning(f"🚫 [REPORT] Usuário {user.username} BANIDO (3 strikes)")
-                    
-                elif data.action == 'pause_bots':
-                    days = data.pause_days or 7
-                    user.bots_paused_until = now_brazil() + timedelta(days=days)
-                    
-                    strike = UserStrike(
-                        user_id=user.id, report_id=report.id,
-                        reason=data.resolution or f"Bots pausados por {days} dias",
-                        strike_number=(getattr(user, 'strike_count', 0) or 0) + 1,
-                        action='pause_bots', pause_until=user.bots_paused_until,
-                        applied_by=current_user.id
-                    )
-                    db.add(strike)
-                    user.strike_count = (getattr(user, 'strike_count', 0) or 0) + 1
-                    logger.warning(f"⏸️ [REPORT] Bots do usuário {user.username} pausados por {days} dias")
-                    
-                elif data.action == 'ban_account':
-                    user.is_banned = True
-                    user.banned_reason = data.resolution or f"Banido por denúncia #{report.id}"
-                    user.is_active = False
-                    logger.warning(f"🚫 [REPORT] Usuário {user.username} BANIDO por admin")
-                    
-                elif data.action == 'tax_increase':
-                    # Aumenta taxa (seria aplicada no split de pagamento)
-                    pass
+            user_target = db.query(User).filter(User.id == bot.user_id).first()
+
+    if data.action and data.action != 'none' and user_target:
+        if data.action == 'strike':
+            # Incrementa strike
+            current_strikes = getattr(user_target, 'strike_count', 0) or 0
+            new_strike = current_strikes + 1
+            user_target.strike_count = new_strike
+            
+            strike = UserStrike(
+                user_id=user_target.id,
+                report_id=report.id,
+                reason=data.resolution or f"Denúncia #{report.id}",
+                strike_number=new_strike,
+                action='strike',
+                applied_by=current_user.id
+            )
+            db.add(strike)
+            
+            # 3 strikes = ban automático
+            if new_strike >= 3:
+                user_target.is_banned = True
+                user_target.banned_reason = f"3 strikes atingidos. Última denúncia: #{report.id}"
+                user_target.is_active = False
+                report.action_taken = 'ban_account'
+                logger.warning(f"🚫 [REPORT] Usuário {user_target.username} BANIDO (3 strikes)")
+            
+        elif data.action == 'pause_bots':
+            days = data.pause_days or 7
+            user_target.bots_paused_until = now_brazil() + timedelta(days=days)
+            
+            strike = UserStrike(
+                user_id=user_target.id, report_id=report.id,
+                reason=data.resolution or f"Bots pausados por {days} dias",
+                strike_number=(getattr(user_target, 'strike_count', 0) or 0) + 1,
+                action='pause_bots', pause_until=user_target.bots_paused_until,
+                applied_by=current_user.id
+            )
+            db.add(strike)
+            user_target.strike_count = (getattr(user_target, 'strike_count', 0) or 0) + 1
+            logger.warning(f"⏸️ [REPORT] Bots do usuário {user_target.username} pausados por {days} dias")
+            
+        elif data.action == 'ban_account':
+            user_target.is_banned = True
+            user_target.banned_reason = data.resolution or f"Banido por denúncia #{report.id}"
+            user_target.is_active = False
+            logger.warning(f"🚫 [REPORT] Usuário {user_target.username} BANIDO por admin")
+            
+        elif data.action == 'tax_increase':
+            pass
     
     db.commit()
     
@@ -19207,13 +19228,12 @@ def resolve_report(
 
 
 # ============================================================
-# 🚨 MIGRAÇÃO: SISTEMA DE DENÚNCIAS 
+# 🚨 MIGRAÇÃO V1: SISTEMA DE DENÚNCIAS 
 # ============================================================
 @app.get("/migrate-reports-v1")
 async def migrate_reports_v1(db: Session = Depends(get_db)):
     """
     Migração para criar tabelas do sistema de denúncias.
-    Acesse UMA VEZ: /migrate-reports-v1
     """
     try:
         from sqlalchemy import text
@@ -19302,6 +19322,61 @@ async def migrate_reports_v1(db: Session = Depends(get_db)):
         db.rollback()
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
 
+# ============================================================
+# 🚨 MIGRAÇÃO V2: ATUALIZAÇÃO DO SISTEMA DE DENÚNCIAS 
+# ============================================================
+@app.get("/migrate-reports-v2")
+async def migrate_reports_v2(db: Session = Depends(get_db)):
+    """
+    Migração para adicionar as colunas owner_id e owner_username na tabela reports.
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-reports-v2
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        try:
+            db.execute(text("ALTER TABLE reports ADD COLUMN IF NOT EXISTS owner_id INTEGER REFERENCES users(id) ON DELETE SET NULL;"))
+            db.commit()
+            log_msgs.append("✅ Coluna owner_id adicionada em reports")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ owner_id: {str(e)}")
+            
+        try:
+            db.execute(text("ALTER TABLE reports ADD COLUMN IF NOT EXISTS owner_username VARCHAR(100);"))
+            db.commit()
+            log_msgs.append("✅ Coluna owner_username adicionada em reports")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ owner_username: {str(e)}")
+        
+        # Opcional: Atualizar relatórios antigos retroativamente
+        try:
+            reports = db.execute(text("SELECT id, bot_id FROM reports WHERE owner_id IS NULL AND bot_id IS NOT NULL")).fetchall()
+            updated = 0
+            for r in reports:
+                bot = db.execute(text("SELECT owner_id FROM bots WHERE id = :bid"), {"bid": r[1]}).fetchone()
+                if bot and bot[0]:
+                    user = db.execute(text("SELECT username FROM users WHERE id = :uid"), {"uid": bot[0]}).fetchone()
+                    if user:
+                        db.execute(text("UPDATE reports SET owner_id = :uid, owner_username = :uname WHERE id = :rid"), 
+                                   {"uid": bot[0], "uname": user[0], "rid": r[0]})
+                        updated += 1
+            db.commit()
+            log_msgs.append(f"✅ {updated} denúncias antigas retroativamente atualizadas com o dono do bot.")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ Atualização retroativa: {str(e)}")
+
+        return {
+            "status": "success",
+            "message": "🚨 Migração de Denúncias V2 concluída!",
+            "details": log_msgs
+        }
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
 
 # ============================================================
 # 📅 REMARKETING AGENDADO - ENDPOINTS

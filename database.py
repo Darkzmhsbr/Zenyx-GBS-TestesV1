@@ -1041,6 +1041,10 @@ class Report(Base):
     bot_username = Column(String(100), nullable=False)          # @username do bot denunciado
     bot_id = Column(Integer, ForeignKey('bots.id', ondelete='SET NULL'), nullable=True)  # Vincula ao bot se encontrado
     
+    # 🔥 NOVAS COLUNAS V2: Identificação do Dono do Bot
+    owner_id = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    owner_username = Column(String(100), nullable=True)
+    
     # Detalhes da denúncia
     reason = Column(String(50), nullable=False)                 # Categoria: 'cp', 'fraud', 'scam', 'spam', 'illegal', 'other'
     description = Column(Text, nullable=True)                   # Descrição detalhada
@@ -1053,7 +1057,7 @@ class Report(Base):
     resolved_at = Column(DateTime, nullable=True)
     
     # Punição aplicada
-    action_taken = Column(String(50), nullable=True)            # 'warning', 'strike', 'pause_bot', 'ban_account', 'none'
+    action_taken = Column(String(50), nullable=True)            # 'warning', 'strike', 'pause_bots', 'ban_account', 'none'
     strike_count = Column(Integer, default=0)                   # Strikes acumulados nesta denúncia
     
     # Auditoria
@@ -1062,7 +1066,7 @@ class Report(Base):
     ip_address = Column(String(50), nullable=True)              # IP do denunciante (para segurança)
     
     def __repr__(self):
-        return f"<Report(id={self.id}, bot='{self.bot_username}', reason='{self.reason}', status='{self.status}')>"
+        return f"<Report(id={self.id}, bot='{self.bot_username}', owner='{self.owner_username}', reason='{self.reason}', status='{self.status}')>"
 
 
 # ============================================================
@@ -1079,7 +1083,7 @@ class UserStrike(Base):
     strike_number = Column(Integer, nullable=False)             # 1, 2 ou 3
     
     # Punição
-    action = Column(String(50), nullable=False)                 # 'warning', 'tax_increase', 'pause_bots', 'ban'
+    action = Column(String(50), nullable=False)                 # 'warning', 'tax_increase', 'pause_bots', 'ban_account'
     pause_until = Column(DateTime, nullable=True)               # Se pausado, até quando
     tax_increase_pct = Column(Float, nullable=True)             # Aumento da taxa (ex: 5.0 = +5%)
     
