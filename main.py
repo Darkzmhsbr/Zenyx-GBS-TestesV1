@@ -6237,7 +6237,7 @@ def configurar_menu_bot(token):
             telebot.types.BotCommand("start", "🚀 Iniciar"),
             telebot.types.BotCommand("suporte", "💬 Falar com Suporte"),
             telebot.types.BotCommand("status", "⭐ Minha Assinatura"),
-            telebot.types.BotCommand("denunciar", "🚨 Fazer Denúncia")
+            telebot.types.BotCommand("denunciar", "🚨 Fazer Denúncia") # 🔥 NOVO COMANDO ADICIONADO AQUI!
         ])
         logger.info(f"✅ Menu de comandos configurado para o token {token[:10]}...")
     except Exception as e:
@@ -10145,12 +10145,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         # ========================================
         # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
         # ========================================
-        # ========================================
-        # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
-        # ========================================
-        # ========================================
-        # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
-        # ========================================
         if update.chat_join_request:
             try:
                 join_request = update.chat_join_request
@@ -10454,6 +10448,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
 
             # --- /START ---
             if txt == "/start" or txt.startswith("/start "):
+                
+                # 🔥 SOLUÇÃO PARA BOTS EXISTENTES: Atualiza o menu silenciosamente em background 
+                # na primeira vez que alguém dá /start no bot, aplicando o comando /denunciar
+                try:
+                    threading.Thread(target=configurar_menu_bot, args=(token,)).start()
+                except:
+                    pass
+
                 first_name = message.from_user.first_name
                 username_raw = message.from_user.username
                 username_clean = str(username_raw).lower().replace("@", "").strip() if username_raw else ""
@@ -11859,7 +11861,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         logger.error(f"❌ Erro no webhook: {e}")
 
     return {"status": "ok"}
-
+    
 # ============================================================
 # ROTA 1: LISTAR LEADS (TOPO DO FUNIL)
 # ============================================================
