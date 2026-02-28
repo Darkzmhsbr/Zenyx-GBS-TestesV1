@@ -14431,6 +14431,77 @@ def advanced_statistics(
         )[:5]
 
         # ============================================
+        # 📊 NOVAS MÉTRICAS AVANÇADAS
+        # ============================================
+        
+        # Taxa Retenção: compradores que compraram mais de 1 vez / total compradores
+        compradores_map = {}
+        for v in todas_vendas:
+            tid = v.telegram_id or 'unknown'
+            compradores_map[tid] = compradores_map.get(tid, 0) + 1
+        total_compradores = len(compradores_map)
+        recorrentes = sum(1 for c in compradores_map.values() if c > 1)
+        taxa_retencao = round((recorrentes / total_compradores) * 100, 1) if total_compradores > 0 else 0
+
+        # Vendas por Usuário (média)
+        vendas_por_usuario = round(len(todas_vendas) / total_compradores, 1) if total_compradores > 0 else 0
+
+        # Tempo Médio Retorno (dias entre compras para compradores recorrentes)
+        tempo_retorno_dias = 0
+        retorno_count = 0
+        for tid, count in compradores_map.items():
+            if count > 1:
+                pedidos_user = sorted([v for v in todas_vendas if (v.telegram_id or '') == tid], key=lambda x: x.data_aprovacao or datetime(2020,1,1))
+                for i in range(1, len(pedidos_user)):
+                    if pedidos_user[i].data_aprovacao and pedidos_user[i-1].data_aprovacao:
+                        diff = (pedidos_user[i].data_aprovacao - pedidos_user[i-1].data_aprovacao).days
+                        tempo_retorno_dias += diff
+                        retorno_count += 1
+        avg_retorno = round(tempo_retorno_dias / retorno_count, 1) if retorno_count > 0 else 0
+
+        # VIPs Ativos (assinaturas ativas agora)
+        vips_ativos = total_ativos
+
+        # --- GRÁFICO: Vendas por Hora (24h heatmap data) ---
+        chart_horas = []
+        for h in range(24):
+            cnt = horas_count.get(h, 0)
+            chart_horas.append({"hour": f"{h:02d}:00", "count": cnt})
+        
+        # --- GRÁFICO: Vendas por Dia da Semana (7 barras) ---
+        chart_semana = []
+        for d in range(7):
+            chart_semana.append({
+                "day": dias_semana_map.get(d, "?"),
+                "day_short": dias_semana_map.get(d, "?")[:3],
+                "count": dias_count.get(d, 0)
+            })
+        
+        # --- TOP 5 BOTS (se tiver mais de 1 bot) ---
+        top_bots = []
+        if not bot_id:
+            bots_count = {}
+            for v in vendas:
+                bid = v.bot_id
+                if bid:
+                    if bid not in bots_count:
+                        bot_obj = db.query(BotModel).filter(BotModel.id == bid).first()
+                        bots_count[bid] = {"name": bot_obj.nome if bot_obj else f"Bot #{bid}", "count": 0, "revenue": 0}
+                    bots_count[bid]["count"] += 1
+                    if is_super_split:
+                        bots_count[bid]["revenue"] += taxa_centavos
+                    else:
+                        bots_count[bid]["revenue"] += int((v.valor or 0) * 100)
+            top_bots = sorted(bots_count.values(), key=lambda x: x["count"], reverse=True)[:5]
+
+        # --- CONTADORES DE USUÁRIOS ---
+        contadores_usuarios = {
+            "total_compradores": total_compradores,
+            "recorrentes": recorrentes,
+            "vips_ativos": vips_ativos,
+        }
+
+        # ============================================
         # 🍩 GRÁFICO DONUT: TAXA DE CONVERSÃO
         # ============================================
         donut_conversao = {
@@ -14460,6 +14531,18 @@ def advanced_statistics(
             "top_horas": top_horas,
             "top_dias": top_dias,
             "donut_conversao": donut_conversao,
+            "chart_horas": chart_horas,
+            "chart_semana": chart_semana,
+            "top_bots": top_bots,
+            "contadores_usuarios": contadores_usuarios,
+            "metricas_avancadas": {
+                "taxa_retencao": taxa_retencao,
+                "vendas_por_usuario": vendas_por_usuario,
+                "avg_retorno_dias": avg_retorno,
+                "total_compradores": total_compradores,
+                "recorrentes": recorrentes,
+                "vips_ativos": vips_ativos,
+            },
             "periodo": {
                 "inicio": start.strftime("%d/%m/%Y"),
                 "fim": end.strftime("%d/%m/%Y"),
