@@ -1023,3 +1023,68 @@ class PremiumEmoji(Base):
     
     def __repr__(self):
         return f"<PremiumEmoji(id={self.id}, name='{self.name}', shortcode='{self.shortcode}', emoji_id='{self.emoji_id}')>"
+
+
+# ============================================================
+# 🚨 SISTEMA DE DENÚNCIAS
+# ============================================================
+class Report(Base):
+    __tablename__ = 'reports'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Quem denunciou (opcional - anonimato)
+    reporter_name = Column(String(100), nullable=True)          # Nome do denunciante (opcional)
+    reporter_telegram_id = Column(String(50), nullable=True)    # Telegram ID do denunciante (capturado automaticamente)
+    
+    # Bot/Conta denunciada
+    bot_username = Column(String(100), nullable=False)          # @username do bot denunciado
+    bot_id = Column(Integer, ForeignKey('bots.id', ondelete='SET NULL'), nullable=True)  # Vincula ao bot se encontrado
+    
+    # Detalhes da denúncia
+    reason = Column(String(50), nullable=False)                 # Categoria: 'cp', 'fraud', 'scam', 'spam', 'illegal', 'other'
+    description = Column(Text, nullable=True)                   # Descrição detalhada
+    evidence_url = Column(String(500), nullable=True)           # Link de evidência (print, etc)
+    
+    # Status e processamento
+    status = Column(String(20), default='pending')              # 'pending', 'reviewing', 'resolved', 'dismissed'
+    resolution = Column(Text, nullable=True)                    # Ação tomada pelo admin
+    resolved_by = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    
+    # Punição aplicada
+    action_taken = Column(String(50), nullable=True)            # 'warning', 'strike', 'pause_bot', 'ban_account', 'none'
+    strike_count = Column(Integer, default=0)                   # Strikes acumulados nesta denúncia
+    
+    # Auditoria
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
+    ip_address = Column(String(50), nullable=True)              # IP do denunciante (para segurança)
+    
+    def __repr__(self):
+        return f"<Report(id={self.id}, bot='{self.bot_username}', reason='{self.reason}', status='{self.status}')>"
+
+
+# ============================================================
+# 🚨 STRIKES E PUNIÇÕES (Controle por conta de usuário)
+# ============================================================
+class UserStrike(Base):
+    __tablename__ = 'user_strikes'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    report_id = Column(Integer, ForeignKey('reports.id', ondelete='SET NULL'), nullable=True)
+    
+    reason = Column(Text, nullable=False)                       # Motivo do strike
+    strike_number = Column(Integer, nullable=False)             # 1, 2 ou 3
+    
+    # Punição
+    action = Column(String(50), nullable=False)                 # 'warning', 'tax_increase', 'pause_bots', 'ban'
+    pause_until = Column(DateTime, nullable=True)               # Se pausado, até quando
+    tax_increase_pct = Column(Float, nullable=True)             # Aumento da taxa (ex: 5.0 = +5%)
+    
+    applied_by = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    created_at = Column(DateTime, default=now_brazil)
+    
+    def __repr__(self):
+        return f"<UserStrike(user_id={self.user_id}, strike={self.strike_number}, action='{self.action}')>"

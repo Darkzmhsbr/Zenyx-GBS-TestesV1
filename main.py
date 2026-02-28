@@ -83,7 +83,10 @@ from database import (
     BotGroup,
     # ✅ NOVO IMPORT PARA EMOJIS PREMIUM
     PremiumEmoji,
-    PremiumEmojiPack
+    PremiumEmojiPack,
+    # ✅ NOVO IMPORT PARA DENÚNCIAS
+    Report,
+    UserStrike
 )
 
 import update_db 
@@ -3373,7 +3376,61 @@ def registrar_remarketing(
                     created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc'),
                     updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'utc')
                 );
+                """,
+
+                # ============================================================
+                # 📅 [CORREÇÃO 14a] REMARKETING AGENDADO
+                # ============================================================
+                "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS is_scheduled BOOLEAN DEFAULT FALSE;",
+                "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS schedule_days INTEGER DEFAULT 1;",
+                "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS schedule_time VARCHAR DEFAULT '10:00';",
+                "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS schedule_end_date TIMESTAMP WITHOUT TIME ZONE;",
+                "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS days_config TEXT;",  # JSON: [{day:1, msg, media_url, plano_id, promo_price}, ...]
+                "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS use_same_content BOOLEAN DEFAULT TRUE;",
+                "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS schedule_active BOOLEAN DEFAULT FALSE;",
+
+                # 🚨 [CORREÇÃO 14b] SISTEMA DE DENÚNCIAS
+                # ============================================================
                 """
+                CREATE TABLE IF NOT EXISTS reports (
+                    id SERIAL PRIMARY KEY,
+                    reporter_name VARCHAR(100),
+                    reporter_telegram_id VARCHAR(50),
+                    bot_username VARCHAR(100) NOT NULL,
+                    bot_id INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+                    reason VARCHAR(50) NOT NULL,
+                    description TEXT,
+                    evidence_url VARCHAR(500),
+                    status VARCHAR(20) DEFAULT 'pending',
+                    resolution TEXT,
+                    resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    resolved_at TIMESTAMP WITHOUT TIME ZONE,
+                    action_taken VARCHAR(50),
+                    strike_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo'),
+                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo'),
+                    ip_address VARCHAR(50)
+                );
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS user_strikes (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+                    report_id INTEGER REFERENCES reports(id) ON DELETE SET NULL,
+                    reason TEXT NOT NULL,
+                    strike_number INTEGER NOT NULL,
+                    action VARCHAR(50) NOT NULL,
+                    pause_until TIMESTAMP WITHOUT TIME ZONE,
+                    tax_increase_pct FLOAT,
+                    applied_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo')
+                );
+                """,
+                # Coluna de strikes no users (para acesso rápido)
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS strike_count INTEGER DEFAULT 0;",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_reason TEXT;",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS bots_paused_until TIMESTAMP WITHOUT TIME ZONE;",
             ]
             
             for cmd in comandos_sql:
@@ -6007,6 +6064,17 @@ async def login(user_data: UserLogin, request: Request, db: Session = Depends(ge
     if not user or not verify_password(user_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Usuário ou senha incorretos")
     
+    # 🚨 VERIFICAÇÃO DE BANIMENTO
+    if getattr(user, 'is_banned', False):
+        log_action(db=db, user_id=user.id, username=user.username, action="login_banned", resource_type="auth",
+                   description=f"Login bloqueado: conta banida. Motivo: {getattr(user, 'banned_reason', 'N/A')}", 
+                   success=False, ip_address=get_client_ip(request))
+        raise HTTPException(status_code=403, detail="Sua conta foi suspensa por violação dos termos de uso. Entre em contato com o suporte.")
+    
+    # 🚨 VERIFICAÇÃO DE CONTA INATIVA
+    if not getattr(user, 'is_active', True):
+        raise HTTPException(status_code=403, detail="Conta desativada. Entre em contato com o suporte.")
+    
     has_bots = len(user.bots) > 0
 
     log_action(db=db, user_id=user.id, username=user.username, action="login_success", resource_type="auth", 
@@ -6023,7 +6091,8 @@ async def login(user_data: UserLogin, request: Request, db: Session = Depends(ge
         "token_type": "bearer",
         "user_id": user.id,
         "username": user.username,
-        "has_bots": has_bots
+        "has_bots": has_bots,
+        "is_superuser": getattr(user, 'is_superuser', False)
     }
 
 # =========================================================
@@ -10048,6 +10117,17 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
     
     bot_db = db.query(BotModel).filter(BotModel.token == token).first()
     if not bot_db or bot_db.status == "pausado": return {"status": "ignored"}
+    
+    # 🚨 VERIFICAÇÃO: Owner banido ou bots pausados pelo admin
+    try:
+        owner = db.query(User).filter(User.id == bot_db.user_id).first() if bot_db.user_id else None
+        if owner:
+            if getattr(owner, 'is_banned', False):
+                return {"status": "ignored", "reason": "owner_banned"}
+            if getattr(owner, 'bots_paused_until', None) and owner.bots_paused_until > now_brazil():
+                return {"status": "ignored", "reason": "bots_paused"}
+    except:
+        pass
 
     # 🔒 Flag de proteção de conteúdo — aplicada em todos os envios de mídia/mensagem do vendedor
     _protect = getattr(bot_db, 'protect_content', False) or False
@@ -10341,6 +10421,26 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         validade = pedido.data_expiracao.strftime("%d/%m/%Y")
                     bot_temp.send_message(chat_id, f"✅ <b>Assinatura Ativa!</b>\n\n💎 Plano: {pedido.plano_nome}\n📅 Vence em: {validade}", parse_mode="HTML")
                 else: bot_temp.send_message(chat_id, "❌ <b>Nenhuma assinatura ativa.</b>", parse_mode="HTML")
+                return {"status": "ok"}
+
+            # --- /DENUNCIAR ---
+            if txt == "/denunciar":
+                msg_denuncia = (
+                    "🚨 <b>Canal de Denúncias</b>\n\n"
+                    "Se você identificou conteúdo ilegal ou abusivo em algum bot desta plataforma, "
+                    "você pode fazer uma denúncia de forma <b>segura e anônima</b>.\n\n"
+                    "⚠️ <b>Seu nome e dados NÃO serão expostos.</b>\n\n"
+                    "👉 Acesse o portal de denúncias:\n"
+                    "🔗 https://zenyxvips.com/denunciar\n\n"
+                    "📋 <b>Como denunciar:</b>\n"
+                    "1. Acesse o link acima\n"
+                    "2. Informe o @username do bot\n"
+                    "3. Selecione o motivo\n"
+                    "4. Descreva o ocorrido\n"
+                    "5. Envie a denúncia\n\n"
+                    "✅ Todas as denúncias são analisadas pela equipe de segurança."
+                )
+                bot_temp.send_message(chat_id, msg_denuncia, parse_mode="HTML", disable_web_page_preview=True)
                 return {"status": "ok"}
 
             # --- /START ---
@@ -13115,15 +13215,18 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
     if not bot_db: raise HTTPException(404, "Bot não encontrado")
     sender = telebot.TeleBot(bot_db.token)
     
-    # 4. Botão
+    # 4. Botão com preço promocional REAL (usa checkout_promo_ para garantir o valor correto)
     markup = None
     if campanha.plano_id:
         plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
         if plano:
             markup = types.InlineKeyboardMarkup()
-            preco = campanha.promo_price if campanha.promo_price else plano.preco_atual
-            btn_text = f"🔥 {plano.nome_exibicao} - R$ {preco:.2f}".replace('.', ',')
-            markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"checkout_{plano.id}"))
+            preco = campanha.promo_price if campanha.promo_price else (plano.preco_atual or plano.preco_cheio or 0)
+            preco_float = float(preco) if preco else 0
+            preco_centavos = int(preco_float * 100)
+            btn_text = f"🔥 {plano.nome_exibicao} - R$ {preco_float:.2f}".replace('.', ',')
+            # 🔥 FIX: Usa checkout_promo_ para garantir que o PIX gerado use o valor promo
+            markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"checkout_promo_{plano.id}_{preco_centavos}"))
 
     # 5. Envio (HTML)
     # 5. Envio (HTML E ÁUDIO)
@@ -13856,16 +13959,29 @@ def dashboard_stats(
         tz_br = timezone('America/Sao_Paulo')
         
         if start_date:
-            start_utc = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-            start = start_utc.astimezone(tz_br)
+            try:
+                start_utc = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
+                start = start_utc.astimezone(tz_br)
+            except:
+                # Fallback: interpreta como data local (Brasília)
+                start = datetime.fromisoformat(start_date.split('.')[0])
+            # 🔥 FIX: Garantir que start começa no INÍCIO do dia (00:00:00)
+            start = start.replace(hour=0, minute=0, second=0, microsecond=0)
         else:
             start = now_brazil() - timedelta(days=30)
+            start = start.replace(hour=0, minute=0, second=0, microsecond=0)
         
         if end_date:
-            end_utc = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-            end = end_utc.astimezone(tz_br)
+            try:
+                end_utc = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                end = end_utc.astimezone(tz_br)
+            except:
+                end = datetime.fromisoformat(end_date.split('.')[0])
+            # 🔥 FIX: Garantir que end vai até o FINAL do dia (23:59:59)
+            end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
         else:
             end = now_brazil()
+            end = end.replace(hour=23, minute=59, second=59, microsecond=999999)
         
         logger.info(f"📊 Dashboard Stats - Período: {start.date()} a {end.date()} (Brasília)")
         
@@ -18472,3 +18588,498 @@ async def migrate_premium_emojis_v1(db: Session = Depends(get_db)):
             "status": "error",
             "message": f"❌ Erro crítico na migração: {str(e)}"
         }
+
+# ============================================================
+# 🚨 SISTEMA DE DENÚNCIAS - ENDPOINTS
+# ============================================================
+
+# --- ENDPOINT PÚBLICO: Enviar Denúncia (sem autenticação) ---
+class ReportSubmit(BaseModel):
+    reporter_name: Optional[str] = None
+    bot_username: str
+    reason: str  # 'cp', 'fraud', 'scam', 'spam', 'illegal', 'other'
+    description: Optional[str] = None
+    evidence_url: Optional[str] = None
+
+@app.post("/api/public/reports")
+def submit_report(data: ReportSubmit, request: Request, db: Session = Depends(get_db)):
+    """Endpoint PÚBLICO para enviar denúncia (acessível via portal /denunciar)"""
+    
+    # Validação básica
+    valid_reasons = ['cp', 'fraud', 'scam', 'spam', 'illegal', 'harassment', 'other']
+    if data.reason not in valid_reasons:
+        raise HTTPException(400, f"Motivo inválido. Opções: {', '.join(valid_reasons)}")
+    
+    if not data.bot_username or len(data.bot_username.strip()) < 2:
+        raise HTTPException(400, "Username do bot é obrigatório")
+    
+    # Tenta encontrar o bot no sistema
+    clean_username = data.bot_username.replace("@", "").strip().lower()
+    bot_found = db.query(BotModel).filter(
+        func.lower(BotModel.nome) == clean_username
+    ).first()
+    
+    # Captura IP do denunciante (para segurança)
+    client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "unknown")
+    if "," in client_ip:
+        client_ip = client_ip.split(",")[0].strip()
+    
+    report = Report(
+        reporter_name=data.reporter_name,
+        bot_username=clean_username,
+        bot_id=bot_found.id if bot_found else None,
+        reason=data.reason,
+        description=data.description,
+        evidence_url=data.evidence_url,
+        status='pending',
+        ip_address=client_ip
+    )
+    
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+    
+    # Notifica Super Admins
+    try:
+        super_admins = db.query(User).filter(User.is_superadmin == True).all()
+        reason_labels = {
+            'cp': '🔴 Pornografia Infantil', 'fraud': '🟠 Fraude', 'scam': '🟠 Golpe',
+            'spam': '🟡 Spam', 'illegal': '🔴 Conteúdo Ilegal', 'harassment': '🟡 Assédio', 'other': '⚪ Outro'
+        }
+        for admin in super_admins:
+            notif = Notification(
+                user_id=admin.id,
+                title="🚨 Nova Denúncia Recebida",
+                message=f"Bot: @{clean_username} | Motivo: {reason_labels.get(data.reason, data.reason)}",
+                type="report",
+                link="/superadmin/reports"
+            )
+            db.add(notif)
+        db.commit()
+    except:
+        pass
+    
+    logger.info(f"🚨 [REPORT] Nova denúncia #{report.id} | Bot: @{clean_username} | Motivo: {data.reason}")
+    
+    return {
+        "status": "success", 
+        "message": "Denúncia enviada com sucesso. Nossa equipe irá analisar.",
+        "report_id": report.id
+    }
+
+
+# --- SUPERADMIN: Listar Denúncias ---
+@app.get("/api/superadmin/reports")
+def list_reports(
+    status: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 20,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    if not getattr(current_user, 'is_superadmin', False):
+        raise HTTPException(403, "Acesso negado")
+    
+    query = db.query(Report).order_by(desc(Report.created_at))
+    
+    if status:
+        query = query.filter(Report.status == status)
+    
+    total = query.count()
+    reports = query.offset((page - 1) * per_page).limit(per_page).all()
+    
+    return {
+        "reports": [{
+            "id": r.id,
+            "reporter_name": r.reporter_name,
+            "bot_username": r.bot_username,
+            "bot_id": r.bot_id,
+            "reason": r.reason,
+            "description": r.description,
+            "evidence_url": r.evidence_url,
+            "status": r.status,
+            "resolution": r.resolution,
+            "action_taken": r.action_taken,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "resolved_at": r.resolved_at.isoformat() if r.resolved_at else None,
+        } for r in reports],
+        "total": total,
+        "page": page,
+        "pages": (total + per_page - 1) // per_page
+    }
+
+
+# --- SUPERADMIN: Resolver Denúncia + Aplicar Punição ---
+class ReportResolve(BaseModel):
+    status: str  # 'resolved', 'dismissed'
+    resolution: Optional[str] = None
+    action: Optional[str] = None  # 'warning', 'strike', 'pause_bots', 'ban_account', 'none'
+    pause_days: Optional[int] = None
+    tax_increase_pct: Optional[float] = None
+
+@app.put("/api/superadmin/reports/{report_id}/resolve")
+def resolve_report(
+    report_id: int,
+    data: ReportResolve,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    if not getattr(current_user, 'is_superadmin', False):
+        raise HTTPException(403, "Acesso negado")
+    
+    report = db.query(Report).filter(Report.id == report_id).first()
+    if not report:
+        raise HTTPException(404, "Denúncia não encontrada")
+    
+    report.status = data.status
+    report.resolution = data.resolution
+    report.resolved_by = current_user.id
+    report.resolved_at = now_brazil()
+    report.action_taken = data.action
+    
+    # Se tem bot vinculado, aplica punição
+    if data.action and data.action != 'none' and report.bot_id:
+        bot = db.query(BotModel).filter(BotModel.id == report.bot_id).first()
+        if bot:
+            user = db.query(User).filter(User.id == bot.user_id).first()
+            if user:
+                if data.action == 'strike':
+                    # Incrementa strike
+                    current_strikes = getattr(user, 'strike_count', 0) or 0
+                    new_strike = current_strikes + 1
+                    user.strike_count = new_strike
+                    
+                    strike = UserStrike(
+                        user_id=user.id,
+                        report_id=report.id,
+                        reason=data.resolution or f"Denúncia #{report.id}",
+                        strike_number=new_strike,
+                        action='strike',
+                        applied_by=current_user.id
+                    )
+                    db.add(strike)
+                    
+                    # 3 strikes = ban automático
+                    if new_strike >= 3:
+                        user.is_banned = True
+                        user.banned_reason = f"3 strikes atingidos. Última denúncia: #{report.id}"
+                        user.is_active = False
+                        report.action_taken = 'ban_account'
+                        logger.warning(f"🚫 [REPORT] Usuário {user.username} BANIDO (3 strikes)")
+                    
+                elif data.action == 'pause_bots':
+                    days = data.pause_days or 7
+                    user.bots_paused_until = now_brazil() + timedelta(days=days)
+                    
+                    strike = UserStrike(
+                        user_id=user.id, report_id=report.id,
+                        reason=data.resolution or f"Bots pausados por {days} dias",
+                        strike_number=(getattr(user, 'strike_count', 0) or 0) + 1,
+                        action='pause_bots', pause_until=user.bots_paused_until,
+                        applied_by=current_user.id
+                    )
+                    db.add(strike)
+                    user.strike_count = (getattr(user, 'strike_count', 0) or 0) + 1
+                    logger.warning(f"⏸️ [REPORT] Bots do usuário {user.username} pausados por {days} dias")
+                    
+                elif data.action == 'ban_account':
+                    user.is_banned = True
+                    user.banned_reason = data.resolution or f"Banido por denúncia #{report.id}"
+                    user.is_active = False
+                    logger.warning(f"🚫 [REPORT] Usuário {user.username} BANIDO por admin")
+                    
+                elif data.action == 'tax_increase':
+                    # Aumenta taxa (seria aplicada no split de pagamento)
+                    pass
+    
+    db.commit()
+    
+    logger.info(f"✅ [REPORT] Denúncia #{report_id} resolvida | Ação: {data.action} | Por: {current_user.username}")
+    
+    return {"status": "success", "message": f"Denúncia resolvida com ação: {data.action}"}
+
+
+# ============================================================
+# 🚨 MIGRAÇÃO: SISTEMA DE DENÚNCIAS 
+# ============================================================
+@app.get("/migrate-reports-v1")
+async def migrate_reports_v1(db: Session = Depends(get_db)):
+    """
+    Migração para criar tabelas do sistema de denúncias.
+    Acesse UMA VEZ: /migrate-reports-v1
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS reports (
+                    id SERIAL PRIMARY KEY,
+                    reporter_name VARCHAR(100),
+                    reporter_telegram_id VARCHAR(50),
+                    bot_username VARCHAR(100) NOT NULL,
+                    bot_id INTEGER REFERENCES bots(id) ON DELETE SET NULL,
+                    reason VARCHAR(50) NOT NULL,
+                    description TEXT,
+                    evidence_url VARCHAR(500),
+                    status VARCHAR(20) DEFAULT 'pending',
+                    resolution TEXT,
+                    resolved_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    resolved_at TIMESTAMP WITHOUT TIME ZONE,
+                    action_taken VARCHAR(50),
+                    strike_count INTEGER DEFAULT 0,
+                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo'),
+                    updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo'),
+                    ip_address VARCHAR(50)
+                );
+            """))
+            db.commit()
+            log_msgs.append("✅ Tabela reports criada")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ reports: {str(e)}")
+        
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS user_strikes (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE NOT NULL,
+                    report_id INTEGER REFERENCES reports(id) ON DELETE SET NULL,
+                    reason TEXT NOT NULL,
+                    strike_number INTEGER NOT NULL,
+                    action VARCHAR(50) NOT NULL,
+                    pause_until TIMESTAMP WITHOUT TIME ZONE,
+                    tax_increase_pct FLOAT,
+                    applied_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo')
+                );
+            """))
+            db.commit()
+            log_msgs.append("✅ Tabela user_strikes criada")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ user_strikes: {str(e)}")
+        
+        # Colunas extras na tabela users
+        for col_sql in [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS strike_count INTEGER DEFAULT 0;",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE;",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_reason TEXT;",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS bots_paused_until TIMESTAMP WITHOUT TIME ZONE;",
+        ]:
+            try:
+                db.execute(text(col_sql))
+                db.commit()
+            except:
+                db.rollback()
+        
+        log_msgs.append("✅ Colunas de punição adicionadas à tabela users")
+        
+        # Índices
+        try:
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_reports_bot ON reports(bot_username);"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_user_strikes_user ON user_strikes(user_id);"))
+            db.commit()
+            log_msgs.append("✅ Índices criados")
+        except:
+            db.rollback()
+        
+        return {
+            "status": "success",
+            "message": "🚨 Migração de Denúncias V1 concluída!",
+            "details": log_msgs
+        }
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+
+
+# ============================================================
+# 📅 REMARKETING AGENDADO - ENDPOINTS
+# ============================================================
+
+class ScheduledCampaignCreate(BaseModel):
+    bot_id: int
+    target: str = 'todos'  # todos, topo, meio, fundo, expirados
+    schedule_days: int = 7  # 1-365 dias
+    schedule_time: str = '10:00'  # Horário HH:MM (Brasília)
+    use_same_content: bool = True
+    # Conteúdo padrão (se use_same_content=True)
+    message: Optional[str] = None
+    media_url: Optional[str] = None
+    plano_id: Optional[int] = None
+    promo_price: Optional[float] = None
+    # Conteúdo por dia (se use_same_content=False)
+    days_config: Optional[list] = None  # [{day:1, message, media_url, plano_id, promo_price}, ...]
+
+@app.post("/api/admin/remarketing/schedule")
+def create_scheduled_campaign(
+    data: ScheduledCampaignCreate,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Cria campanha de remarketing agendada"""
+    
+    if data.schedule_days < 1 or data.schedule_days > 365:
+        raise HTTPException(400, "Dias deve ser entre 1 e 365")
+    
+    # Monta config
+    config_data = {
+        "mensagem": data.message or "",
+        "media_url": data.media_url or "",
+    }
+    
+    # Config por dia
+    days_json = None
+    if not data.use_same_content and data.days_config:
+        days_json = json.dumps(data.days_config)
+    
+    uuid_campanha = f"sched_{uuid.uuid4().hex[:8]}"
+    
+    # Calcula próxima execução
+    tz_br = timezone('America/Sao_Paulo')
+    hora, minuto = map(int, data.schedule_time.split(':'))
+    agora = now_brazil()
+    proxima = agora.replace(hour=hora, minute=minuto, second=0, microsecond=0)
+    if proxima <= agora:
+        proxima += timedelta(days=1)
+    
+    end_date = proxima + timedelta(days=data.schedule_days - 1)
+    
+    nova = RemarketingCampaign(
+        bot_id=data.bot_id,
+        campaign_id=uuid_campanha,
+        type="agendado",
+        target=data.target,
+        config=json.dumps(config_data),
+        status='agendado',
+        is_scheduled=True,
+        schedule_days=data.schedule_days,
+        schedule_time=data.schedule_time,
+        schedule_end_date=end_date,
+        days_config=days_json,
+        use_same_content=data.use_same_content,
+        schedule_active=True,
+        dia_atual=0,
+        data_inicio=agora,
+        proxima_execucao=proxima,
+        plano_id=data.plano_id,
+        promo_price=data.promo_price,
+        total_leads=0,
+        sent_success=0,
+        blocked_count=0,
+        data_envio=agora
+    )
+    
+    db.add(nova)
+    db.commit()
+    db.refresh(nova)
+    
+    logger.info(f"📅 [SCHEDULED] Campanha #{nova.id} criada | {data.schedule_days} dias | {data.schedule_time} | Target: {data.target}")
+    
+    return {
+        "status": "success",
+        "message": f"Campanha agendada para {data.schedule_days} dias, disparando às {data.schedule_time}.",
+        "campaign_id": nova.id,
+        "proxima_execucao": proxima.isoformat()
+    }
+
+
+@app.get("/api/admin/remarketing/scheduled/{bot_id}")
+def list_scheduled_campaigns(bot_id: int, db: Session = Depends(get_db)):
+    """Lista campanhas agendadas de um bot"""
+    campaigns = db.query(RemarketingCampaign).filter(
+        RemarketingCampaign.bot_id == bot_id,
+        RemarketingCampaign.is_scheduled == True
+    ).order_by(desc(RemarketingCampaign.created_at if hasattr(RemarketingCampaign, 'created_at') else RemarketingCampaign.data_envio)).all()
+    
+    return [{
+        "id": c.id,
+        "target": c.target,
+        "schedule_days": c.schedule_days,
+        "schedule_time": c.schedule_time,
+        "dia_atual": c.dia_atual,
+        "schedule_active": c.schedule_active,
+        "use_same_content": c.use_same_content,
+        "proxima_execucao": c.proxima_execucao.isoformat() if c.proxima_execucao else None,
+        "schedule_end_date": c.schedule_end_date.isoformat() if c.schedule_end_date else None,
+        "plano_id": c.plano_id,
+        "promo_price": c.promo_price,
+        "status": c.status,
+        "sent_success": c.sent_success,
+        "data_inicio": c.data_inicio.isoformat() if c.data_inicio else None,
+    } for c in campaigns]
+
+
+@app.put("/api/admin/remarketing/scheduled/{campaign_id}/toggle")
+def toggle_scheduled_campaign(campaign_id: int, db: Session = Depends(get_db)):
+    """Ativa/desativa campanha agendada"""
+    c = db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_id).first()
+    if not c:
+        raise HTTPException(404, "Campanha não encontrada")
+    c.schedule_active = not c.schedule_active
+    db.commit()
+    return {"status": "success", "active": c.schedule_active}
+
+
+@app.delete("/api/admin/remarketing/scheduled/{campaign_id}")
+def delete_scheduled_campaign(campaign_id: int, db: Session = Depends(get_db)):
+    """Deleta campanha agendada"""
+    c = db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_id).first()
+    if not c:
+        raise HTTPException(404)
+    db.delete(c)
+    db.commit()
+    return {"status": "deleted"}
+
+
+# ============================================================
+# 📅 MIGRAÇÃO: REMARKETING AGENDADO
+# ============================================================
+@app.get("/migrate-scheduled-remarketing-v1")
+async def migrate_scheduled_remarketing_v1(db: Session = Depends(get_db)):
+    """
+    Migração para adicionar colunas de remarketing agendado.
+    Acesse UMA VEZ: /migrate-scheduled-remarketing-v1
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        cols = [
+            "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS is_scheduled BOOLEAN DEFAULT FALSE;",
+            "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS schedule_days INTEGER DEFAULT 1;",
+            "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS schedule_time VARCHAR DEFAULT '10:00';",
+            "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS schedule_end_date TIMESTAMP WITHOUT TIME ZONE;",
+            "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS days_config TEXT;",
+            "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS use_same_content BOOLEAN DEFAULT TRUE;",
+            "ALTER TABLE remarketing_campaigns ADD COLUMN IF NOT EXISTS schedule_active BOOLEAN DEFAULT FALSE;",
+        ]
+        
+        for sql in cols:
+            try:
+                db.execute(text(sql))
+                db.commit()
+            except:
+                db.rollback()
+        
+        log_msgs.append("✅ Colunas de agendamento adicionadas à remarketing_campaigns")
+        
+        # Índice
+        try:
+            db.execute(text("CREATE INDEX IF NOT EXISTS idx_remarketing_scheduled ON remarketing_campaigns(is_scheduled, schedule_active);"))
+            db.commit()
+            log_msgs.append("✅ Índice criado")
+        except:
+            db.rollback()
+        
+        return {
+            "status": "success",
+            "message": "📅 Migração Remarketing Agendado V1 concluída!",
+            "details": log_msgs
+        }
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
