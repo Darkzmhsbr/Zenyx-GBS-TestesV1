@@ -14251,6 +14251,8 @@ def dashboard_stats(
 def advanced_statistics(
     bot_id: Optional[int] = None,
     period: Optional[str] = "30d",  # 7d, 30d, 90d, all
+    cal_month: Optional[int] = None,  # Mês do calendário (1-12)
+    cal_year: Optional[int] = None,   # Ano do calendário
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
@@ -14568,11 +14570,32 @@ def advanced_statistics(
         else:
             tempo_medio = {"segundos": 0, "minutos": 0, "horas": 0, "dataset": 0}
 
-        # === CALENDÁRIO DE VENDAS (dias do mês atual) ===
+        # === CALENDÁRIO DE VENDAS (dias do mês selecionado) ===
         hoje = agora
-        primeiro_dia_mes = hoje.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        # Usa mês/ano do calendário se fornecidos, senão usa o mês atual
+        cal_m = cal_month if cal_month and 1 <= cal_month <= 12 else hoje.month
+        cal_y = cal_year if cal_year and cal_year >= 2020 else hoje.year
+        
+        primeiro_dia_mes = datetime(cal_y, cal_m, 1, 0, 0, 0)
         if primeiro_dia_mes.tzinfo is None:
             primeiro_dia_mes = tz_br.localize(primeiro_dia_mes)
+            
+        import calendar as cal_module
+        dias_no_mes = cal_module.monthrange(cal_y, cal_m)[1]
+        
+        # Buscar TODAS as vendas do mês selecionado (não só do período filtrado)
+        cal_start = primeiro_dia_mes
+        cal_end = tz_br.localize(datetime(cal_y, cal_m, dias_no_mes, 23, 59, 59))
+        
+        vendas_cal_query = db.query(Pedido).filter(
+            Pedido.data_aprovacao != None,
+            Pedido.status.in_(['paid', 'approved', 'active', 'expired']),
+            Pedido.data_aprovacao >= cal_start,
+            Pedido.data_aprovacao <= cal_end,
+        )
+        if bot_ids:
+            vendas_cal_query = vendas_cal_query.filter(Pedido.bot_id.in_(bot_ids))
+        vendas_cal = vendas_cal_query.all()
             
         import calendar as cal_module
         dias_no_mes = cal_module.monthrange(hoje.year, hoje.month)[1]
@@ -14583,7 +14606,7 @@ def advanced_statistics(
             dia_end = dia_date.replace(hour=23, minute=59, second=59)
             vendas_dia_cal = 0
             receita_dia_cal = 0
-            for v in vendas:
+            for v in vendas_cal:
                 if v.data_aprovacao:
                     da = v.data_aprovacao
                     if da.tzinfo is None:
@@ -14599,7 +14622,7 @@ def advanced_statistics(
                 "weekday": dia_date.weekday(),
                 "vendas": vendas_dia_cal,
                 "receita": receita_dia_cal,
-                "is_today": dia_num == hoje.day,
+                "is_today": dia_num == hoje.day and cal_m == hoje.month and cal_y == hoje.year,
             })
 
         # === CONTADORES EXPANDIDOS ===
