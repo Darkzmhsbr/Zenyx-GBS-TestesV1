@@ -17384,12 +17384,12 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
 # =========================================================
 @app.get("/api/ranking")
 def obter_ranking(
-    mes: int = Query(..., description="Mês numérico (Ex: 2 para Fevereiro)"),
-    ano: int = Query(..., description="Ano com 4 dígitos (Ex: 2026)"),
+    mes: int = Query(0, description="Mês numérico (1-12). 0 = todos os tempos"),
+    ano: int = Query(0, description="Ano com 4 dígitos. 0 = todos os tempos"),
     db: Session = Depends(get_db)
 ):
     try:
-        resultado = (
+        query = (
             db.query(
                 User.username,
                 func.sum(Pedido.valor).label("total_faturado"),
@@ -17400,8 +17400,16 @@ def obter_ranking(
             .filter(Pedido.data_aprovacao != None)
             .filter(Pedido.status.in_(['approved', 'paid', 'active', 'expired']))
             .filter(User.is_superuser == False)
-            .filter(extract('month', Pedido.data_aprovacao) == mes)
-            .filter(extract('year', Pedido.data_aprovacao) == ano)
+        )
+        
+        # Filtro por mês/ano (0 = todos os tempos)
+        if mes and mes >= 1 and mes <= 12:
+            query = query.filter(extract('month', Pedido.data_aprovacao) == mes)
+        if ano and ano >= 2020:
+            query = query.filter(extract('year', Pedido.data_aprovacao) == ano)
+        
+        resultado = (
+            query
             .group_by(User.id)
             .order_by(func.sum(Pedido.valor).desc())
             .limit(10)
@@ -19196,12 +19204,12 @@ def resolve_report(
     elif report.bot_id:
         bot = db.query(BotModel).filter(BotModel.id == report.bot_id).first()
         if bot:
-            user_target = db.query(User).filter(User.id == bot.owner_id).first()
+            user_target = db.query(User).filter(User.id == bot.user_id).first()
 
     if data.action and data.action != 'none' and user_target:
         if data.action == 'strike':
             # Incrementa strike
-            current_strikes = user_target.strike_count or 0
+            current_strikes = getattr(user_target, 'strike_count', 0) or 0
             new_strike = current_strikes + 1
             user_target.strike_count = new_strike
             
@@ -19220,9 +19228,6 @@ def resolve_report(
                 user_target.is_banned = True
                 user_target.banned_reason = f"3 strikes atingidos. Última denúncia: #{report.id}"
                 user_target.is_active = False
-                # Pausar todos os bots
-                for ub in db.query(BotModel).filter(BotModel.owner_id == user_target.id).all():
-                    ub.status = "pausado"
                 report.action_taken = 'ban_account'
                 logger.warning(f"🚫 [REPORT] Usuário {user_target.username} BANIDO (3 strikes)")
             
@@ -19230,55 +19235,22 @@ def resolve_report(
             days = data.pause_days or 7
             user_target.bots_paused_until = now_brazil() + timedelta(days=days)
             
-            current_strikes = user_target.strike_count or 0
-            new_strike = current_strikes + 1
-            
             strike = UserStrike(
                 user_id=user_target.id, report_id=report.id,
                 reason=data.resolution or f"Bots pausados por {days} dias",
-                strike_number=new_strike,
+                strike_number=(getattr(user_target, 'strike_count', 0) or 0) + 1,
                 action='pause_bots', pause_until=user_target.bots_paused_until,
                 applied_by=current_user.id
             )
             db.add(strike)
-            user_target.strike_count = new_strike
+            user_target.strike_count = (getattr(user_target, 'strike_count', 0) or 0) + 1
             logger.warning(f"⏸️ [REPORT] Bots do usuário {user_target.username} pausados por {days} dias")
             
         elif data.action == 'ban_account':
             user_target.is_banned = True
             user_target.banned_reason = data.resolution or f"Banido por denúncia #{report.id}"
             user_target.is_active = False
-            
-            # 🔒 Pausar TODOS os bots do usuário banido
-            user_bots = db.query(BotModel).filter(BotModel.owner_id == user_target.id).all()
-            for ub in user_bots:
-                ub.status = "pausado"
-            
-            # Registrar strike de ban
-            current_strikes = user_target.strike_count or 0
-            new_strike = current_strikes + 1
-            strike = UserStrike(
-                user_id=user_target.id, report_id=report.id,
-                reason=data.resolution or f"Conta banida por denúncia #{report.id}",
-                strike_number=new_strike,
-                action='ban_account',
-                applied_by=current_user.id
-            )
-            db.add(strike)
-            user_target.strike_count = new_strike
-            logger.warning(f"🚫 [REPORT] Usuário {user_target.username} BANIDO | {len(user_bots)} bots pausados")
-            
-        elif data.action == 'warning':
-            # Apenas registra aviso sem punição real
-            strike = UserStrike(
-                user_id=user_target.id, report_id=report.id,
-                reason=data.resolution or f"Aviso por denúncia #{report.id}",
-                strike_number=(user_target.strike_count or 0),
-                action='warning',
-                applied_by=current_user.id
-            )
-            db.add(strike)
-            logger.info(f"⚠️ [REPORT] Aviso registrado para {user_target.username}")
+            logger.warning(f"🚫 [REPORT] Usuário {user_target.username} BANIDO por admin")
             
         elif data.action == 'tax_increase':
             pass
@@ -19288,100 +19260,6 @@ def resolve_report(
     logger.info(f"✅ [REPORT] Denúncia #{report_id} resolvida | Ação: {data.action} | Por: {current_user.username}")
     
     return {"status": "success", "message": f"Denúncia resolvida com ação: {data.action}"}
-
-
-# --- SUPERADMIN: REVERTER PUNIÇÃO DE DENÚNCIA ---
-class ReportRevert(BaseModel):
-    reason: Optional[str] = None
-
-@app.put("/api/superadmin/reports/{report_id}/revert")
-def revert_report_punishment(
-    report_id: int,
-    data: ReportRevert,
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Reverte TODAS as punições aplicadas por uma denúncia, restaurando conta e bots."""
-    if not getattr(current_user, 'is_superuser', False):
-        raise HTTPException(403, "Acesso negado")
-    
-    report = db.query(Report).filter(Report.id == report_id).first()
-    if not report:
-        raise HTTPException(404, "Denúncia não encontrada")
-    
-    if report.status not in ['resolved']:
-        raise HTTPException(400, "Só é possível reverter denúncias resolvidas")
-    
-    # Encontrar o usuário alvo
-    user_target = None
-    if getattr(report, 'owner_id', None):
-        user_target = db.query(User).filter(User.id == report.owner_id).first()
-    elif report.bot_id:
-        bot = db.query(BotModel).filter(BotModel.id == report.bot_id).first()
-        if bot:
-            user_target = db.query(User).filter(User.id == bot.owner_id).first()
-    
-    if not user_target:
-        raise HTTPException(404, "Usuário alvo não encontrado para reverter")
-    
-    action_was = report.action_taken
-    revert_details = []
-    
-    # 1. Remover BAN
-    if user_target.is_banned:
-        user_target.is_banned = False
-        user_target.banned_reason = None
-        user_target.is_active = True
-        revert_details.append("Ban removido")
-    
-    # 2. Remover PAUSA temporária
-    if user_target.bots_paused_until:
-        user_target.bots_paused_until = None
-        revert_details.append("Pausa de bots removida")
-    
-    # 3. Reativar bots pausados
-    user_bots = db.query(BotModel).filter(
-        BotModel.owner_id == user_target.id,
-        BotModel.status == "pausado"
-    ).all()
-    if user_bots:
-        for ub in user_bots:
-            ub.status = "ativo"
-        revert_details.append(f"{len(user_bots)} bot(s) reativado(s)")
-    
-    # 4. Decrementar strike (mínimo 0)
-    if action_was in ['strike', 'pause_bots', 'ban_account']:
-        current_strikes = user_target.strike_count or 0
-        if current_strikes > 0:
-            user_target.strike_count = current_strikes - 1
-            revert_details.append(f"Strike: {current_strikes} → {current_strikes - 1}")
-    
-    # 5. Remover registro de strike vinculado a esta denúncia
-    deleted = db.query(UserStrike).filter(UserStrike.report_id == report.id).delete()
-    if deleted:
-        revert_details.append(f"{deleted} registro(s) de strike removido(s)")
-    
-    # 6. Reativar conta se estava inativa
-    if not user_target.is_active:
-        user_target.is_active = True
-        revert_details.append("Conta reativada")
-    
-    # 7. Atualizar denúncia
-    report.status = "dismissed"
-    report.resolution = (report.resolution or "") + f"\n\n🔄 REVERTIDO por @{current_user.username}: {data.reason or 'Sem motivo'}"
-    report.action_taken = f"revertido_{action_was or 'unknown'}"
-    
-    db.commit()
-    
-    summary = " | ".join(revert_details) if revert_details else "Nenhuma alteração necessária"
-    logger.info(f"🔄 [REPORT] Denúncia #{report_id} REVERTIDA por {current_user.username} | {summary}")
-    
-    return {
-        "status": "success",
-        "message": "Punição revertida com sucesso",
-        "details": revert_details,
-        "user": user_target.username
-    }
 
 
 # ============================================================
