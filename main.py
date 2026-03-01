@@ -14251,6 +14251,8 @@ def dashboard_stats(
 def advanced_statistics(
     bot_id: Optional[int] = None,
     period: Optional[str] = "30d",  # 7d, 30d, 90d, all
+    cal_month: Optional[int] = None,  # 🆕 Mês do calendário (1-12)
+    cal_year: Optional[int] = None,   # 🆕 Ano do calendário
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
@@ -14568,26 +14570,53 @@ def advanced_statistics(
         else:
             tempo_medio = {"segundos": 0, "minutos": 0, "horas": 0, "dataset": 0}
 
-        # === CALENDÁRIO DE VENDAS (dias do mês atual) ===
-        hoje = agora
-        primeiro_dia_mes = hoje.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        if primeiro_dia_mes.tzinfo is None:
-            primeiro_dia_mes = tz_br.localize(primeiro_dia_mes)
-            
+        # === CALENDÁRIO DE VENDAS (qualquer mês, query independente) ===
         import calendar as cal_module
-        dias_no_mes = cal_module.monthrange(hoje.year, hoje.month)[1]
+        
+        # Usa parâmetros do frontend ou mês atual como fallback
+        cal_m = cal_month if cal_month and 1 <= cal_month <= 12 else agora.month
+        cal_y = cal_year if cal_year and cal_year >= 2020 else agora.year
+        
+        # 🔒 Bloqueia meses futuros
+        if cal_y > agora.year or (cal_y == agora.year and cal_m > agora.month):
+            cal_m = agora.month
+            cal_y = agora.year
+        
+        primeiro_dia_mes = datetime(cal_y, cal_m, 1, 0, 0, 0)
+        primeiro_dia_mes = tz_br.localize(primeiro_dia_mes)
+        dias_no_mes = cal_module.monthrange(cal_y, cal_m)[1]
+        ultimo_dia_mes = tz_br.localize(datetime(cal_y, cal_m, dias_no_mes, 23, 59, 59))
+        
+        # Query independente para o mês do calendário (não usa a query filtrada por período)
+        q_cal_vendas = apply_bot_filter(
+            db.query(Pedido).filter(
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
+                Pedido.data_aprovacao >= primeiro_dia_mes,
+                Pedido.data_aprovacao <= ultimo_dia_mes
+            )
+        )
+        vendas_do_mes_cal = q_cal_vendas.all()
+        
+        is_current_month = cal_m == agora.month and cal_y == agora.year
         
         calendario = []
         for dia_num in range(1, dias_no_mes + 1):
-            dia_date = primeiro_dia_mes.replace(day=dia_num)
-            dia_end = dia_date.replace(hour=23, minute=59, second=59)
+            dia_date = tz_br.localize(datetime(cal_y, cal_m, dia_num, 0, 0, 0))
+            dia_end = tz_br.localize(datetime(cal_y, cal_m, dia_num, 23, 59, 59))
+            
+            # 🔒 Não contabiliza dias futuros
+            if is_current_month and dia_num > agora.day:
+                calendario.append({
+                    "day": dia_num, "weekday": dia_date.weekday(),
+                    "vendas": 0, "receita": 0, "is_today": False, "is_future": True
+                })
+                continue
+            
             vendas_dia_cal = 0
             receita_dia_cal = 0
-            for v in vendas:
+            for v in vendas_do_mes_cal:
                 if v.data_aprovacao:
-                    da = v.data_aprovacao
-                    if da.tzinfo is None:
-                        da = tz_br.localize(da)
+                    da = _safe_tz(v.data_aprovacao)
                     if dia_date <= da <= dia_end:
                         vendas_dia_cal += 1
                         if is_super_split and not bot_id:
@@ -14599,7 +14628,7 @@ def advanced_statistics(
                 "weekday": dia_date.weekday(),
                 "vendas": vendas_dia_cal,
                 "receita": receita_dia_cal,
-                "is_today": dia_num == hoje.day,
+                "is_today": is_current_month and dia_num == agora.day,
             })
 
         # === CONTADORES EXPANDIDOS ===
@@ -14619,7 +14648,7 @@ def advanced_statistics(
         
         # === TOP 5 BOTS ===
         top_bots = []
-        try:
+        if not bot_id:
             bots_count = {}
             for v in vendas:
                 bid = v.bot_id
@@ -14628,12 +14657,11 @@ def advanced_statistics(
                         bot_obj = db.query(BotModel).filter(BotModel.id == bid).first()
                         bots_count[bid] = {"name": bot_obj.nome if bot_obj else f"Bot #{bid}", "count": 0, "revenue": 0}
                     bots_count[bid]["count"] += 1
-                    if is_super_split and not bot_id:
+                    if is_super_split:
                         bots_count[bid]["revenue"] += taxa_centavos
                     else:
                         bots_count[bid]["revenue"] += int((v.valor or 0) * 100)
             top_bots = sorted(bots_count.values(), key=lambda x: x["count"], reverse=True)[:5]
-        except: pass
 
         # === DIÁRIO DE MUDANÇAS ===
         try:
