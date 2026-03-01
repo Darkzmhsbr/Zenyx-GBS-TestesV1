@@ -13425,6 +13425,8 @@ def dashboard_stats(
 def advanced_statistics(
     bot_id: Optional[int] = None,
     period: Optional[str] = "30d",  # 7d, 30d, 90d, all
+    start_date: Optional[str] = None, # 🔥 NOVO: Recebe data de início do calendário
+    end_date: Optional[str] = None,   # 🔥 NOVO: Recebe data de fim do calendário
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
@@ -13437,19 +13439,38 @@ def advanced_statistics(
         tz_br = timezone('America/Sao_Paulo')
         agora = now_brazil()
 
-        # --- PERÍODO ---
-        if period == "7d":
-            start = agora - timedelta(days=7)
-        elif period == "90d":
-            start = agora - timedelta(days=90)
-        elif period == "all":
-            start = datetime(2020, 1, 1, tzinfo=tz_br)
+        # ============================================
+        # 🗓️ LÓGICA DE DATAS (O SEGREDO DA CORREÇÃO)
+        # ============================================
+        if start_date and end_date:
+            # Se o calendário enviou datas específicas (Ex: Janeiro)
+            try:
+                # Converte as strings "YYYY-MM-DD" para datas reais no Python
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                
+                # Aplica o fuso horário do Brasil e define a hora do dia
+                start = tz_br.localize(start_dt.replace(hour=0, minute=0, second=0))
+                end = tz_br.localize(end_dt.replace(hour=23, minute=59, second=59))
+            except ValueError:
+                # Prevenção: Se der erro na leitura, volta para o padrão de 30 dias
+                start = agora - timedelta(days=30)
+                end = agora
         else:
-            start = agora - timedelta(days=30)
-        
-        end = agora
+            # Se não vieram datas específicas, usamos os botões rápidos (7d, 30d, etc)
+            if period == "7d":
+                start = agora - timedelta(days=7)
+            elif period == "90d":
+                start = agora - timedelta(days=90)
+            elif period == "all":
+                start = datetime(2020, 1, 1, tzinfo=tz_br)
+            else:
+                start = agora - timedelta(days=30)
+            
+            end = agora
 
         # --- FILTRAR BOTS DO USUÁRIO ---
+        # (Daqui para baixo o seu código continua IGUALZINHO ao que já era)
         is_super = current_user.is_superuser
         
         if bot_id:
