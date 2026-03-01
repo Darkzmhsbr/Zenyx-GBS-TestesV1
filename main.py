@@ -14616,7 +14616,6 @@ def advanced_statistics(
         chart_horas = [{"hour": f"{h:02d}:00", "count": horas_count.get(h, 0)} for h in range(24)]
         
         chart_semana = [{"day": dias_semana_map.get(d, "?"), "day_short": dias_semana_map.get(d, "?")[:3], "count": dias_count.get(d, 0)} for d in range(7)]
-        
         # === TOP 5 BOTS ===
         top_bots = []
         if not bot_id:
