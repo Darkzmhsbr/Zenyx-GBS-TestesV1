@@ -10125,16 +10125,40 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
     bot_db = db.query(BotModel).filter(BotModel.token == token).first()
     if not bot_db or bot_db.status == "pausado": return {"status": "ignored"}
     
-    # 🚨 VERIFICAÇÃO: Owner banido ou bots pausados pelo admin
+    # =========================================================
+    # 🚨 VERIFICAÇÃO BLINDADA: PUNIÇÕES, BANS E PAUSAS (DENÚNCIAS)
+    # =========================================================
     try:
-        owner = db.query(User).filter(User.id == bot_db.user_id).first() if bot_db.user_id else None
-        if owner:
-            if getattr(owner, 'is_banned', False):
-                return {"status": "ignored", "reason": "owner_banned"}
-            if getattr(owner, 'bots_paused_until', None) and owner.bots_paused_until > now_brazil():
-                return {"status": "ignored", "reason": "bots_paused"}
-    except:
-        pass
+        # Pega o ID do dono com segurança
+        dono_id = getattr(bot_db, 'owner_id', None) or getattr(bot_db, 'user_id', None)
+        
+        if dono_id:
+            owner = db.query(User).filter(User.id == dono_id).first()
+            if owner:
+                # 1. Checa Banimento Permanente
+                if getattr(owner, 'is_banned', False):
+                    logger.warning(f"🚫 [PUNIÇÃO ATIVA] Bot @{bot_db.username} ignorado. Dono ({owner.username}) está BANIDO.")
+                    return {"status": "ignored", "reason": "owner_banned"}
+                
+                # 2. Checa Pausa Temporária (Pause Bots)
+                pause_date = getattr(owner, 'bots_paused_until', None)
+                if pause_date:
+                    # Garante que a data tem o fuso horário correto para não dar erro na comparação
+                    from pytz import timezone
+                    tz_br = timezone('America/Sao_Paulo')
+                    
+                    if pause_date.tzinfo is None:
+                        pause_date = tz_br.localize(pause_date)
+                    
+                    agora = now_brazil()
+                    if agora.tzinfo is None:
+                        agora = tz_br.localize(agora)
+                    
+                    if pause_date > agora:
+                        logger.warning(f"⏸️ [PUNIÇÃO ATIVA] Bot @{bot_db.username} ignorado. Bots de ({owner.username}) PAUSADOS até {pause_date.strftime('%d/%m/%Y %H:%M')}.")
+                        return {"status": "ignored", "reason": "bots_paused"}
+    except Exception as e:
+        logger.error(f"❌ Erro ao checar punição do bot no webhook: {e}")
 
     # 🔒 Flag de proteção de conteúdo — aplicada em todos os envios de mídia/mensagem do vendedor
     _protect = getattr(bot_db, 'protect_content', False) or False
