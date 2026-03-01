@@ -14251,8 +14251,6 @@ def dashboard_stats(
 def advanced_statistics(
     bot_id: Optional[int] = None,
     period: Optional[str] = "30d",  # 7d, 30d, 90d, all
-    cal_month: Optional[int] = None,  # 🆕 Mês do calendário (1-12)
-    cal_year: Optional[int] = None,   # 🆕 Ano do calendário
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
@@ -14570,53 +14568,26 @@ def advanced_statistics(
         else:
             tempo_medio = {"segundos": 0, "minutos": 0, "horas": 0, "dataset": 0}
 
-        # === CALENDÁRIO DE VENDAS (qualquer mês, query independente) ===
+        # === CALENDÁRIO DE VENDAS (dias do mês atual) ===
+        hoje = agora
+        primeiro_dia_mes = hoje.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if primeiro_dia_mes.tzinfo is None:
+            primeiro_dia_mes = tz_br.localize(primeiro_dia_mes)
+            
         import calendar as cal_module
-        
-        # Usa parâmetros do frontend ou mês atual como fallback
-        cal_m = cal_month if cal_month and 1 <= cal_month <= 12 else agora.month
-        cal_y = cal_year if cal_year and cal_year >= 2020 else agora.year
-        
-        # 🔒 Bloqueia meses futuros
-        if cal_y > agora.year or (cal_y == agora.year and cal_m > agora.month):
-            cal_m = agora.month
-            cal_y = agora.year
-        
-        primeiro_dia_mes = datetime(cal_y, cal_m, 1, 0, 0, 0)
-        primeiro_dia_mes = tz_br.localize(primeiro_dia_mes)
-        dias_no_mes = cal_module.monthrange(cal_y, cal_m)[1]
-        ultimo_dia_mes = tz_br.localize(datetime(cal_y, cal_m, dias_no_mes, 23, 59, 59))
-        
-        # Query independente para o mês do calendário (não usa a query filtrada por período)
-        q_cal_vendas = apply_bot_filter(
-            db.query(Pedido).filter(
-                Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
-                Pedido.data_aprovacao >= primeiro_dia_mes,
-                Pedido.data_aprovacao <= ultimo_dia_mes
-            )
-        )
-        vendas_do_mes_cal = q_cal_vendas.all()
-        
-        is_current_month = cal_m == agora.month and cal_y == agora.year
+        dias_no_mes = cal_module.monthrange(hoje.year, hoje.month)[1]
         
         calendario = []
         for dia_num in range(1, dias_no_mes + 1):
-            dia_date = tz_br.localize(datetime(cal_y, cal_m, dia_num, 0, 0, 0))
-            dia_end = tz_br.localize(datetime(cal_y, cal_m, dia_num, 23, 59, 59))
-            
-            # 🔒 Não contabiliza dias futuros
-            if is_current_month and dia_num > agora.day:
-                calendario.append({
-                    "day": dia_num, "weekday": dia_date.weekday(),
-                    "vendas": 0, "receita": 0, "is_today": False, "is_future": True
-                })
-                continue
-            
+            dia_date = primeiro_dia_mes.replace(day=dia_num)
+            dia_end = dia_date.replace(hour=23, minute=59, second=59)
             vendas_dia_cal = 0
             receita_dia_cal = 0
-            for v in vendas_do_mes_cal:
+            for v in vendas:
                 if v.data_aprovacao:
-                    da = _safe_tz(v.data_aprovacao)
+                    da = v.data_aprovacao
+                    if da.tzinfo is None:
+                        da = tz_br.localize(da)
                     if dia_date <= da <= dia_end:
                         vendas_dia_cal += 1
                         if is_super_split and not bot_id:
@@ -14628,7 +14599,7 @@ def advanced_statistics(
                 "weekday": dia_date.weekday(),
                 "vendas": vendas_dia_cal,
                 "receita": receita_dia_cal,
-                "is_today": is_current_month and dia_num == agora.day,
+                "is_today": dia_num == hoje.day,
             })
 
         # === CONTADORES EXPANDIDOS ===
@@ -19225,12 +19196,12 @@ def resolve_report(
     elif report.bot_id:
         bot = db.query(BotModel).filter(BotModel.id == report.bot_id).first()
         if bot:
-            user_target = db.query(User).filter(User.id == bot.user_id).first()
+            user_target = db.query(User).filter(User.id == bot.owner_id).first()
 
     if data.action and data.action != 'none' and user_target:
         if data.action == 'strike':
             # Incrementa strike
-            current_strikes = getattr(user_target, 'strike_count', 0) or 0
+            current_strikes = user_target.strike_count or 0
             new_strike = current_strikes + 1
             user_target.strike_count = new_strike
             
@@ -19249,6 +19220,9 @@ def resolve_report(
                 user_target.is_banned = True
                 user_target.banned_reason = f"3 strikes atingidos. Última denúncia: #{report.id}"
                 user_target.is_active = False
+                # Pausar todos os bots
+                for ub in db.query(BotModel).filter(BotModel.owner_id == user_target.id).all():
+                    ub.status = "pausado"
                 report.action_taken = 'ban_account'
                 logger.warning(f"🚫 [REPORT] Usuário {user_target.username} BANIDO (3 strikes)")
             
@@ -19256,22 +19230,55 @@ def resolve_report(
             days = data.pause_days or 7
             user_target.bots_paused_until = now_brazil() + timedelta(days=days)
             
+            current_strikes = user_target.strike_count or 0
+            new_strike = current_strikes + 1
+            
             strike = UserStrike(
                 user_id=user_target.id, report_id=report.id,
                 reason=data.resolution or f"Bots pausados por {days} dias",
-                strike_number=(getattr(user_target, 'strike_count', 0) or 0) + 1,
+                strike_number=new_strike,
                 action='pause_bots', pause_until=user_target.bots_paused_until,
                 applied_by=current_user.id
             )
             db.add(strike)
-            user_target.strike_count = (getattr(user_target, 'strike_count', 0) or 0) + 1
+            user_target.strike_count = new_strike
             logger.warning(f"⏸️ [REPORT] Bots do usuário {user_target.username} pausados por {days} dias")
             
         elif data.action == 'ban_account':
             user_target.is_banned = True
             user_target.banned_reason = data.resolution or f"Banido por denúncia #{report.id}"
             user_target.is_active = False
-            logger.warning(f"🚫 [REPORT] Usuário {user_target.username} BANIDO por admin")
+            
+            # 🔒 Pausar TODOS os bots do usuário banido
+            user_bots = db.query(BotModel).filter(BotModel.owner_id == user_target.id).all()
+            for ub in user_bots:
+                ub.status = "pausado"
+            
+            # Registrar strike de ban
+            current_strikes = user_target.strike_count or 0
+            new_strike = current_strikes + 1
+            strike = UserStrike(
+                user_id=user_target.id, report_id=report.id,
+                reason=data.resolution or f"Conta banida por denúncia #{report.id}",
+                strike_number=new_strike,
+                action='ban_account',
+                applied_by=current_user.id
+            )
+            db.add(strike)
+            user_target.strike_count = new_strike
+            logger.warning(f"🚫 [REPORT] Usuário {user_target.username} BANIDO | {len(user_bots)} bots pausados")
+            
+        elif data.action == 'warning':
+            # Apenas registra aviso sem punição real
+            strike = UserStrike(
+                user_id=user_target.id, report_id=report.id,
+                reason=data.resolution or f"Aviso por denúncia #{report.id}",
+                strike_number=(user_target.strike_count or 0),
+                action='warning',
+                applied_by=current_user.id
+            )
+            db.add(strike)
+            logger.info(f"⚠️ [REPORT] Aviso registrado para {user_target.username}")
             
         elif data.action == 'tax_increase':
             pass
@@ -19281,6 +19288,100 @@ def resolve_report(
     logger.info(f"✅ [REPORT] Denúncia #{report_id} resolvida | Ação: {data.action} | Por: {current_user.username}")
     
     return {"status": "success", "message": f"Denúncia resolvida com ação: {data.action}"}
+
+
+# --- SUPERADMIN: REVERTER PUNIÇÃO DE DENÚNCIA ---
+class ReportRevert(BaseModel):
+    reason: Optional[str] = None
+
+@app.put("/api/superadmin/reports/{report_id}/revert")
+def revert_report_punishment(
+    report_id: int,
+    data: ReportRevert,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Reverte TODAS as punições aplicadas por uma denúncia, restaurando conta e bots."""
+    if not getattr(current_user, 'is_superuser', False):
+        raise HTTPException(403, "Acesso negado")
+    
+    report = db.query(Report).filter(Report.id == report_id).first()
+    if not report:
+        raise HTTPException(404, "Denúncia não encontrada")
+    
+    if report.status not in ['resolved']:
+        raise HTTPException(400, "Só é possível reverter denúncias resolvidas")
+    
+    # Encontrar o usuário alvo
+    user_target = None
+    if getattr(report, 'owner_id', None):
+        user_target = db.query(User).filter(User.id == report.owner_id).first()
+    elif report.bot_id:
+        bot = db.query(BotModel).filter(BotModel.id == report.bot_id).first()
+        if bot:
+            user_target = db.query(User).filter(User.id == bot.owner_id).first()
+    
+    if not user_target:
+        raise HTTPException(404, "Usuário alvo não encontrado para reverter")
+    
+    action_was = report.action_taken
+    revert_details = []
+    
+    # 1. Remover BAN
+    if user_target.is_banned:
+        user_target.is_banned = False
+        user_target.banned_reason = None
+        user_target.is_active = True
+        revert_details.append("Ban removido")
+    
+    # 2. Remover PAUSA temporária
+    if user_target.bots_paused_until:
+        user_target.bots_paused_until = None
+        revert_details.append("Pausa de bots removida")
+    
+    # 3. Reativar bots pausados
+    user_bots = db.query(BotModel).filter(
+        BotModel.owner_id == user_target.id,
+        BotModel.status == "pausado"
+    ).all()
+    if user_bots:
+        for ub in user_bots:
+            ub.status = "ativo"
+        revert_details.append(f"{len(user_bots)} bot(s) reativado(s)")
+    
+    # 4. Decrementar strike (mínimo 0)
+    if action_was in ['strike', 'pause_bots', 'ban_account']:
+        current_strikes = user_target.strike_count or 0
+        if current_strikes > 0:
+            user_target.strike_count = current_strikes - 1
+            revert_details.append(f"Strike: {current_strikes} → {current_strikes - 1}")
+    
+    # 5. Remover registro de strike vinculado a esta denúncia
+    deleted = db.query(UserStrike).filter(UserStrike.report_id == report.id).delete()
+    if deleted:
+        revert_details.append(f"{deleted} registro(s) de strike removido(s)")
+    
+    # 6. Reativar conta se estava inativa
+    if not user_target.is_active:
+        user_target.is_active = True
+        revert_details.append("Conta reativada")
+    
+    # 7. Atualizar denúncia
+    report.status = "dismissed"
+    report.resolution = (report.resolution or "") + f"\n\n🔄 REVERTIDO por @{current_user.username}: {data.reason or 'Sem motivo'}"
+    report.action_taken = f"revertido_{action_was or 'unknown'}"
+    
+    db.commit()
+    
+    summary = " | ".join(revert_details) if revert_details else "Nenhuma alteração necessária"
+    logger.info(f"🔄 [REPORT] Denúncia #{report_id} REVERTIDA por {current_user.username} | {summary}")
+    
+    return {
+        "status": "success",
+        "message": "Punição revertida com sucesso",
+        "details": revert_details,
+        "user": user_target.username
+    }
 
 
 # ============================================================
