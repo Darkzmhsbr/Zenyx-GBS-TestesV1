@@ -17,7 +17,7 @@ import asyncio  # 🔥 Garantir que asyncio está importado
 from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy import func, desc, text, and_, or_, extract
-from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks, Query, File, UploadFile, Form, Body 
+from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks, Query, File, UploadFile, Form 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -2059,6 +2059,79 @@ scheduler.add_job(
 logger.info("✅ [SCHEDULER] Job de mensagens alternantes agendado (Verificação a cada 5 min)")
 
 
+# =========================================================
+# 🏥 HEALTH CHECK ENDPOINT
+# =========================================================
+@app.get("/api/health")
+async def health_check():
+    """
+    Health check endpoint para monitoramento externo.
+    Retorna status detalhado do sistema.
+    """
+    try:
+        # Verificar conexão com banco de dados
+        db_status = "ok"
+        try:
+            db = SessionLocal()
+            db.execute(text("SELECT 1"))
+            db.close()
+        except Exception as e:
+            db_status = f"error: {str(e)}"
+        
+        # Verificar scheduler
+        scheduler_status = "running" if scheduler.running else "stopped"
+        
+        # Verificar webhooks pendentes
+        webhook_stats = {"pending": 0, "failed": 0}
+        try:
+            db = SessionLocal()
+            pending = db.query(WebhookRetry).filter(
+                WebhookRetry.status == 'pending'
+            ).count()
+            failed = db.query(WebhookRetry).filter(
+                WebhookRetry.status == 'failed'
+            ).count()
+            webhook_stats = {"pending": pending, "failed": failed}
+            db.close()
+        except:
+            pass  # Tabela pode não existir ainda
+        
+        # Determinar status geral
+        overall_status = "healthy"
+        status_code = 200
+        
+        if db_status != "ok":
+            overall_status = "unhealthy"
+            status_code = 503
+        elif scheduler_status != "running":
+            overall_status = "degraded"
+            status_code = 200
+        
+        health_status = {
+            "status": overall_status,
+            "timestamp": now_brazil().isoformat(),
+            "checks": {
+                "database": {"status": db_status},
+                "scheduler": {"status": scheduler_status},
+                "webhook_retry": webhook_stats
+            },
+            "version": "5.0"
+        }
+        
+        return JSONResponse(content=health_status, status_code=status_code)
+    
+    except Exception as e:
+        logger.error(f"❌ [HEALTH] Erro no health check: {str(e)}")
+        return JSONResponse(
+            content={
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": now_brazil().isoformat()
+            },
+            status_code=503
+        )
+
+
 # 🔥 FORÇA A CRIAÇÃO DAS COLUNAS AO INICIAR
 try:
     forcar_atualizacao_tabelas()
@@ -2738,47 +2811,6 @@ def get_auto_remarketing_stats(
             "today_sent": 0, "total_revenue": 0, "logs": [], "recent_logs": []
         }
         
-# =========================================================
-# 🔄 TOGGLE REMARKETING AUTOMÁTICO (ATIVAR/DESATIVAR)
-# =========================================================
-@app.post("/api/admin/auto-remarketing/{bot_id}/toggle")
-def toggle_auto_remarketing(
-    bot_id: int,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Ativa ou desativa o remarketing automático de um bot"""
-    try:
-        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
-        if not bot:
-            raise HTTPException(status_code=404, detail="Bot não encontrado")
-        
-        if bot.owner_id != current_user.id and not current_user.is_superuser:
-            raise HTTPException(status_code=403, detail="Acesso negado")
-        
-        config = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
-        
-        if not config:
-            config = RemarketingConfig(bot_id=bot_id, enabled=True)
-            db.add(config)
-            db.commit()
-            db.refresh(config)
-            return {"status": "success", "enabled": True, "msg": "Remarketing automático ativado!"}
-        
-        config.enabled = not config.enabled
-        db.commit()
-        
-        status_text = "ativado" if config.enabled else "desativado"
-        logger.info(f"🔄 [AUTO-RMK] Remarketing auto {status_text} para bot #{bot_id} por {current_user.username}")
-        
-        return {"status": "success", "enabled": config.enabled, "msg": f"Remarketing automático {status_text}!"}
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Erro toggle auto-remarketing: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 # =========================================================
 # 🔒 FUNÇÃO HELPER: VERIFICAR PROPRIEDADE DO BOT
 # =========================================================
@@ -7933,6 +7965,800 @@ def atualizar_plano(
     logger.info(f"✏️ Plano atualizado (rota legada): {plano.nome_exibicao} (Owner: {current_user.username})")
     
     return {"status": "success", "msg": "Plano atualizado"}
+# =========================================================
+# 💬 FLUXO DO BOT (V2)
+# =========================================================
+@app.get("/api/admin/bots/{bot_id}/flow")
+def obter_fluxo(
+    bot_id: int, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    fluxo = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+    
+    if not fluxo:
+        # Retorna padrão se não existir
+        return {
+            "msg_boas_vindas": "Olá! Seja bem-vindo(a).",
+            "media_url": "",
+            "btn_text_1": "🔓 DESBLOQUEAR ACESSO",
+            "autodestruir_1": False,
+            "msg_2_texto": "Escolha seu plano abaixo:",
+            "msg_2_media": "",
+            "mostrar_planos_2": True,
+            "mostrar_planos_1": False,
+            "start_mode": "padrao",
+            "miniapp_url": "",
+            "miniapp_btn_text": "ABRIR LOJA",
+            "msg_pix": "",
+            "button_mode": "next_step",  # 🔥 NOVO
+            "buttons_config": [],  # 🔥 NOVO
+            "buttons_config_2": []  # 🔥 NOVO
+        }
+    
+    # 🔥 SERIALIZA MANUALMENTE PARA GARANTIR QUE buttons_config SEJA INCLUÍDO
+    return {
+        "id": fluxo.id,
+        "bot_id": fluxo.bot_id,
+        "msg_boas_vindas": fluxo.msg_boas_vindas,
+        "media_url": fluxo.media_url,
+        "btn_text_1": fluxo.btn_text_1,
+        "autodestruir_1": fluxo.autodestruir_1,
+        "msg_2_texto": fluxo.msg_2_texto,
+        "msg_2_media": fluxo.msg_2_media,
+        "mostrar_planos_2": fluxo.mostrar_planos_2,
+        "mostrar_planos_1": fluxo.mostrar_planos_1,
+        "start_mode": fluxo.start_mode,
+        "miniapp_url": fluxo.miniapp_url,
+        "miniapp_btn_text": fluxo.miniapp_btn_text,
+        "msg_pix": fluxo.msg_pix,
+        "button_mode": fluxo.button_mode if hasattr(fluxo, 'button_mode') else "next_step",  # 🔥 NOVO
+        "buttons_config": fluxo.buttons_config if fluxo.buttons_config else [],  # 🔥 NOVO
+        "buttons_config_2": fluxo.buttons_config_2 if fluxo.buttons_config_2 else []  # 🔥 NOVO
+    }
+
+class FlowUpdate(BaseModel):
+    msg_boas_vindas: Optional[str] = None
+    media_url: Optional[str] = None
+    btn_text_1: Optional[str] = None
+    autodestruir_1: Optional[bool] = False
+    msg_2_texto: Optional[str] = None
+    msg_2_media: Optional[str] = None
+    mostrar_planos_2: Optional[bool] = True
+    mostrar_planos_1: Optional[bool] = False
+    start_mode: Optional[str] = "padrao"
+    miniapp_url: Optional[str] = None
+    miniapp_btn_text: Optional[str] = None
+    msg_pix: Optional[str] = None
+    
+    # 🔥 NOVOS CAMPOS PARA BOTÕES PERSONALIZADOS
+    button_mode: Optional[str] = "next_step"  # "next_step" ou "custom"
+    buttons_config: Optional[List[dict]] = None  # Botões da mensagem 1
+    buttons_config_2: Optional[List[dict]] = None  # Botões da mensagem final
+    
+    steps: Optional[List[dict]] = None  # Passos extras
+
+@app.post("/api/admin/bots/{bot_id}/flow")
+def salvar_fluxo(
+    bot_id: int, 
+    flow: FlowUpdate, 
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
+    verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+    
+    fluxo_db = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+    
+    if not fluxo_db:
+        fluxo_db = BotFlow(bot_id=bot_id)
+        db.add(fluxo_db)
+    
+    # Atualiza campos básicos
+    if flow.msg_boas_vindas is not None: fluxo_db.msg_boas_vindas = flow.msg_boas_vindas
+    if flow.media_url is not None: fluxo_db.media_url = flow.media_url
+    if flow.btn_text_1 is not None: fluxo_db.btn_text_1 = flow.btn_text_1
+    if flow.autodestruir_1 is not None: fluxo_db.autodestruir_1 = flow.autodestruir_1
+    if flow.msg_2_texto is not None: fluxo_db.msg_2_texto = flow.msg_2_texto
+    if flow.msg_2_media is not None: fluxo_db.msg_2_media = flow.msg_2_media
+    if flow.mostrar_planos_2 is not None: fluxo_db.mostrar_planos_2 = flow.mostrar_planos_2
+    if flow.mostrar_planos_1 is not None: fluxo_db.mostrar_planos_1 = flow.mostrar_planos_1
+    
+    # Atualiza campos do Mini App
+    if flow.start_mode: fluxo_db.start_mode = flow.start_mode
+    if flow.miniapp_url is not None: fluxo_db.miniapp_url = flow.miniapp_url
+    if flow.miniapp_btn_text: fluxo_db.miniapp_btn_text = flow.miniapp_btn_text
+    
+    # 🔥 ATUALIZA MENSAGEM DO PIX
+    if flow.msg_pix is not None: fluxo_db.msg_pix = flow.msg_pix
+
+    # 🔥 ATUALIZA MODO DE BOTÃO E CONFIGURAÇÕES
+    if flow.button_mode is not None: 
+        fluxo_db.button_mode = flow.button_mode
+    
+    if flow.buttons_config is not None: 
+        fluxo_db.buttons_config = flow.buttons_config
+    
+    if flow.buttons_config_2 is not None: 
+        fluxo_db.buttons_config_2 = flow.buttons_config_2
+
+    # 🔥 ATUALIZA PASSOS EXTRAS (STEPS)
+    if flow.steps is not None:
+        # Remove passos antigos
+        db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).delete()
+        
+        # Adiciona novos passos
+        novos_passos = []
+        for i, s in enumerate(flow.steps):
+            novo = BotFlowStep(
+                bot_id=bot_id,
+                step_order=i + 1,
+                msg_texto=s.get('msg_texto'),
+                msg_media=s.get('msg_media'),
+                btn_texto=s.get('btn_texto'),
+                autodestruir=s.get('autodestruir', False),
+                mostrar_botao=s.get('mostrar_botao', True),
+                delay_seconds=s.get('delay_seconds', 0),
+                buttons_config=s.get('buttons_config')  # 🔥 NOVO
+            )
+            novos_passos.append(novo)
+        
+        if novos_passos:
+            db.add_all(novos_passos)
+
+    db.commit()
+    
+    logger.info(f"💾 Fluxo do Bot {bot_id} salvo com sucesso (Owner: {current_user.username})")
+    
+    return {"status": "saved"}
+
+# =========================================================
+# 🔗 ROTAS DE TRACKING (RASTREAMENTO)
+# =========================================================
+
+# --- 1. PASTAS (FOLDERS) ---
+
+# ============================================================
+# 🛡️ SCHEMAS DE RASTREAMENTO (Adicione antes das rotas)
+# ============================================================
+
+# --- MODELOS TRACKING (Certifique-se de que estão no topo, junto com os outros Pydantic models) ---
+class TrackingFolderCreate(BaseModel):
+    nome: str
+    plataforma: str # 'facebook', 'instagram', etc
+
+class TrackingLinkCreate(BaseModel):
+    folder_id: int
+    bot_id: int
+    nome: str
+    origem: Optional[str] = "outros" 
+    codigo: Optional[str] = None
+
+# ============================================================
+# 📂 ROTAS DE RASTREAMENTO (TRACKING) - SEGURANÇA APLICADA
+# ============================================================
+
+# --- 1. PASTAS (FOLDERS) ---
+
+# --- 1. PASTAS (FOLDERS) ---
+
+@app.get("/api/admin/tracking/folders")
+def list_tracking_folders(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Lista pastas com filtro de segurança:
+    O usuário só vê pastas que são DELE (owner_id) ou que contêm links dos SEUS bots.
+    Superadmin vê APENAS suas próprias pastas também (evita poluição).
+    """
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        
+        # Busca todas as pastas
+        folders = db.query(TrackingFolder).order_by(desc(TrackingFolder.created_at)).all()
+        
+        result = []
+        for f in folders:
+            # 🔥 FILTRO PRINCIPAL: Pasta pertence a este usuário?
+            is_owner = (f.owner_id == current_user.id) if f.owner_id else False
+            
+            # Conta links "meus" (Dos bots vinculados ao meu usuário)
+            meus_links_count = 0
+            stats = None
+            
+            if user_bot_ids:
+                meus_links_count = db.query(TrackingLink).filter(
+                    TrackingLink.folder_id == f.id,
+                    TrackingLink.bot_id.in_(user_bot_ids)
+                ).count()
+                
+                if meus_links_count > 0:
+                    stats = db.query(
+                        func.sum(TrackingLink.clicks).label('total_clicks'),
+                        func.sum(TrackingLink.vendas).label('total_vendas')
+                    ).filter(
+                        TrackingLink.folder_id == f.id,
+                        TrackingLink.bot_id.in_(user_bot_ids)
+                    ).first()
+            
+            # 🔥 LÓGICA DE VISIBILIDADE (CORRIGIDA):
+            # Mostra SE:
+            # 1. Eu sou o dono da pasta (owner_id == meu id)
+            # 2. OU tenho links meus lá dentro
+            # 3. OU a pasta não tem dono (legado) E eu tenho links lá
+            # Pastas vazias de outros usuários NÃO aparecem mais
+            should_show = False
+            
+            if is_owner:
+                should_show = True
+            elif meus_links_count > 0:
+                should_show = True
+            elif f.owner_id is None and meus_links_count > 0:
+                should_show = True
+            # Pastas sem dono E sem links meus = não mostra (era aqui o bug)
+
+            if should_show:
+                result.append({
+                    "id": f.id, 
+                    "nome": f.nome, 
+                    "plataforma": f.plataforma, 
+                    "link_count": meus_links_count,
+                    "total_clicks": (stats.total_clicks if stats else 0) or 0,
+                    "total_vendas": (stats.total_vendas if stats else 0) or 0,
+                    "created_at": f.created_at
+                })
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Erro ao listar pastas: {e}")
+        return []
+
+@app.post("/api/admin/tracking/folders")
+def create_tracking_folder(
+    dados: TrackingFolderCreate, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        # 🔥 Verifica duplicidade POR USUÁRIO (não global)
+        existe = db.query(TrackingFolder).filter(
+            func.lower(TrackingFolder.nome) == dados.nome.lower(),
+            TrackingFolder.owner_id == current_user.id
+        ).first()
+        
+        if existe:
+            return {"status": "ok", "id": existe.id, "msg": "Pasta já existia"}
+
+        nova_pasta = TrackingFolder(
+            nome=dados.nome, 
+            plataforma=dados.plataforma,
+            owner_id=current_user.id,  # 🔥 NOVO: Marca o dono
+            created_at=now_brazil()
+        )
+        db.add(nova_pasta)
+        db.commit()
+        db.refresh(nova_pasta)
+        
+        logger.info(f"📁 Pasta '{dados.nome}' criada por {current_user.username}")
+        return {"status": "ok", "id": nova_pasta.id}
+        
+    except Exception as e:
+        logger.error(f"Erro ao criar pasta: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno ao criar pasta")
+
+@app.delete("/api/admin/tracking/folders/{fid}")
+def delete_tracking_folder(
+    fid: int, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user) # ✅ CORRIGIDO
+):
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        is_admin = current_user.is_superuser
+        
+        folder = db.query(TrackingFolder).filter(TrackingFolder.id == fid).first()
+        if not folder:
+            raise HTTPException(404, "Pasta não encontrada")
+        
+        # 🔥 BLINDAGEM: Se NÃO for admin, verifica se tem links de outros usuários
+        if not is_admin:
+            links_outros = db.query(TrackingLink).filter(
+                TrackingLink.folder_id == fid,
+                TrackingLink.bot_id.notin_(user_bot_ids)
+            ).count()
+            
+            if links_outros > 0:
+                raise HTTPException(403, "Você não pode apagar esta pasta pois ela contém links de outros usuários.")
+        
+        # Limpeza
+        db.query(TrackingLink).filter(TrackingLink.folder_id == fid).delete()
+        db.delete(folder)
+        db.commit()
+        
+        return {"status": "deleted"}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Erro ao deletar pasta: {e}")
+        raise HTTPException(500, "Erro interno")
+
+# --- 2. LINKS DE RASTREAMENTO ---
+
+@app.get("/api/admin/tracking/links/{folder_id}")
+def list_tracking_links(
+    folder_id: int, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user) # ✅ CORRIGIDO
+):
+    """
+    Lista links, filtrando APENAS os que pertencem aos bots do usuário.
+    """
+    user_bot_ids = [bot.id for bot in current_user.bots]
+    is_admin = current_user.is_superuser
+
+    query = db.query(TrackingLink).filter(TrackingLink.folder_id == folder_id)
+    
+    # 🔥 BLINDAGEM: Filtra só os links dos MEUS bots
+    if not is_admin:
+        if not user_bot_ids: 
+            return []
+        query = query.filter(TrackingLink.bot_id.in_(user_bot_ids))
+    
+    return query.order_by(desc(TrackingLink.created_at)).all()
+
+@app.post("/api/admin/tracking/links")
+def create_tracking_link(
+    dados: TrackingLinkCreate, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user) # ✅ CORRIGIDO
+):
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        is_admin = current_user.is_superuser
+        
+        # 🔥 BLINDAGEM: Verifica propriedade do bot
+        if not is_admin:
+            if dados.bot_id not in user_bot_ids:
+                raise HTTPException(403, "Você não tem permissão para criar links neste bot.")
+
+        # Gera código aleatório se vazio
+        if not dados.codigo:
+            import random, string
+            chars = string.ascii_lowercase + string.digits
+            dados.codigo = ''.join(random.choice(chars) for _ in range(8))
+        
+        # Verifica colisão
+        exists = db.query(TrackingLink).filter(TrackingLink.codigo == dados.codigo).first()
+        if exists:
+            raise HTTPException(400, "Este código já existe.")
+
+        novo_link = TrackingLink(
+            folder_id=dados.folder_id,
+            bot_id=dados.bot_id,
+            nome=dados.nome,
+            codigo=dados.codigo,
+            origem=dados.origem,
+            clicks=0,
+            vendas=0,
+            faturamento=0.0,
+            created_at=now_brazil()
+        )
+        db.add(novo_link)
+        db.commit()
+        db.refresh(novo_link)
+        
+        return {"status": "ok", "link": novo_link}
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Erro criar link: {e}")
+        raise HTTPException(status_code=500, detail="Erro interno")
+
+@app.delete("/api/admin/tracking/links/{lid}")
+def delete_link(
+    lid: int, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        is_admin = current_user.is_superuser
+        
+        link = db.query(TrackingLink).filter(TrackingLink.id == lid).first()
+        if not link:
+            raise HTTPException(404, "Link não encontrado")
+        
+        # 🔥 BLINDAGEM: Verifica propriedade
+        if not is_admin:
+            if link.bot_id not in user_bot_ids:
+                raise HTTPException(403, "Acesso negado. Você não é dono deste link.")
+        
+        # 🔥 FIX: Desvincula pedidos e leads que referenciam este link (SET NULL)
+        db.query(Pedido).filter(Pedido.tracking_id == lid).update(
+            {"tracking_id": None}, synchronize_session=False
+        )
+        db.query(Lead).filter(Lead.tracking_id == lid).update(
+            {"tracking_id": None}, synchronize_session=False
+        )
+        
+        db.delete(link)
+        db.commit()
+        logger.info(f"🗑️ Link #{lid} deletado por {current_user.username}")
+        return {"status": "deleted"}
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Erro ao deletar link: {e}")
+        db.rollback()
+        raise HTTPException(500, "Erro interno")
+
+# =========================================================
+# 📊 ROTAS DE MÉTRICAS AVANÇADAS DE TRACKING
+# =========================================================
+
+@app.get("/api/admin/tracking/link/{link_id}/metrics")
+def get_tracking_link_metrics(
+    link_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Métricas detalhadas de um link com breakdown Normal/Upsell/Downsell/Remarketing/DisparoAuto/OrderBump.
+    """
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        
+        link = db.query(TrackingLink).filter(TrackingLink.id == link_id).first()
+        if not link:
+            raise HTTPException(404, "Link não encontrado")
+        
+        if not current_user.is_superuser and link.bot_id not in user_bot_ids:
+            raise HTTPException(403, "Acesso negado")
+        
+        # 🔥 Busca preço do Order Bump do bot (para calcular faturamento isolado)
+        bump_config = db.query(OrderBumpConfig).filter(
+            OrderBumpConfig.bot_id == link.bot_id
+        ).first()
+        bump_preco = float(bump_config.preco) if bump_config and bump_config.preco else 0.0
+        
+        # Busca todos os pedidos aprovados vinculados a este tracking_id
+        pedidos = db.query(Pedido).filter(
+            Pedido.tracking_id == link_id,
+            Pedido.status.in_(['paid', 'approved', 'active'])
+        ).all()
+        
+        # Breakdown por tipo
+        normais_vendas = 0
+        normais_fat = 0.0
+        upsell_vendas = 0
+        upsell_fat = 0.0
+        downsell_vendas = 0
+        downsell_fat = 0.0
+        remarketing_vendas = 0
+        remarketing_fat = 0.0
+        disparo_auto_vendas = 0
+        disparo_auto_fat = 0.0
+        order_bump_vendas = 0
+        order_bump_fat = 0.0
+        
+        for p in pedidos:
+            nome_lower = str(p.plano_nome or "").lower()
+            origem = str(p.origem or "").lower()
+            valor = float(p.valor or 0)
+            
+            # 🔥 Se tem Order Bump, separa o faturamento do bump
+            if p.tem_order_bump and bump_preco > 0:
+                order_bump_vendas += 1
+                order_bump_fat += bump_preco
+                valor = valor - bump_preco  # Valor restante é do plano/oferta
+            
+            if "upsell:" in nome_lower:
+                upsell_vendas += 1
+                upsell_fat += valor
+            elif "downsell:" in nome_lower:
+                downsell_vendas += 1
+                downsell_fat += valor
+            elif origem == 'remarketing' or "(oferta)" in nome_lower:
+                remarketing_vendas += 1
+                remarketing_fat += valor
+            elif origem == 'disparo_auto' or "(oferta automática)" in nome_lower:
+                disparo_auto_vendas += 1
+                disparo_auto_fat += valor
+            else:
+                normais_vendas += 1
+                normais_fat += valor
+        
+        total_vendas = normais_vendas + upsell_vendas + downsell_vendas + remarketing_vendas + disparo_auto_vendas + order_bump_vendas
+        total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat + order_bump_fat
+        
+        # 🔥 CORREÇÃO: Lógica infalível de conversão
+        # Se vendas > leads, significa que leads não é uma base confiável → usa cliques
+        # Conversão NUNCA deve ultrapassar 100%
+        leads_count = getattr(link, 'leads', 0) or 0
+        clicks_count = link.clicks or 0
+        
+        if total_vendas <= 0:
+            conversao = 0.0
+        elif leads_count > 0 and leads_count >= total_vendas:
+            conversao = round((total_vendas / leads_count * 100), 2)
+        elif clicks_count > 0:
+            conversao = round((total_vendas / clicks_count * 100), 2)
+        else:
+            conversao = 0.0
+        
+        conversao = min(conversao, 100.0)
+        
+        return {
+            "link_id": link.id,
+            "codigo": link.codigo,
+            "nome": link.nome,
+            "cliques": link.clicks or 0,
+            "leads": leads_count,
+            "vendas_total": total_vendas,
+            "faturamento_total": round(total_fat, 2),
+            "conversao": conversao,
+            "breakdown": {
+                "normais": {"vendas": normais_vendas, "faturamento": round(normais_fat, 2)},
+                "upsell": {"vendas": upsell_vendas, "faturamento": round(upsell_fat, 2)},
+                "downsell": {"vendas": downsell_vendas, "faturamento": round(downsell_fat, 2)},
+                "remarketing": {"vendas": remarketing_vendas, "faturamento": round(remarketing_fat, 2)},
+                "disparo_auto": {"vendas": disparo_auto_vendas, "faturamento": round(disparo_auto_fat, 2)},
+                "order_bump": {"vendas": order_bump_vendas, "faturamento": round(order_bump_fat, 2)}
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro métricas link {link_id}: {e}")
+        raise HTTPException(500, "Erro interno")
+
+
+@app.get("/api/admin/tracking/chart")
+def get_tracking_chart(
+    days: int = 7,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Dados para gráfico de desempenho temporal (vendas por dia por código).
+    """
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        if not user_bot_ids:
+            return {"labels": [], "datasets": []}
+        
+        # Busca links do usuário
+        meus_links = db.query(TrackingLink).filter(
+            TrackingLink.bot_id.in_(user_bot_ids)
+        ).all()
+        
+        if not meus_links:
+            return {"labels": [], "datasets": []}
+        
+        link_ids = [l.id for l in meus_links]
+        link_map = {l.id: l.codigo for l in meus_links}
+        
+        # Período
+        now = now_brazil()
+        start_date = now - timedelta(days=days)
+        
+        # Busca pedidos aprovados no período
+        pedidos = db.query(Pedido).filter(
+            Pedido.tracking_id.in_(link_ids),
+            Pedido.status.in_(['paid', 'approved', 'active']),
+            Pedido.data_aprovacao >= start_date
+        ).all()
+        
+        # Gera labels (datas)
+        labels = []
+        for i in range(days):
+            d = start_date + timedelta(days=i+1)
+            labels.append(d.strftime("%d/%m"))
+        
+        # Agrupa vendas por código por dia
+        datasets_map = {}
+        
+        for p in pedidos:
+            if not p.tracking_id or not p.data_aprovacao:
+                continue
+            
+            codigo = link_map.get(p.tracking_id, "desconhecido")
+            dia_label = p.data_aprovacao.strftime("%d/%m")
+            
+            if codigo not in datasets_map:
+                datasets_map[codigo] = {label: 0 for label in labels}
+            
+            if dia_label in datasets_map[codigo]:
+                datasets_map[codigo][dia_label] += 1
+        
+        # Converte para formato final
+        datasets = []
+        for codigo, dias_data in datasets_map.items():
+            datasets.append({
+                "codigo": codigo,
+                "data": [dias_data.get(label, 0) for label in labels]
+            })
+        
+        return {"labels": labels, "datasets": datasets}
+        
+    except Exception as e:
+        logger.error(f"Erro tracking chart: {e}")
+        return {"labels": [], "datasets": []}
+
+
+@app.get("/api/admin/tracking/ranking")
+def get_tracking_ranking(
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Top códigos por faturamento com breakdown.
+    """
+    try:
+        user_bot_ids = [bot.id for bot in current_user.bots]
+        if not user_bot_ids:
+            return []
+        
+        # Busca links do usuário ordenados por faturamento
+        meus_links = db.query(TrackingLink).filter(
+            TrackingLink.bot_id.in_(user_bot_ids)
+        ).order_by(desc(TrackingLink.faturamento)).limit(limit).all()
+        
+        result = []
+        for link in meus_links:
+            # Busca pedidos para breakdown
+            pedidos = db.query(Pedido).filter(
+                Pedido.tracking_id == link.id,
+                Pedido.status.in_(['paid', 'approved', 'active'])
+            ).all()
+            
+            # 🔥 Busca preço do Order Bump do bot
+            bump_config = db.query(OrderBumpConfig).filter(
+                OrderBumpConfig.bot_id == link.bot_id
+            ).first()
+            bump_preco = float(bump_config.preco) if bump_config and bump_config.preco else 0.0
+            
+            normais_fat = 0.0
+            normais_v = 0
+            upsell_fat = 0.0
+            upsell_v = 0
+            downsell_fat = 0.0
+            downsell_v = 0
+            remarketing_fat = 0.0
+            remarketing_v = 0
+            disparo_auto_fat = 0.0
+            disparo_auto_v = 0
+            order_bump_fat = 0.0
+            order_bump_v = 0
+            
+            for p in pedidos:
+                nome_lower = str(p.plano_nome or "").lower()
+                origem = str(p.origem or "").lower()
+                valor = float(p.valor or 0)
+                
+                # 🔥 Se tem Order Bump, separa o faturamento do bump
+                if p.tem_order_bump and bump_preco > 0:
+                    order_bump_v += 1
+                    order_bump_fat += bump_preco
+                    valor = valor - bump_preco
+                
+                if "upsell:" in nome_lower:
+                    upsell_v += 1
+                    upsell_fat += valor
+                elif "downsell:" in nome_lower:
+                    downsell_v += 1
+                    downsell_fat += valor
+                elif origem == 'remarketing' or "(oferta)" in nome_lower:
+                    remarketing_v += 1
+                    remarketing_fat += valor
+                elif origem == 'disparo_auto' or "(oferta automática)" in nome_lower:
+                    disparo_auto_v += 1
+                    disparo_auto_fat += valor
+                else:
+                    normais_v += 1
+                    normais_fat += valor
+            
+            total_vendas = normais_v + upsell_v + downsell_v + remarketing_v + disparo_auto_v + order_bump_v
+            total_fat = normais_fat + upsell_fat + downsell_fat + remarketing_fat + disparo_auto_fat + order_bump_fat
+            
+            # 🔥 CORREÇÃO MESTRE: Lógica infalível para conversão
+            leads_count = getattr(link, 'leads', 0) or 0
+            base_calculo = leads_count if leads_count > 0 else (link.clicks or 0)
+            conversao = round((total_vendas / base_calculo * 100), 2) if base_calculo > 0 else 0.0
+            
+            result.append({
+                "id": link.id,
+                "codigo": link.codigo,
+                "nome": link.nome,
+                "cliques": link.clicks or 0,
+                "leads": leads_count,
+                "vendas_total": total_vendas,
+                "faturamento_total": round(total_fat, 2),
+                "conversao": conversao,
+                "breakdown": {
+                    "normais": {"vendas": normais_v, "faturamento": round(normais_fat, 2)},
+                    "upsell": {"vendas": upsell_v, "faturamento": round(upsell_fat, 2)},
+                    "downsell": {"vendas": downsell_v, "faturamento": round(downsell_fat, 2)},
+                    "remarketing": {"vendas": remarketing_v, "faturamento": round(remarketing_fat, 2)},
+                    "disparo_auto": {"vendas": disparo_auto_v, "faturamento": round(disparo_auto_fat, 2)},
+                    "order_bump": {"vendas": order_bump_v, "faturamento": round(order_bump_fat, 2)}
+                }
+            })
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Erro tracking ranking: {e}")
+        return []
+
+# =========================================================
+# 🧩 ROTAS DE PASSOS DINÂMICOS (FLOW V2)
+# =========================================================
+@app.get("/api/admin/bots/{bot_id}/flow/steps")
+def listar_passos_flow(bot_id: int, db: Session = Depends(get_db)):
+    return db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
+
+@app.post("/api/admin/bots/{bot_id}/flow/steps")
+def adicionar_passo_flow(bot_id: int, payload: FlowStepCreate, db: Session = Depends(get_db)):
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot: raise HTTPException(404, "Bot não encontrado")
+    
+    # Cria o novo passo
+    novo_passo = BotFlowStep(
+        bot_id=bot_id, step_order=payload.step_order,
+        msg_texto=payload.msg_texto, msg_media=payload.msg_media,
+        btn_texto=payload.btn_texto
+    )
+    db.add(novo_passo)
+    db.commit()
+    return {"status": "success"}
+
+@app.put("/api/admin/bots/{bot_id}/flow/steps/{step_id}")
+def atualizar_passo_flow(bot_id: int, step_id: int, dados: FlowStepUpdate, db: Session = Depends(get_db)):
+    """Atualiza um passo intermediário existente"""
+    passo = db.query(BotFlowStep).filter(
+        BotFlowStep.id == step_id,
+        BotFlowStep.bot_id == bot_id
+    ).first()
+    
+    if not passo:
+        raise HTTPException(status_code=404, detail="Passo não encontrado")
+    
+    # Atualiza apenas os campos enviados
+    if dados.msg_texto is not None:
+        passo.msg_texto = dados.msg_texto
+    if dados.msg_media is not None:
+        passo.msg_media = dados.msg_media
+    if dados.btn_texto is not None:
+        passo.btn_texto = dados.btn_texto
+    if dados.autodestruir is not None:
+        passo.autodestruir = dados.autodestruir
+    if dados.mostrar_botao is not None:
+        passo.mostrar_botao = dados.mostrar_botao
+    if dados.delay_seconds is not None:
+        passo.delay_seconds = dados.delay_seconds
+    
+    db.commit()
+    db.refresh(passo)
+    return {"status": "success", "passo": passo}
+
+
+@app.delete("/api/admin/bots/{bot_id}/flow/steps/{sid}")
+def remover_passo_flow(bot_id: int, sid: int, db: Session = Depends(get_db)):
+    passo = db.query(BotFlowStep).filter(BotFlowStep.id == sid, BotFlowStep.bot_id == bot_id).first()
+    if passo:
+        db.delete(passo)
+        db.commit()
+    return {"status": "deleted"}
 
 # =========================================================
 # 📱 ROTAS DE MINI APP (LOJA VIRTUAL) & GESTÃO DE MODO
@@ -18434,86 +19260,6 @@ def resolve_report(
     logger.info(f"✅ [REPORT] Denúncia #{report_id} resolvida | Ação: {data.action} | Por: {current_user.username}")
     
     return {"status": "success", "message": f"Denúncia resolvida com ação: {data.action}"}
-
-
-# =========================================================
-# 🔄 REVERTER PUNIÇÃO DE DENÚNCIA
-# =========================================================
-@app.put("/api/superadmin/reports/{report_id}/revert")
-def revert_report_punishment(
-    report_id: int,
-    data: dict = Body(...),
-    db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Reverte a punição aplicada a uma denúncia"""
-    if not getattr(current_user, 'is_superuser', False):
-        raise HTTPException(403, "Acesso negado")
-    
-    report = db.query(Report).filter(Report.id == report_id).first()
-    if not report:
-        raise HTTPException(404, "Denúncia não encontrada")
-    
-    if report.status != 'resolved':
-        raise HTTPException(400, "Apenas denúncias resolvidas podem ser revertidas")
-    
-    # Encontrar o usuário punido
-    user_target = None
-    if getattr(report, 'owner_id', None):
-        user_target = db.query(User).filter(User.id == report.owner_id).first()
-    elif report.bot_id:
-        bot = db.query(BotModel).filter(BotModel.id == report.bot_id).first()
-        if bot and bot.owner_id:
-            user_target = db.query(User).filter(User.id == bot.owner_id).first()
-    
-    action_reverted = report.action_taken
-    
-    if user_target and action_reverted:
-        if action_reverted == 'strike':
-            if user_target.strike_count and user_target.strike_count > 0:
-                user_target.strike_count -= 1
-            # Remove o strike do banco
-            strike = db.query(UserStrike).filter(
-                UserStrike.report_id == report.id,
-                UserStrike.user_id == user_target.id
-            ).first()
-            if strike:
-                db.delete(strike)
-                
-        elif action_reverted == 'pause_bots':
-            user_target.bots_paused_until = None
-            if user_target.strike_count and user_target.strike_count > 0:
-                user_target.strike_count -= 1
-            strike = db.query(UserStrike).filter(
-                UserStrike.report_id == report.id,
-                UserStrike.user_id == user_target.id
-            ).first()
-            if strike:
-                db.delete(strike)
-                
-        elif action_reverted == 'ban_account':
-            user_target.is_banned = False
-            user_target.banned_reason = None
-            user_target.is_active = True
-            # Verificar se o ban foi por 3 strikes — se sim, reduzir
-            if user_target.strike_count and user_target.strike_count >= 3:
-                user_target.strike_count = 2
-    
-    # Atualizar status da denúncia
-    reason = data.get('reason', 'Punição revertida pelo administrador')
-    report.status = 'reverted'
-    report.resolution = f"[REVERTIDO] {reason} (anterior: {report.resolution or 'N/A'})"
-    report.action_taken = None
-    
-    db.commit()
-    
-    logger.info(f"🔄 [REPORT] Denúncia #{report_id} REVERTIDA | Ação revertida: {action_reverted} | Por: {current_user.username}")
-    
-    return {
-        "status": "success", 
-        "message": f"Punição '{action_reverted}' revertida com sucesso",
-        "action_reverted": action_reverted
-    }
 
 
 # ============================================================
