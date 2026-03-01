@@ -14619,7 +14619,7 @@ def advanced_statistics(
         
         # === TOP 5 BOTS ===
         top_bots = []
-        if not bot_id:
+        try:
             bots_count = {}
             for v in vendas:
                 bid = v.bot_id
@@ -14628,11 +14628,12 @@ def advanced_statistics(
                         bot_obj = db.query(BotModel).filter(BotModel.id == bid).first()
                         bots_count[bid] = {"name": bot_obj.nome if bot_obj else f"Bot #{bid}", "count": 0, "revenue": 0}
                     bots_count[bid]["count"] += 1
-                    if is_super_split:
+                    if is_super_split and not bot_id:
                         bots_count[bid]["revenue"] += taxa_centavos
                     else:
                         bots_count[bid]["revenue"] += int((v.valor or 0) * 100)
             top_bots = sorted(bots_count.values(), key=lambda x: x["count"], reverse=True)[:5]
+        except: pass
 
         # === DIÁRIO DE MUDANÇAS ===
         try:

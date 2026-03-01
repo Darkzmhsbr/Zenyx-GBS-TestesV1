@@ -70,6 +70,12 @@ class User(Base):
     plano_plataforma = Column(String, default="free")  # 'free', 'vip', 'enterprise'
     max_bots = Column(Integer, default=20)             # Limite de bots (Free=20, VIP=100, Enterprise=ilimitado)
 
+    # 🚨 SISTEMA DE PUNIÇÕES / DENÚNCIAS
+    is_banned = Column(Boolean, default=False)                        # Banido permanente
+    banned_reason = Column(String, nullable=True)                     # Motivo do ban
+    bots_paused_until = Column(DateTime(timezone=True), nullable=True) # Bots pausados até esta data
+    strike_count = Column(Integer, default=0)                          # Strikes acumulados
+
     # RELACIONAMENTO: Um usuário possui vários bots
     bots = relationship("Bot", back_populates="owner")
     
