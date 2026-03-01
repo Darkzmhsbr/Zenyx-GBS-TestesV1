@@ -14918,7 +14918,6 @@ def _empty_statistics():
         "periodo":{"inicio":"","fim":"","label":"30d"}
     }
 
-
 # =========================================================
 # 💸 WEBHOOK DE PAGAMENTO (BLINDADO E TAGARELA)
 # =========================================================
