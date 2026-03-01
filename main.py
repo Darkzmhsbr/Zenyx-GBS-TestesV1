@@ -14593,8 +14593,8 @@ def advanced_statistics(
             Pedido.data_aprovacao >= cal_start,
             Pedido.data_aprovacao <= cal_end,
         )
-        if bot_ids:
-            vendas_cal_query = vendas_cal_query.filter(Pedido.bot_id.in_(bot_ids))
+        if bots_ids:
+            vendas_cal_query = vendas_cal_query.filter(Pedido.bot_id.in_(bots_ids))
         vendas_cal = vendas_cal_query.all()
             
         import calendar as cal_module
