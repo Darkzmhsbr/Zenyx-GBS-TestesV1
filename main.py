@@ -14596,9 +14596,6 @@ def advanced_statistics(
         if bots_ids:
             vendas_cal_query = vendas_cal_query.filter(Pedido.bot_id.in_(bots_ids))
         vendas_cal = vendas_cal_query.all()
-            
-        import calendar as cal_module
-        dias_no_mes = cal_module.monthrange(hoje.year, hoje.month)[1]
         
         calendario = []
         for dia_num in range(1, dias_no_mes + 1):
