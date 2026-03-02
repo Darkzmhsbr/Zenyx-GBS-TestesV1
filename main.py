@@ -17601,7 +17601,6 @@ def clonar_funil(
         if dados.bot_origem_id == dados.bot_destino_id:
             raise HTTPException(400, "Bot de origem e destino devem ser diferentes")
         
-        # Verificar faturamento mínimo (R$ 100) - exceto superadmin
         if not current_user.is_superuser:
             user_bots = db.query(BotModel.id).filter(BotModel.owner_id == current_user.id).all()
             bots_ids = [b.id for b in user_bots]
@@ -17612,73 +17611,154 @@ def clonar_funil(
         
         resultados = []
         
+        # 1. CLONAR PLANOS
         if dados.clonar_planos:
             planos_origem = db.query(PlanoConfig).filter(PlanoConfig.bot_id == dados.bot_origem_id).all()
             db.query(PlanoConfig).filter(PlanoConfig.bot_id == dados.bot_destino_id).delete()
             for p in planos_origem:
+                import uuid
                 novo = PlanoConfig(
-                    bot_id=dados.bot_destino_id, nome_exibicao=p.nome_exibicao, valor=p.valor,
-                    duracao_dias=p.duracao_dias, descricao=p.descricao, ativo=p.ativo,
-                    ordem=getattr(p, 'ordem', 0), is_destaque=getattr(p, 'is_destaque', False),
-                    emoji=getattr(p, 'emoji', None),
+                    bot_id=dados.bot_destino_id,
+                    nome_exibicao=p.nome_exibicao,
+                    descricao=p.descricao,
+                    preco_atual=p.preco_atual,
+                    preco_cheio=getattr(p, 'preco_cheio', None),
+                    dias_duracao=p.dias_duracao,
+                    is_lifetime=getattr(p, 'is_lifetime', False),
+                    key_id=f"clone_{uuid.uuid4().hex[:8]}",
+                    id_canal_destino=getattr(p, 'id_canal_destino', None),
                 )
                 db.add(novo)
             resultados.append(f"✅ {len(planos_origem)} planos clonados")
         
+        # 2. CLONAR FLOW
         if dados.clonar_flow:
             flow_origem = db.query(BotFlow).filter(BotFlow.bot_id == dados.bot_origem_id).first()
             if flow_origem:
                 db.query(BotFlow).filter(BotFlow.bot_id == dados.bot_destino_id).delete()
                 db.query(BotFlowStep).filter(BotFlowStep.bot_id == dados.bot_destino_id).delete()
-                novo_flow = BotFlow(bot_id=dados.bot_destino_id, msg_boas_vindas=flow_origem.msg_boas_vindas,
-                    btn_text_1=getattr(flow_origem, 'btn_text_1', None), btn_text_2=getattr(flow_origem, 'btn_text_2', None))
+                novo_flow = BotFlow(
+                    bot_id=dados.bot_destino_id,
+                    msg_boas_vindas=flow_origem.msg_boas_vindas,
+                    media_url=getattr(flow_origem, 'media_url', None),
+                    btn_text_1=getattr(flow_origem, 'btn_text_1', None),
+                    start_mode=getattr(flow_origem, 'start_mode', 'padrao'),
+                    miniapp_url=getattr(flow_origem, 'miniapp_url', None),
+                    miniapp_btn_text=getattr(flow_origem, 'miniapp_btn_text', None),
+                    autodestruir_1=getattr(flow_origem, 'autodestruir_1', False),
+                    mostrar_planos_1=getattr(flow_origem, 'mostrar_planos_1', True),
+                    buttons_config=getattr(flow_origem, 'buttons_config', None),
+                )
                 db.add(novo_flow)
                 steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == dados.bot_origem_id).all()
                 for s in steps:
-                    db.add(BotFlowStep(bot_id=dados.bot_destino_id, step_order=s.step_order, message_text=s.message_text,
-                        media_url=getattr(s, 'media_url', None), media_type=getattr(s, 'media_type', None),
-                        delay_seconds=getattr(s, 'delay_seconds', 0)))
+                    db.add(BotFlowStep(
+                        bot_id=dados.bot_destino_id,
+                        step_order=s.step_order,
+                        msg_texto=s.msg_texto,
+                        msg_media=getattr(s, 'msg_media', None),
+                        btn_texto=getattr(s, 'btn_texto', 'Próximo ▶️'),
+                        buttons_config=getattr(s, 'buttons_config', None),
+                        autodestruir=getattr(s, 'autodestruir', False),
+                        mostrar_botao=getattr(s, 'mostrar_botao', True),
+                        delay_seconds=getattr(s, 'delay_seconds', 0),
+                    ))
                 resultados.append(f"✅ Flow + {len(steps)} steps clonados")
         
+        # 3. CLONAR REMARKETING CONFIG
         if dados.clonar_remarketing:
             rmk = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == dados.bot_origem_id).first()
             if rmk:
                 db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == dados.bot_destino_id).delete()
-                db.add(RemarketingConfig(bot_id=dados.bot_destino_id, enabled=rmk.enabled,
-                    interval_hours=getattr(rmk, 'interval_hours', 24), max_attempts=getattr(rmk, 'max_attempts', 3)))
-                msgs = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == dados.bot_origem_id).all()
+                novo_rmk = RemarketingConfig(
+                    bot_id=dados.bot_destino_id,
+                    is_active=rmk.is_active,
+                    message_text=rmk.message_text,
+                    media_url=getattr(rmk, 'media_url', None),
+                )
+                # Copiar todos os campos extras que existirem
+                for attr in ['media_type', 'interval_hours', 'max_attempts', 'audio_url']:
+                    if hasattr(rmk, attr):
+                        setattr(novo_rmk, attr, getattr(rmk, attr))
+                db.add(novo_rmk)
+                
+                # Mensagens alternadas
+                alt_msgs = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == dados.bot_origem_id).all()
                 db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == dados.bot_destino_id).delete()
-                for m in msgs:
-                    db.add(AlternatingMessages(bot_id=dados.bot_destino_id, message_text=m.message_text,
-                        media_url=getattr(m, 'media_url', None), media_type=getattr(m, 'media_type', None),
-                        ordem=getattr(m, 'ordem', 0)))
-                resultados.append(f"✅ Remarketing + {len(msgs)} mensagens clonadas")
+                for m in alt_msgs:
+                    nova = AlternatingMessages(
+                        bot_id=dados.bot_destino_id,
+                        is_active=m.is_active,
+                        messages=m.messages,
+                    )
+                    for attr in ['interval_minutes', 'start_delay_minutes']:
+                        if hasattr(m, attr):
+                            setattr(nova, attr, getattr(m, attr))
+                    db.add(nova)
+                resultados.append(f"✅ Remarketing + {len(alt_msgs)} configs clonadas")
         
+        # 4. CLONAR ORDER BUMP
         if dados.clonar_orderbump:
             ob = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == dados.bot_origem_id).first()
             if ob:
                 db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == dados.bot_destino_id).delete()
-                db.add(OrderBumpConfig(bot_id=dados.bot_destino_id, enabled=ob.enabled,
-                    titulo=getattr(ob, 'titulo', None), descricao=getattr(ob, 'descricao', None),
-                    valor=ob.valor, duracao_extra_dias=getattr(ob, 'duracao_extra_dias', 0)))
+                db.add(OrderBumpConfig(
+                    bot_id=dados.bot_destino_id,
+                    ativo=ob.ativo,
+                    nome_produto=ob.nome_produto,
+                    preco=ob.preco,
+                    link_acesso=getattr(ob, 'link_acesso', None),
+                    msg_texto=getattr(ob, 'msg_texto', None),
+                    msg_media=getattr(ob, 'msg_media', None),
+                    audio_url=getattr(ob, 'audio_url', None),
+                    audio_delay_seconds=getattr(ob, 'audio_delay_seconds', 3),
+                    btn_aceitar=getattr(ob, 'btn_aceitar', '✅ SIM'),
+                    btn_recusar=getattr(ob, 'btn_recusar', '❌ NÃO'),
+                    autodestruir=getattr(ob, 'autodestruir', False),
+                    group_id=getattr(ob, 'group_id', None),
+                ))
                 resultados.append("✅ Order Bump clonado")
         
+        # 5. CLONAR UPSELL
         if dados.clonar_upsell:
             up = db.query(UpsellConfig).filter(UpsellConfig.bot_id == dados.bot_origem_id).first()
             if up:
                 db.query(UpsellConfig).filter(UpsellConfig.bot_id == dados.bot_destino_id).delete()
-                db.add(UpsellConfig(bot_id=dados.bot_destino_id, enabled=up.enabled,
-                    titulo=getattr(up, 'titulo', None), descricao=getattr(up, 'descricao', None),
-                    valor=up.valor, duracao_dias=getattr(up, 'duracao_dias', 0)))
+                db.add(UpsellConfig(
+                    bot_id=dados.bot_destino_id,
+                    ativo=up.ativo,
+                    nome_produto=up.nome_produto,
+                    preco=up.preco,
+                    link_acesso=getattr(up, 'link_acesso', None),
+                    delay_minutos=getattr(up, 'delay_minutos', 2),
+                    msg_texto=getattr(up, 'msg_texto', None),
+                    msg_media=getattr(up, 'msg_media', None),
+                    audio_url=getattr(up, 'audio_url', None),
+                    audio_delay_seconds=getattr(up, 'audio_delay_seconds', 3),
+                    btn_aceitar=getattr(up, 'btn_aceitar', '✅ QUERO'),
+                    group_id=getattr(up, 'group_id', None),
+                ))
                 resultados.append("✅ Upsell clonado")
         
+        # 6. CLONAR DOWNSELL
         if dados.clonar_downsell:
             ds = db.query(DownsellConfig).filter(DownsellConfig.bot_id == dados.bot_origem_id).first()
             if ds:
                 db.query(DownsellConfig).filter(DownsellConfig.bot_id == dados.bot_destino_id).delete()
-                db.add(DownsellConfig(bot_id=dados.bot_destino_id, enabled=ds.enabled,
-                    titulo=getattr(ds, 'titulo', None), descricao=getattr(ds, 'descricao', None),
-                    valor=ds.valor, duracao_dias=getattr(ds, 'duracao_dias', 0)))
+                db.add(DownsellConfig(
+                    bot_id=dados.bot_destino_id,
+                    ativo=ds.ativo,
+                    nome_produto=ds.nome_produto,
+                    preco=ds.preco,
+                    link_acesso=getattr(ds, 'link_acesso', None),
+                    delay_minutos=getattr(ds, 'delay_minutos', 10),
+                    msg_texto=getattr(ds, 'msg_texto', None),
+                    msg_media=getattr(ds, 'msg_media', None),
+                    audio_url=getattr(ds, 'audio_url', None),
+                    audio_delay_seconds=getattr(ds, 'audio_delay_seconds', 3),
+                    btn_aceitar=getattr(ds, 'btn_aceitar', '✅ QUERO'),
+                    group_id=getattr(ds, 'group_id', None),
+                ))
                 resultados.append("✅ Downsell clonado")
         
         db.commit()
