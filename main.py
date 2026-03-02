@@ -17459,14 +17459,11 @@ def get_recursos_prime(
 ):
     """
     Retorna o faturamento total do usuário e quais recursos estão desbloqueados.
-    O faturamento é calculado em tempo real a partir dos pedidos pagos.
     """
     try:
-        # Buscar bots do usuário
         user_bots = db.query(BotModel.id).filter(BotModel.owner_id == current_user.id).all()
         bots_ids = [b.id for b in user_bots]
         
-        # Calcular faturamento total (TODOS os tempos, em centavos)
         faturamento_total = 0
         total_vendas = 0
         if bots_ids:
@@ -17477,9 +17474,8 @@ def get_recursos_prime(
             faturamento_total = sum(int((p.valor or 0) * 100) for p in vendas)
             total_vendas = len(vendas)
         
-        faturamento_reais = faturamento_total / 100  # Em reais para comparação com metas
+        faturamento_reais = faturamento_total / 100
         
-        # Definição dos recursos e metas (valores em REAIS)
         recursos = [
             {
                 "id": "projecao_receita",
@@ -17489,7 +17485,7 @@ def get_recursos_prime(
                 "meta_reais": 0,
                 "cor": "#22c55e",
                 "status": "disponivel",
-                "rota": "/recursos-prime/projecao"
+                "implementado": True
             },
             {
                 "id": "clonador_funil",
@@ -17499,7 +17495,7 @@ def get_recursos_prime(
                 "meta_reais": 100,
                 "cor": "#3b82f6",
                 "status": "disponivel" if faturamento_reais >= 100 else "bloqueado",
-                "rota": "/recursos-prime/clonador-funil"
+                "implementado": True
             },
             {
                 "id": "clonador_previas",
@@ -17509,7 +17505,7 @@ def get_recursos_prime(
                 "meta_reais": 500,
                 "cor": "#c333ff",
                 "status": "disponivel" if faturamento_reais >= 500 else "bloqueado",
-                "rota": "/recursos-prime/clonador"
+                "implementado": False
             },
             {
                 "id": "remarketing_inteligente",
@@ -17519,7 +17515,7 @@ def get_recursos_prime(
                 "meta_reais": 1000,
                 "cor": "#f59e0b",
                 "status": "disponivel" if faturamento_reais >= 1000 else "bloqueado",
-                "rota": "/recursos-prime/remarketing-ia"
+                "implementado": False
             },
             {
                 "id": "analisador_concorrentes",
@@ -17529,7 +17525,7 @@ def get_recursos_prime(
                 "meta_reais": 2000,
                 "cor": "#ef4444",
                 "status": "disponivel" if faturamento_reais >= 2000 else "bloqueado",
-                "rota": "/recursos-prime/analisador"
+                "implementado": False
             },
             {
                 "id": "multi_gateway",
@@ -17539,7 +17535,7 @@ def get_recursos_prime(
                 "meta_reais": 5000,
                 "cor": "#06b6d4",
                 "status": "disponivel" if faturamento_reais >= 5000 else "bloqueado",
-                "rota": "/recursos-prime/multi-gateway"
+                "implementado": False
             },
             {
                 "id": "anti_vazamento",
@@ -17549,23 +17545,16 @@ def get_recursos_prime(
                 "meta_reais": 10000,
                 "cor": "#8b5cf6",
                 "status": "disponivel" if faturamento_reais >= 10000 else "bloqueado",
-                "rota": "/recursos-prime/anti-vazamento"
+                "implementado": False
             }
         ]
         
-        # Calcular progresso
         desbloqueados = sum(1 for r in recursos if r["status"] == "disponivel")
-        total_recursos = len(recursos)
         
-        # Próxima meta
         proxima_meta = None
         for r in recursos:
             if r["status"] == "bloqueado":
-                proxima_meta = {
-                    "nome": r["nome"],
-                    "meta_reais": r["meta_reais"],
-                    "falta_reais": round(r["meta_reais"] - faturamento_reais, 2)
-                }
+                proxima_meta = {"nome": r["nome"], "meta_reais": r["meta_reais"], "falta_reais": round(r["meta_reais"] - faturamento_reais, 2)}
                 break
         
         return {
@@ -17575,13 +17564,13 @@ def get_recursos_prime(
             "total_vendas": total_vendas,
             "recursos": recursos,
             "desbloqueados": desbloqueados,
-            "total_recursos": total_recursos,
+            "total_recursos": len(recursos),
             "proxima_meta": proxima_meta
         }
-        
     except Exception as e:
         logger.error(f"❌ Erro recursos prime: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # =========================================================
 # 🔁 CLONADOR DE FUNIL — COPIAR CONFIGURAÇÃO ENTRE BOTS
@@ -17604,172 +17593,98 @@ def clonar_funil(
 ):
     """Clona toda a configuração/estratégia de vendas de um bot para outro."""
     try:
-        # Verificar propriedade dos dois bots
-        bot_origem = db.query(BotModel).filter(
-            BotModel.id == dados.bot_origem_id,
-            BotModel.owner_id == current_user.id
-        ).first()
-        bot_destino = db.query(BotModel).filter(
-            BotModel.id == dados.bot_destino_id,
-            BotModel.owner_id == current_user.id
-        ).first()
+        bot_origem = db.query(BotModel).filter(BotModel.id == dados.bot_origem_id, BotModel.owner_id == current_user.id).first()
+        bot_destino = db.query(BotModel).filter(BotModel.id == dados.bot_destino_id, BotModel.owner_id == current_user.id).first()
         
         if not bot_origem or not bot_destino:
             raise HTTPException(404, "Bot de origem ou destino não encontrado")
-        
         if dados.bot_origem_id == dados.bot_destino_id:
             raise HTTPException(400, "Bot de origem e destino devem ser diferentes")
         
-        # Verificar faturamento mínimo (R$ 100)
-        user_bots = db.query(BotModel.id).filter(BotModel.owner_id == current_user.id).all()
-        bots_ids = [b.id for b in user_bots]
-        vendas = db.query(Pedido).filter(
-            Pedido.bot_id.in_(bots_ids),
-            Pedido.status.in_(['paid', 'approved', 'active', 'expired'])
-        ).all()
-        fat_total = sum((p.valor or 0) for p in vendas)
-        if fat_total < 100 and not current_user.is_superuser:
-            raise HTTPException(403, "Recurso bloqueado. Faturamento mínimo: R$ 100,00")
+        # Verificar faturamento mínimo (R$ 100) - exceto superadmin
+        if not current_user.is_superuser:
+            user_bots = db.query(BotModel.id).filter(BotModel.owner_id == current_user.id).all()
+            bots_ids = [b.id for b in user_bots]
+            vendas = db.query(Pedido).filter(Pedido.bot_id.in_(bots_ids), Pedido.status.in_(['paid', 'approved', 'active', 'expired'])).all()
+            fat_total = sum((p.valor or 0) for p in vendas)
+            if fat_total < 100:
+                raise HTTPException(403, "Recurso bloqueado. Faturamento mínimo: R$ 100,00")
         
         resultados = []
         
-        # 1. CLONAR PLANOS
         if dados.clonar_planos:
             planos_origem = db.query(PlanoConfig).filter(PlanoConfig.bot_id == dados.bot_origem_id).all()
-            # Remover planos antigos do destino
             db.query(PlanoConfig).filter(PlanoConfig.bot_id == dados.bot_destino_id).delete()
             for p in planos_origem:
                 novo = PlanoConfig(
-                    bot_id=dados.bot_destino_id,
-                    nome_exibicao=p.nome_exibicao,
-                    valor=p.valor,
-                    duracao_dias=p.duracao_dias,
-                    descricao=p.descricao,
-                    ativo=p.ativo,
-                    ordem=getattr(p, 'ordem', 0),
-                    is_destaque=getattr(p, 'is_destaque', False),
+                    bot_id=dados.bot_destino_id, nome_exibicao=p.nome_exibicao, valor=p.valor,
+                    duracao_dias=p.duracao_dias, descricao=p.descricao, ativo=p.ativo,
+                    ordem=getattr(p, 'ordem', 0), is_destaque=getattr(p, 'is_destaque', False),
                     emoji=getattr(p, 'emoji', None),
                 )
                 db.add(novo)
             resultados.append(f"✅ {len(planos_origem)} planos clonados")
         
-        # 2. CLONAR FLOW
         if dados.clonar_flow:
             flow_origem = db.query(BotFlow).filter(BotFlow.bot_id == dados.bot_origem_id).first()
             if flow_origem:
-                # Remover flow antigo
                 db.query(BotFlow).filter(BotFlow.bot_id == dados.bot_destino_id).delete()
                 db.query(BotFlowStep).filter(BotFlowStep.bot_id == dados.bot_destino_id).delete()
-                
-                novo_flow = BotFlow(
-                    bot_id=dados.bot_destino_id,
-                    msg_boas_vindas=flow_origem.msg_boas_vindas,
-                    btn_text_1=getattr(flow_origem, 'btn_text_1', None),
-                    btn_text_2=getattr(flow_origem, 'btn_text_2', None),
-                )
+                novo_flow = BotFlow(bot_id=dados.bot_destino_id, msg_boas_vindas=flow_origem.msg_boas_vindas,
+                    btn_text_1=getattr(flow_origem, 'btn_text_1', None), btn_text_2=getattr(flow_origem, 'btn_text_2', None))
                 db.add(novo_flow)
-                
-                # Steps
-                steps_origem = db.query(BotFlowStep).filter(BotFlowStep.bot_id == dados.bot_origem_id).all()
-                for s in steps_origem:
-                    novo_step = BotFlowStep(
-                        bot_id=dados.bot_destino_id,
-                        step_order=s.step_order,
-                        message_text=s.message_text,
-                        media_url=getattr(s, 'media_url', None),
-                        media_type=getattr(s, 'media_type', None),
-                        delay_seconds=getattr(s, 'delay_seconds', 0),
-                    )
-                    db.add(novo_step)
-                resultados.append(f"✅ Flow + {len(steps_origem)} steps clonados")
+                steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == dados.bot_origem_id).all()
+                for s in steps:
+                    db.add(BotFlowStep(bot_id=dados.bot_destino_id, step_order=s.step_order, message_text=s.message_text,
+                        media_url=getattr(s, 'media_url', None), media_type=getattr(s, 'media_type', None),
+                        delay_seconds=getattr(s, 'delay_seconds', 0)))
+                resultados.append(f"✅ Flow + {len(steps)} steps clonados")
         
-        # 3. CLONAR REMARKETING CONFIG
         if dados.clonar_remarketing:
-            rmk_origem = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == dados.bot_origem_id).first()
-            if rmk_origem:
+            rmk = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == dados.bot_origem_id).first()
+            if rmk:
                 db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == dados.bot_destino_id).delete()
-                novo_rmk = RemarketingConfig(
-                    bot_id=dados.bot_destino_id,
-                    enabled=rmk_origem.enabled,
-                    interval_hours=getattr(rmk_origem, 'interval_hours', 24),
-                    max_attempts=getattr(rmk_origem, 'max_attempts', 3),
-                )
-                db.add(novo_rmk)
-                
-                # Mensagens alternadas
+                db.add(RemarketingConfig(bot_id=dados.bot_destino_id, enabled=rmk.enabled,
+                    interval_hours=getattr(rmk, 'interval_hours', 24), max_attempts=getattr(rmk, 'max_attempts', 3)))
                 msgs = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == dados.bot_origem_id).all()
                 db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == dados.bot_destino_id).delete()
                 for m in msgs:
-                    nova_msg = AlternatingMessages(
-                        bot_id=dados.bot_destino_id,
-                        message_text=m.message_text,
-                        media_url=getattr(m, 'media_url', None),
-                        media_type=getattr(m, 'media_type', None),
-                        ordem=getattr(m, 'ordem', 0),
-                    )
-                    db.add(nova_msg)
-                resultados.append(f"✅ Config remarketing + {len(msgs)} mensagens clonadas")
+                    db.add(AlternatingMessages(bot_id=dados.bot_destino_id, message_text=m.message_text,
+                        media_url=getattr(m, 'media_url', None), media_type=getattr(m, 'media_type', None),
+                        ordem=getattr(m, 'ordem', 0)))
+                resultados.append(f"✅ Remarketing + {len(msgs)} mensagens clonadas")
         
-        # 4. CLONAR ORDER BUMP
         if dados.clonar_orderbump:
-            ob_origem = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == dados.bot_origem_id).first()
-            if ob_origem:
+            ob = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == dados.bot_origem_id).first()
+            if ob:
                 db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == dados.bot_destino_id).delete()
-                novo_ob = OrderBumpConfig(
-                    bot_id=dados.bot_destino_id,
-                    enabled=ob_origem.enabled,
-                    titulo=getattr(ob_origem, 'titulo', None),
-                    descricao=getattr(ob_origem, 'descricao', None),
-                    valor=ob_origem.valor,
-                    duracao_extra_dias=getattr(ob_origem, 'duracao_extra_dias', 0),
-                )
-                db.add(novo_ob)
+                db.add(OrderBumpConfig(bot_id=dados.bot_destino_id, enabled=ob.enabled,
+                    titulo=getattr(ob, 'titulo', None), descricao=getattr(ob, 'descricao', None),
+                    valor=ob.valor, duracao_extra_dias=getattr(ob, 'duracao_extra_dias', 0)))
                 resultados.append("✅ Order Bump clonado")
         
-        # 5. CLONAR UPSELL
         if dados.clonar_upsell:
-            up_origem = db.query(UpsellConfig).filter(UpsellConfig.bot_id == dados.bot_origem_id).first()
-            if up_origem:
+            up = db.query(UpsellConfig).filter(UpsellConfig.bot_id == dados.bot_origem_id).first()
+            if up:
                 db.query(UpsellConfig).filter(UpsellConfig.bot_id == dados.bot_destino_id).delete()
-                novo_up = UpsellConfig(
-                    bot_id=dados.bot_destino_id,
-                    enabled=up_origem.enabled,
-                    titulo=getattr(up_origem, 'titulo', None),
-                    descricao=getattr(up_origem, 'descricao', None),
-                    valor=up_origem.valor,
-                    duracao_dias=getattr(up_origem, 'duracao_dias', 0),
-                )
-                db.add(novo_up)
+                db.add(UpsellConfig(bot_id=dados.bot_destino_id, enabled=up.enabled,
+                    titulo=getattr(up, 'titulo', None), descricao=getattr(up, 'descricao', None),
+                    valor=up.valor, duracao_dias=getattr(up, 'duracao_dias', 0)))
                 resultados.append("✅ Upsell clonado")
         
-        # 6. CLONAR DOWNSELL
         if dados.clonar_downsell:
-            ds_origem = db.query(DownsellConfig).filter(DownsellConfig.bot_id == dados.bot_origem_id).first()
-            if ds_origem:
+            ds = db.query(DownsellConfig).filter(DownsellConfig.bot_id == dados.bot_origem_id).first()
+            if ds:
                 db.query(DownsellConfig).filter(DownsellConfig.bot_id == dados.bot_destino_id).delete()
-                novo_ds = DownsellConfig(
-                    bot_id=dados.bot_destino_id,
-                    enabled=ds_origem.enabled,
-                    titulo=getattr(ds_origem, 'titulo', None),
-                    descricao=getattr(ds_origem, 'descricao', None),
-                    valor=ds_origem.valor,
-                    duracao_dias=getattr(ds_origem, 'duracao_dias', 0),
-                )
-                db.add(novo_ds)
+                db.add(DownsellConfig(bot_id=dados.bot_destino_id, enabled=ds.enabled,
+                    titulo=getattr(ds, 'titulo', None), descricao=getattr(ds, 'descricao', None),
+                    valor=ds.valor, duracao_dias=getattr(ds, 'duracao_dias', 0)))
                 resultados.append("✅ Downsell clonado")
         
         db.commit()
+        logger.info(f"🔁 [CLONE FUNIL] {current_user.username}: Bot #{dados.bot_origem_id} → Bot #{dados.bot_destino_id}")
         
-        logger.info(f"🔁 [CLONE FUNIL] {current_user.username}: Bot #{dados.bot_origem_id} → Bot #{dados.bot_destino_id} | {len(resultados)} itens")
-        
-        return {
-            "status": "success",
-            "message": f"Funil clonado com sucesso!",
-            "resultados": resultados,
-            "origem": bot_origem.nome,
-            "destino": bot_destino.nome
-        }
-        
+        return {"status": "success", "message": "Funil clonado com sucesso!", "resultados": resultados, "origem": bot_origem.nome, "destino": bot_destino.nome}
     except HTTPException:
         raise
     except Exception as e:
