@@ -17478,6 +17478,16 @@ def get_recursos_prime(
         
         recursos = [
             {
+                "id": "revisao_copy",
+                "nome": "Revisão de Copy",
+                "descricao": "Simule o fluxo completo do seu bot no Telegram: Flow, Remarketing, Order Bump, Upsell e Downsell. Veja exatamente o que seus clientes recebem.",
+                "icone": "MessageSquare",
+                "meta_reais": 0,
+                "cor": "#f97316",
+                "status": "disponivel",
+                "implementado": True
+            },
+            {
                 "id": "projecao_receita",
                 "nome": "Projeção de Receita",
                 "descricao": "Simulador inteligente que projeta seu faturamento futuro com base nos dados reais de vendas. Cenários otimista, realista e conservador.",
@@ -17771,6 +17781,307 @@ def clonar_funil(
         db.rollback()
         logger.error(f"❌ Erro clonar funil: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# =========================================================
+# 🎯 REVISÃO DE COPY — SIMULAÇÃO VIA BOT
+# =========================================================
+class SimularCopyRequest(BaseModel):
+    tipo: str  # flow, remarketing, orderbump, upsell, downsell, canalfree, auto_remarketing
+
+@app.post("/api/admin/recursos-prime/simular-copy/{bot_id}")
+def simular_copy(
+    bot_id: int,
+    req: SimularCopyRequest,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Envia a sequência real configurada para o admin do bot como preview.
+    Lê as configurações existentes e dispara as mensagens pelo bot.
+    """
+    try:
+        verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+        bot_db = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot_db:
+            raise HTTPException(404, "Bot não encontrado")
+        
+        admin_id = bot_db.admin_principal_id
+        if not admin_id:
+            raise HTTPException(400, "Nenhum admin principal configurado. Vá em Config do Bot e defina o Admin.")
+        
+        bot_sender = TeleBot(bot_db.token, threaded=False)
+        protect = getattr(bot_db, 'protect_content', False) or False
+        mensagens_enviadas = 0
+        
+        def enviar_msg(texto, media_url=None, media_type=None, audio_url=None, markup=None, label=""):
+            """Helper para enviar uma mensagem com mídia/texto/botões"""
+            nonlocal mensagens_enviadas
+            
+            texto = (texto or "").replace("{first_name}", "Usuário Teste").replace("{nome}", "Teste").replace("{username}", "@teste").replace("{id}", str(admin_id))
+            texto = convert_premium_emojis(texto)
+            
+            # Áudio separado
+            if audio_url:
+                try:
+                    audio_bytes, _, _ = _download_audio_bytes(audio_url)
+                    bot_sender.send_chat_action(admin_id, 'record_voice')
+                    time.sleep(1)
+                    if audio_bytes:
+                        bot_sender.send_voice(admin_id, audio_bytes, protect_content=protect)
+                    else:
+                        bot_sender.send_voice(admin_id, audio_url, protect_content=protect)
+                    mensagens_enviadas += 1
+                    time.sleep(0.5)
+                except Exception as e:
+                    logger.warning(f"⚠️ [SIMULAR] Áudio falhou: {e}")
+            
+            # Mídia + caption
+            if media_url:
+                try:
+                    url_lower = (media_url or "").lower()
+                    mt = media_type or ""
+                    if mt == 'video' or url_lower.endswith(('.mp4', '.mov')):
+                        bot_sender.send_video(admin_id, media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+                    else:
+                        bot_sender.send_photo(admin_id, media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+                    mensagens_enviadas += 1
+                    return
+                except Exception as e:
+                    logger.warning(f"⚠️ [SIMULAR] Mídia falhou: {e}")
+            
+            # Só texto
+            if texto:
+                bot_sender.send_message(admin_id, texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+                mensagens_enviadas += 1
+        
+        # ===== HEADER =====
+        bot_sender.send_message(admin_id, f"🎯 <b>REVISÃO DE COPY — {req.tipo.upper()}</b>\n\n<i>Simulação do fluxo configurado para o bot {bot_db.nome}.\nAs mensagens abaixo representam exatamente o que seus clientes verão.</i>\n\n{'─' * 30}", parse_mode="HTML")
+        time.sleep(1)
+        
+        # ===== FLOW CHAT =====
+        if req.tipo == "flow":
+            flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+            if not flow:
+                raise HTTPException(400, "Flow não configurado para este bot")
+            
+            # Msg 1 - Boas-vindas
+            markup1 = types.InlineKeyboardMarkup()
+            
+            # Buttons config customizado
+            buttons_cfg = getattr(flow, 'buttons_config', None)
+            if buttons_cfg and isinstance(buttons_cfg, list):
+                for btn_cfg in buttons_cfg:
+                    if btn_cfg.get('type') == 'link':
+                        markup1.add(types.InlineKeyboardButton(btn_cfg.get('text', 'Link'), url=btn_cfg.get('url', '#')))
+                    else:
+                        markup1.add(types.InlineKeyboardButton(btn_cfg.get('text', flow.btn_text_1 or '📋 Ver Planos'), callback_data="sim_noop"))
+            else:
+                markup1.add(types.InlineKeyboardButton(flow.btn_text_1 or "📋 Ver Planos", callback_data="sim_noop"))
+            
+            enviar_msg(flow.msg_boas_vindas, media_url=flow.media_url, markup=markup1, label="Boas-vindas")
+            time.sleep(1.5)
+            
+            # Steps extras
+            steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
+            for i, step in enumerate(steps):
+                delay = min(getattr(step, 'delay_seconds', 0) or 0, 3)
+                time.sleep(max(delay, 1))
+                
+                step_markup = None
+                step_btns = getattr(step, 'buttons_config', None)
+                if step_btns and isinstance(step_btns, list):
+                    step_markup = types.InlineKeyboardMarkup()
+                    for btn in step_btns:
+                        if btn.get('url'):
+                            step_markup.add(types.InlineKeyboardButton(btn.get('text', ''), url=btn['url']))
+                        else:
+                            step_markup.add(types.InlineKeyboardButton(btn.get('text', step.btn_texto or 'Próximo'), callback_data="sim_noop"))
+                elif getattr(step, 'mostrar_botao', True):
+                    step_markup = types.InlineKeyboardMarkup()
+                    step_markup.add(types.InlineKeyboardButton(step.btn_texto or "Próximo ▶️", callback_data="sim_noop"))
+                
+                enviar_msg(step.msg_texto, media_url=step.msg_media, markup=step_markup, label=f"Step {i+1}")
+        
+        # ===== ORDER BUMP =====
+        elif req.tipo == "orderbump":
+            ob = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
+            if not ob:
+                raise HTTPException(400, "Order Bump não configurado para este bot")
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton(ob.btn_aceitar or "✅ SIM", callback_data="sim_noop"))
+            markup.add(types.InlineKeyboardButton(ob.btn_recusar or "❌ NÃO", callback_data="sim_noop"))
+            
+            enviar_msg(
+                ob.msg_texto, 
+                media_url=ob.msg_media, 
+                audio_url=getattr(ob, 'audio_url', None),
+                markup=markup, 
+                label="Order Bump"
+            )
+        
+        # ===== UPSELL =====
+        elif req.tipo == "upsell":
+            up = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
+            if not up:
+                raise HTTPException(400, "Upsell não configurado para este bot")
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton(getattr(up, 'btn_aceitar', '✅ QUERO'), callback_data="sim_noop"))
+            btn_recusar = getattr(up, 'btn_recusar', None)
+            if btn_recusar:
+                markup.add(types.InlineKeyboardButton(btn_recusar, callback_data="sim_noop"))
+            
+            enviar_msg(
+                up.msg_texto,
+                media_url=up.msg_media,
+                audio_url=getattr(up, 'audio_url', None),
+                markup=markup,
+                label="Upsell"
+            )
+        
+        # ===== DOWNSELL =====
+        elif req.tipo == "downsell":
+            ds = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
+            if not ds:
+                raise HTTPException(400, "Downsell não configurado para este bot")
+            
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton(getattr(ds, 'btn_aceitar', '✅ QUERO'), callback_data="sim_noop"))
+            btn_recusar = getattr(ds, 'btn_recusar', None)
+            if btn_recusar:
+                markup.add(types.InlineKeyboardButton(btn_recusar, callback_data="sim_noop"))
+            
+            enviar_msg(
+                ds.msg_texto,
+                media_url=ds.msg_media,
+                audio_url=getattr(ds, 'audio_url', None),
+                markup=markup,
+                label="Downsell"
+            )
+        
+        # ===== CANAL FREE =====
+        elif req.tipo == "canalfree":
+            cf = db.query(CanalFreeConfig).filter(CanalFreeConfig.bot_id == bot_id).first()
+            if not cf:
+                raise HTTPException(400, "Canal Free não configurado para este bot")
+            
+            markup = None
+            btns = cf.buttons if isinstance(cf.buttons, list) else []
+            if btns:
+                markup = types.InlineKeyboardMarkup()
+                for btn in btns:
+                    if btn.get('url'):
+                        markup.add(types.InlineKeyboardButton(btn.get('text', 'Link'), url=btn['url']))
+                    else:
+                        markup.add(types.InlineKeyboardButton(btn.get('text', 'Botão'), callback_data="sim_noop"))
+            
+            enviar_msg(
+                cf.message_text,
+                media_url=cf.media_url,
+                media_type=getattr(cf, 'media_type', None),
+                audio_url=getattr(cf, 'audio_url', None),
+                markup=markup,
+                label="Canal Free"
+            )
+        
+        # ===== REMARKETING (DISPARO AUTOMÁTICO) =====
+        elif req.tipo in ["remarketing", "auto_remarketing"]:
+            rmk = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
+            if not rmk:
+                raise HTTPException(400, "Remarketing não configurado para este bot")
+            
+            # Mensagem principal
+            enviar_msg(
+                rmk.message_text,
+                media_url=rmk.media_url,
+                media_type=getattr(rmk, 'media_type', None),
+                audio_url=getattr(rmk, 'audio_url', None),
+                label="Remarketing Principal"
+            )
+            
+            # Mensagens alternadas
+            alt = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).all()
+            for i, msg in enumerate(alt):
+                time.sleep(1.5)
+                msgs_list = msg.messages if isinstance(msg.messages, list) else []
+                for j, m_text in enumerate(msgs_list[:3]):  # Max 3 por config
+                    if m_text:
+                        enviar_msg(m_text, label=f"Alternada {i+1}.{j+1}")
+                        time.sleep(1)
+        
+        # ===== FLUXO COMPLETO =====
+        elif req.tipo == "completo":
+            # Envia tudo em sequência: flow → orderbump → upsell → downsell
+            # Flow
+            flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+            if flow:
+                markup1 = types.InlineKeyboardMarkup()
+                markup1.add(types.InlineKeyboardButton(flow.btn_text_1 or "📋 Ver Planos", callback_data="sim_noop"))
+                enviar_msg(flow.msg_boas_vindas, media_url=flow.media_url, markup=markup1, label="Flow")
+                time.sleep(2)
+                
+                steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
+                for step in steps:
+                    time.sleep(1.5)
+                    enviar_msg(step.msg_texto, media_url=step.msg_media, label="Flow Step")
+            
+            # OrderBump
+            ob = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
+            if ob and ob.ativo:
+                time.sleep(2)
+                bot_sender.send_message(admin_id, "⏳ <i>— Simulando Order Bump —</i>", parse_mode="HTML")
+                time.sleep(1)
+                ob_markup = types.InlineKeyboardMarkup()
+                ob_markup.add(types.InlineKeyboardButton(ob.btn_aceitar or "✅ SIM", callback_data="sim_noop"))
+                ob_markup.add(types.InlineKeyboardButton(ob.btn_recusar or "❌ NÃO", callback_data="sim_noop"))
+                enviar_msg(ob.msg_texto, media_url=ob.msg_media, audio_url=getattr(ob, 'audio_url', None), markup=ob_markup)
+            
+            # Upsell
+            up = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
+            if up and up.ativo:
+                time.sleep(2)
+                bot_sender.send_message(admin_id, "⏳ <i>— Simulando Upsell —</i>", parse_mode="HTML")
+                time.sleep(1)
+                up_markup = types.InlineKeyboardMarkup()
+                up_markup.add(types.InlineKeyboardButton(getattr(up, 'btn_aceitar', '✅ QUERO'), callback_data="sim_noop"))
+                enviar_msg(up.msg_texto, media_url=up.msg_media, audio_url=getattr(up, 'audio_url', None), markup=up_markup)
+            
+            # Downsell
+            ds = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
+            if ds and ds.ativo:
+                time.sleep(2)
+                bot_sender.send_message(admin_id, "⏳ <i>— Simulando Downsell —</i>", parse_mode="HTML")
+                time.sleep(1)
+                ds_markup = types.InlineKeyboardMarkup()
+                ds_markup.add(types.InlineKeyboardButton(getattr(ds, 'btn_aceitar', '✅ QUERO'), callback_data="sim_noop"))
+                enviar_msg(ds.msg_texto, media_url=ds.msg_media, audio_url=getattr(ds, 'audio_url', None), markup=ds_markup)
+        
+        else:
+            raise HTTPException(400, f"Tipo de simulação inválido: {req.tipo}")
+        
+        # ===== FOOTER =====
+        time.sleep(1)
+        bot_sender.send_message(
+            admin_id,
+            f"{'─' * 30}\n✅ <b>SIMULAÇÃO CONCLUÍDA</b>\n\n📨 {mensagens_enviadas} mensagens enviadas\n🤖 Bot: {bot_db.nome}\n📋 Tipo: {req.tipo.upper()}\n\n<i>Esta foi uma prévia. Seus clientes verão exatamente essas mensagens.</i>",
+            parse_mode="HTML"
+        )
+        
+        logger.info(f"🎯 [SIMULAR-COPY] {current_user.username}: bot={bot_id}, tipo={req.tipo}, msgs={mensagens_enviadas}")
+        
+        return {
+            "status": "success",
+            "message": f"Simulação enviada! {mensagens_enviadas} mensagens para o admin.",
+            "mensagens_enviadas": mensagens_enviadas,
+            "admin_id": admin_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [SIMULAR-COPY] Erro: {str(e)}", exc_info=True)
+        raise HTTPException(500, detail=str(e))
 
 # =========================================================
 # 📁 ROTA DE UPLOAD DE MÍDIA (BACKBLAZE B2)
