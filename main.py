@@ -1753,6 +1753,24 @@ async def verificar_pagamentos_syncpay():
                 async with httpx.AsyncClient() as client:
                     response = await client.get(url, headers=headers, timeout=10)
                 
+                # 🔧 FIX: Se 401, invalidar token em cache e tentar renovar UMA vez
+                if response.status_code == 401:
+                    logger.warning(f"⚠️ [SYNCPAY-POLL] Token expirado para bot {bot.id}. Invalidando e renovando...")
+                    bot.syncpay_access_token = None
+                    bot.syncpay_token_expires_at = None
+                    db.commit()
+                    
+                    # Tentar renovar o token
+                    token = await obter_token_syncpay(bot, db)
+                    if not token:
+                        logger.error(f"❌ [SYNCPAY-POLL] Falha ao renovar token para bot {bot.id}. Verifique client_id/client_secret.")
+                        continue
+                    
+                    # Retry com novo token
+                    headers["Authorization"] = f"Bearer {token}"
+                    async with httpx.AsyncClient() as client:
+                        response = await client.get(url, headers=headers, timeout=10)
+                
                 if response.status_code != 200:
                     logger.warning(f"⚠️ [SYNCPAY-POLL] Erro ao consultar {tx_id}: HTTP {response.status_code}")
                     continue
@@ -3769,7 +3787,7 @@ async def alertar_falha_webhook_critica(retry_item: WebhookRetry, db: Session):
                     # Buscar bot principal (primeiro ativo)
                     bot = db.query(BotModel).filter(BotModel.status == 'ativo').first()
                     if bot:
-                        tb = telebot.TeleBot(bot.token)
+                        tb = telebot.TeleBot(bot.token, threaded=False)
                         tb.send_message(int(admin.telegram_id), alerta, parse_mode="HTML")
                 except Exception as e:
                     logger.error(f"Erro ao enviar alerta para admin {admin.id}: {e}")
@@ -6236,7 +6254,7 @@ def update_own_profile(
 # =========================================================
 def configurar_menu_bot(token):
     try:
-        tb = telebot.TeleBot(token)
+        tb = telebot.TeleBot(token, threaded=False)
         tb.set_my_commands([
             telebot.types.BotCommand("start", "🚀 Iniciar"),
             telebot.types.BotCommand("suporte", "💬 Falar com Suporte"),
@@ -6327,7 +6345,7 @@ def criar_bot(
             webhook_url = f"https://{public_url}/webhook/{novo_bot.token}"
             
             # 2. Conecta na API do Telegram e define o Webhook
-            bot_telegram = telebot.TeleBot(novo_bot.token)
+            bot_telegram = telebot.TeleBot(novo_bot.token, threaded=False)
             bot_telegram.remove_webhook() # Limpa anterior por garantia
             time.sleep(0.5) # Respiro para a API
             bot_telegram.set_webhook(url=webhook_url)
@@ -6471,7 +6489,7 @@ def update_bot(
     if dados.token and dados.token != old_token:
         try:
             logger.info(f"🔄 Detectada troca de token para o bot ID {bot_id}...")
-            new_tb = telebot.TeleBot(dados.token)
+            new_tb = telebot.TeleBot(dados.token, threaded=False)
             bot_info = new_tb.get_me()
             
             changes["token"] = {"old": "***", "new": "*** (alterado)"}
@@ -6483,7 +6501,7 @@ def update_bot(
             bot_db.username = bot_info.username
             
             try:
-                old_tb = telebot.TeleBot(old_token)
+                old_tb = telebot.TeleBot(old_token, threaded=False)
                 old_tb.delete_webhook()
             except: 
                 pass
@@ -6592,7 +6610,7 @@ def clonar_bot(
     
     # 3. Valida o token no Telegram
     try:
-        new_tb = telebot.TeleBot(dados.token)
+        new_tb = telebot.TeleBot(dados.token, threaded=False)
         bot_info = new_tb.get_me()
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Token inválido: {str(e)}")
@@ -6990,7 +7008,7 @@ def deletar_bot(
         # Remove webhook
         try:
             if dados_log["token"]:
-                tb = telebot.TeleBot(dados_log["token"])
+                tb = telebot.TeleBot(dados_log["token"], threaded=False)
                 tb.delete_webhook()
                 logger.info(f"🔗 Webhook removido para bot {bot_id}")
         except Exception as e:
@@ -8964,7 +8982,7 @@ def test_channel_connection(data: ChannelTestRequest, current_user: User = Depen
 
     try:
         # Inicializa o bot temporariamente
-        bot = TeleBot(data.token)
+        bot = TeleBot(data.token, threaded=False)
         
         # 1. Tenta obter informações do chat
         chat = bot.get_chat(data.channel_id)
@@ -12379,7 +12397,7 @@ async def resend_user_access(
         
         # 5. Gerar novo link e enviar
         try:
-            tb = telebot.TeleBot(bot_data.token)
+            tb = telebot.TeleBot(bot_data.token, threaded=False)
             
             try: 
                 canal_id = int(canal_id_str)
@@ -12460,7 +12478,7 @@ async def remove_user_from_vip(user_id: int, db: Session = Depends(get_db)):
         if not bot_data:
             raise HTTPException(404, "Bot não encontrado")
         
-        tb = telebot.TeleBot(bot_data.token)
+        tb = telebot.TeleBot(bot_data.token, threaded=False)
         telegram_id = int(pedido.telegram_id)
         canais_removidos = []
         erros_remocao = []
@@ -12819,7 +12837,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                     elif payload.expiration_mode == "days": data_expiracao = agora + timedelta(days=val)
 
         # --- C. SELEÇÃO DE PÚBLICO ---
-        bot_sender = telebot.TeleBot(bot_db.token)
+        bot_sender = telebot.TeleBot(bot_db.token, threaded=False)
         target = str(payload.target).lower().strip()
         lista_final_ids = []
 
@@ -13252,7 +13270,7 @@ def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Ses
     # 3. Configura Bot
     bot_db = db.query(BotModel).filter(BotModel.id == payload.bot_id).first()
     if not bot_db: raise HTTPException(404, "Bot não encontrado")
-    sender = telebot.TeleBot(bot_db.token)
+    sender = telebot.TeleBot(bot_db.token, threaded=False)
     
     # 4. Botão com preço promocional REAL (usa checkout_promo_ para garantir o valor correto)
     markup = None
@@ -14996,7 +15014,7 @@ async def webhook(req: Request, bg_tasks: BackgroundTasks):
                 if not p.mensagem_enviada:
                     try:
                         bot_data = db.query(BotModel).filter(BotModel.id == p.bot_id).first()
-                        tb = telebot.TeleBot(bot_data.token)
+                        tb = telebot.TeleBot(bot_data.token, threaded=False)
                         
                         # 🔥 Tenta converter para INT. Se falhar (é username), ignora envio automático
                         target_chat_id = None

@@ -24,10 +24,10 @@ if DATABASE_URL:
     engine = create_engine(
         DATABASE_URL,
         poolclass=QueuePool,
-        pool_size=10,
-        max_overflow=20,
-        pool_timeout=30,
-        pool_recycle=300,       # 🔧 Recicla conexões a cada 5 min (Railway pode dropar antes)
+        pool_size=5,            # 🔧 REDUZIDO: De 10 para 5 (Railway tem limite de threads/conexões)
+        max_overflow=10,        # 🔧 REDUZIDO: De 20 para 10 (total máx: 15 conexões)
+        pool_timeout=20,        # 🔧 REDUZIDO: De 30 para 20s (fail-fast em vez de travar)
+        pool_recycle=180,       # 🔧 REDUZIDO: De 300 para 180s (Railway dropa conexões idle rápido)
         pool_pre_ping=True      # 🔧 CRÍTICO: Testa conexão antes de usar (evita "connection closed")
     )
 else:
