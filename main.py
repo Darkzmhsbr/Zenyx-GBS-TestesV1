@@ -216,6 +216,59 @@ def invalidate_premium_emoji_cache():
 # =========================================================
 # 🆓 FUNÇÃO: APROVAR ENTRADA NO CANAL FREE
 # =========================================================
+
+# ============================================================
+# 📅 SUBSTITUIÇÃO DE VARIÁVEIS DE DATA DINÂMICAS
+# Permite usar {DD}, {MM}, {AAAA}, {AA}, {DD/MM/AAAA}, {DD/MM/AA}
+# no texto de remarketing (e outros). Substitui pela data atual BR.
+# ============================================================
+def replace_date_variables(text: str) -> str:
+    """
+    Substitui variáveis de data dinâmicas pela data atual (fuso BR).
+    
+    Variáveis suportadas:
+      {DD}           → dia com 2 dígitos (ex: 05)
+      {MM}           → mês com 2 dígitos (ex: 03)
+      {AAAA}         → ano com 4 dígitos (ex: 2026)
+      {AA}           → ano com 2 dígitos (ex: 26)
+      {DD/MM/AAAA}   → data completa (ex: 05/03/2026)
+      {DD/MM/AA}     → data curta (ex: 05/03/26)
+      {MES}          → nome do mês por extenso (ex: março)
+      {DIA_SEMANA}   → dia da semana (ex: quarta-feira)
+    """
+    if not text or '{' not in text:
+        return text
+    
+    try:
+        agora = datetime.now(tz_br) if tz_br else datetime.now()
+    except:
+        agora = datetime.now()
+    
+    dd = f"{agora.day:02d}"
+    mm = f"{agora.month:02d}"
+    aaaa = str(agora.year)
+    aa = aaaa[-2:]
+    
+    meses_br = {1:'janeiro',2:'fevereiro',3:'março',4:'abril',5:'maio',6:'junho',
+                7:'julho',8:'agosto',9:'setembro',10:'outubro',11:'novembro',12:'dezembro'}
+    dias_br = {0:'segunda-feira',1:'terça-feira',2:'quarta-feira',3:'quinta-feira',
+               4:'sexta-feira',5:'sábado',6:'domingo'}
+    
+    mes_nome = meses_br.get(agora.month, str(agora.month))
+    dia_semana = dias_br.get(agora.weekday(), '')
+    
+    # Substituições (ordem importa: mais específico primeiro)
+    text = text.replace('{DD/MM/AAAA}', f'{dd}/{mm}/{aaaa}')
+    text = text.replace('{DD/MM/AA}', f'{dd}/{mm}/{aa}')
+    text = text.replace('{DD}', dd)
+    text = text.replace('{MM}', mm)
+    text = text.replace('{AAAA}', aaaa)
+    text = text.replace('{AA}', aa)
+    text = text.replace('{MES}', mes_nome)
+    text = text.replace('{DIA_SEMANA}', dia_semana)
+    
+    return text
+
 # ============================================================
 # 🎯 SISTEMA DE SESSÃO DE SIMULAÇÃO DE COPY (IN-MEMORY)
 # Armazena sessões temporárias de simulação interativa.
@@ -314,7 +367,14 @@ def _simcopy_send_step(session_id, step_index=None):
         if buttons:
             markup = types.InlineKeyboardMarkup()
             for btn in buttons:
-                if btn.get('action') == 'next':
+                if btn.get('action') == 'plan' and btn.get('plan_id'):
+                    # Botão de plano - gera PIX fake quando clicado
+                    markup.add(types.InlineKeyboardButton(
+                        btn.get('text', '💎 Plano'),
+                        callback_data=f"simcopy_{session_id}_plan_{btn['plan_id']}"
+                    ))
+                    has_next_button = True  # Plano conta como interação
+                elif btn.get('action') == 'next':
                     # Botão que avança para o próximo passo
                     markup.add(types.InlineKeyboardButton(
                         btn.get('text', 'Próximo ▶️'),
@@ -673,6 +733,7 @@ def alternar_mensagens_pagamento(bot_instance, chat_id, bot_id):
                 # Envia nova mensagem
                 try:
                     mensagem_atual = mensagens[index % len(mensagens)]
+                    mensagem_atual = replace_date_variables(mensagem_atual)
                     msg = bot_instance.send_message(chat_id, mensagem_atual)
                     ultimo_message_id = msg.message_id
                     index += 1
@@ -761,6 +822,9 @@ def enviar_remarketing_automatico(bot_instance, chat_id, bot_id):
         
         # ✨ CONVERTE EMOJIS PREMIUM
         mensagem = convert_premium_emojis(mensagem)
+        
+        # 📅 SUBSTITUI VARIÁVEIS DE DATA DINÂMICAS
+        mensagem = replace_date_variables(mensagem)
         
         # 🔒 Carrega flag de proteção
         _protect_auto = False
@@ -9264,6 +9328,7 @@ async def enviar_oferta_upsell_downsell(bot_token: str, chat_id: int, bot_id: in
         
         # ✨ CONVERTE EMOJIS PREMIUM
         msg_texto = convert_premium_emojis(msg_texto)
+        msg_texto = replace_date_variables(msg_texto)
         
         try:
             # 🔊 COMBO: Se tem audio_url separado, envia áudio primeiro
@@ -10973,8 +11038,96 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             elif data.startswith("simcopy_"):
                 try:
                     parts = data.split("_")
-                    # Format: simcopy_{session_id}_{step_index}
-                    if len(parts) >= 3:
+                    
+                    # Format: simcopy_{session_id}_plan_{plan_id} (seleção de plano)
+                    if len(parts) >= 4 and parts[2] == "plan":
+                        session_id = parts[1]
+                        plan_id = int(parts[3])
+                        
+                        with _simcopy_lock:
+                            session = _simcopy_sessions.get(session_id)
+                        
+                        if session:
+                            try:
+                                # Busca o plano no banco
+                                _db = SessionLocal()
+                                plano = _db.query(PlanoConfig).filter(PlanoConfig.id == plan_id).first()
+                                _db.close()
+                                
+                                if plano:
+                                    bot_s = TeleBot(session['bot_token'], threaded=False)
+                                    admin = session['admin_id']
+                                    protect = session.get('protect', False)
+                                    
+                                    # Gera PIX FAKE (código fictício, sem cobrança real)
+                                    import random, string
+                                    fake_pix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=60))
+                                    fake_txid = f"SIM{random.randint(100000, 999999)}"
+                                    valor_fmt = f"{plano.preco_atual:.2f}".replace('.', ',')
+                                    
+                                    # Usa a mensagem PIX personalizada da sessão ou padrão
+                                    msg_pix_template = session.get('msg_pix_custom', '')
+                                    
+                                    oferta_block = f"💰 Valor: <b>R$ {valor_fmt}</b>"
+                                    
+                                    if msg_pix_template:
+                                        msg_pix = msg_pix_template                                            .replace("{nome}", "Usuário Teste")                                            .replace("{first_name}", "Usuário Teste")                                            .replace("{plano}", plano.nome_exibicao)                                            .replace("{valor}", valor_fmt)                                            .replace("{oferta}", oferta_block)
+                                        
+                                        if "{qrcode}" in msg_pix:
+                                            msg_pix = msg_pix.replace("{qrcode}", f"<pre>{fake_pix}</pre>")
+                                        else:
+                                            msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{fake_pix}</pre>"
+                                    else:
+                                        msg_pix = f"⭐️ <b>Seu pagamento foi gerado:</b>\n\n"
+                                        msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                                        msg_pix += f"{oferta_block}\n\n"
+                                        msg_pix += f"⬇️ Toque para copiar\n\n"
+                                        msg_pix += f"<pre>{fake_pix}</pre>\n\n"
+                                        msg_pix += f"🔐 Pix Copia e Cola:\n"
+                                        msg_pix += f"⚡️ Acesso automático!"
+                                    
+                                    msg_pix = convert_premium_emojis(msg_pix)
+                                    
+                                    # Botão de verificar pagamento (fake, apenas visual)
+                                    markup_pix = types.InlineKeyboardMarkup()
+                                    markup_pix.add(types.InlineKeyboardButton(
+                                        "✅ Verificar Pagamento (Simulação)",
+                                        callback_data=f"simcopy_{session_id}_pix_done"
+                                    ))
+                                    
+                                    bot_s.send_message(admin, msg_pix, parse_mode="HTML", reply_markup=markup_pix, protect_content=protect)
+                            except Exception as e:
+                                logger.error(f"❌ [SIMCOPY] Erro ao gerar PIX fake: {e}")
+                    
+                    # Format: simcopy_{session_id}_pix_done (verificar pagamento fake)
+                    elif len(parts) >= 4 and parts[2] == "pix" and parts[3] == "done":
+                        session_id = parts[1]
+                        with _simcopy_lock:
+                            session = _simcopy_sessions.get(session_id)
+                        if session:
+                            try:
+                                bot_s = TeleBot(session['bot_token'], threaded=False)
+                                admin = session['admin_id']
+                                
+                                bot_s.send_message(
+                                    admin,
+                                    "✅ <b>Pagamento SIMULADO confirmado!</b>\n\n"
+                                    "🎉 Na vida real, o cliente receberia o acesso ao grupo VIP automaticamente neste momento.\n\n"
+                                    f"{'─' * 30}\n\n"
+                                    "✅ <b>Simulação interativa concluída!</b>\n"
+                                    "🎨 Copy personalizada testada com sucesso!",
+                                    parse_mode="HTML"
+                                )
+                                
+                                # Limpa sessão
+                                with _simcopy_lock:
+                                    if session_id in _simcopy_sessions:
+                                        del _simcopy_sessions[session_id]
+                            except Exception as e:
+                                logger.error(f"❌ [SIMCOPY] Erro no pix_done: {e}")
+                    
+                    # Format: simcopy_{session_id}_{step_index} (avançar step normal)
+                    elif len(parts) >= 3:
                         session_id = parts[1]
                         next_step = int(parts[2])
                         
@@ -18125,15 +18278,28 @@ def simular_copy(
             button_mode = custom.get('button_mode', flow.button_mode) if custom else flow.button_mode
             
             # Monta botões da mensagem 1
+            mostrar_planos_1 = custom.get('mostrar_planos_1', flow.mostrar_planos_1) if custom else flow.mostrar_planos_1
             step1_buttons = []
             if button_mode == 'custom' and buttons_cfg and isinstance(buttons_cfg, list):
                 for bc in buttons_cfg:
                     if bc.get('type') == 'link' and bc.get('url'):
                         step1_buttons.append({'text': bc.get('text', 'Link'), 'action': 'link', 'url': bc['url']})
+                    elif bc.get('type') == 'plan' and bc.get('plan_id'):
+                        # Botão de plano customizado
+                        step1_buttons.append({'text': bc.get('text', '💎 Plano'), 'action': 'plan', 'plan_id': bc['plan_id']})
                     else:
                         step1_buttons.append({'text': bc.get('text', btn_1 or '📋 Ver Planos'), 'action': 'next'})
             else:
                 step1_buttons.append({'text': btn_1 or '📋 Ver Planos', 'action': 'next'})
+            
+            # Se mostrar_planos_1, adiciona planos como botões na boas-vindas
+            if mostrar_planos_1 and not (button_mode == 'custom' and buttons_cfg):
+                planos_msg1 = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
+                if planos_msg1:
+                    step1_buttons = []  # Substitui o botão genérico pelos planos
+                    for pl in planos_msg1:
+                        val = f"R$ {pl.preco_atual:.2f}".replace('.', ',')
+                        step1_buttons.append({'text': f"{pl.nome_exibicao} - {val}", 'action': 'plan', 'plan_id': pl.id})
             
             simulation_steps.append({
                 'texto': msg_bv,
@@ -18181,17 +18347,36 @@ def simular_copy(
                         'label': f'Step Extra {i+1}',
                     })
             
-            # Mensagem de oferta final
+            # Mensagem de oferta final COM PLANOS
             msg_2 = custom.get('msg_2_texto') if custom else flow.msg_2_texto
+            mostrar_planos = custom.get('mostrar_planos_2', flow.mostrar_planos_2) if custom else flow.mostrar_planos_2
+            
+            # Busca planos do bot para mostrar como botões
+            planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_id).all()
+            plan_buttons = []
+            if planos:
+                for pl in planos:
+                    val = f"R$ {pl.preco_atual:.2f}".replace('.', ',')
+                    plan_buttons.append({
+                        'text': f"{pl.nome_exibicao} - {val}",
+                        'action': 'plan',
+                        'plan_id': pl.id
+                    })
+            
             if msg_2:
                 simulation_steps.append({
                     'texto': msg_2,
                     'media_url': custom.get('msg_2_media', flow.msg_2_media) if custom else flow.msg_2_media,
                     'audio_url': None,
-                    'buttons': [],
+                    'buttons': plan_buttons if mostrar_planos else [],
                     'autodestruir': False,
                     'label': 'Oferta Final',
+                    'show_plans': mostrar_planos,
                 })
+            elif plan_buttons:
+                # Se não tem msg_2 mas mostrar_planos está ativo na msg 1
+                # Os planos já foram adicionados em step anterior
+                pass
             
             # Mensagem PIX
             msg_pix = custom.get('msg_pix') if custom else flow.msg_pix
@@ -18305,6 +18490,15 @@ def simular_copy(
         # ══════════════════════════════════════════
         # CRIAR SESSÃO E ENVIAR PRIMEIRO PASSO
         # ══════════════════════════════════════════
+        # Busca msg_pix personalizada para usar na geração do PIX fake
+        msg_pix_for_session = ''
+        if custom and custom.get('msg_pix'):
+            msg_pix_for_session = custom['msg_pix']
+        else:
+            flow_for_pix = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+            if flow_for_pix and flow_for_pix.msg_pix:
+                msg_pix_for_session = flow_for_pix.msg_pix
+        
         session_id = _simcopy_create_session(
             steps=simulation_steps,
             bot_token=bot_db.token,
@@ -18312,6 +18506,11 @@ def simular_copy(
             bot_name=bot_db.nome,
             protect=protect
         )
+        
+        # Armazena msg_pix custom na sessão
+        with _simcopy_lock:
+            if session_id in _simcopy_sessions:
+                _simcopy_sessions[session_id]['msg_pix_custom'] = msg_pix_for_session
         
         # Header
         modo = "PERSONALIZADA" if custom else "SALVA"
@@ -20691,56 +20890,6 @@ async def migrate_reports_v3(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
-
-# ============================================================
-# 🔧 MIGRAÇÃO: Fix primeiro_contato para Tempo Médio /START → PAGAMENTO
-# ============================================================
-@app.get("/migrate-fix-primeiro-contato")
-async def migrate_fix_primeiro_contato(db: Session = Depends(get_db)):
-    """
-    Preenche o campo 'primeiro_contato' nos pedidos que não têm,
-    buscando do Lead correspondente ou usando created_at como fallback.
-    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-fix-primeiro-contato
-    """
-    try:
-        from sqlalchemy import text
-        
-        # 1. Pedidos sem primeiro_contato que têm um Lead correspondente
-        result1 = db.execute(text("""
-            UPDATE pedidos p
-            SET primeiro_contato = l.primeiro_contato
-            FROM leads l
-            WHERE p.telegram_id = l.user_id
-            AND p.bot_id = l.bot_id
-            AND p.primeiro_contato IS NULL
-            AND l.primeiro_contato IS NOT NULL
-        """))
-        updated_from_leads = result1.rowcount
-        
-        # 2. Pedidos que AINDA não têm: usa created_at como fallback
-        result2 = db.execute(text("""
-            UPDATE pedidos
-            SET primeiro_contato = created_at
-            WHERE primeiro_contato IS NULL
-            AND created_at IS NOT NULL
-        """))
-        updated_from_created = result2.rowcount
-        
-        db.commit()
-        
-        return {
-            "status": "success",
-            "message": "✅ Migração primeiro_contato concluída!",
-            "details": {
-                "preenchidos_via_lead": updated_from_leads,
-                "preenchidos_via_created_at": updated_from_created,
-                "total_corrigidos": updated_from_leads + updated_from_created
-            }
-        }
-    except Exception as e:
-        db.rollback()
-        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
-
 
 # ============================================================
 # 🔧 MIGRAÇÃO: Copiar credenciais de gateway do primeiro bot para novos bots
