@@ -213,18 +213,12 @@ def invalidate_premium_emoji_cache():
     _premium_emoji_cache_ts = 0
     logger.info("✨ [EMOJI CACHE] Cache invalidado")
 
-# =========================================================
-# 🆓 FUNÇÃO: APROVAR ENTRADA NO CANAL FREE
-# =========================================================
-
 # ============================================================
-# 📅 SUBSTITUIÇÃO DE VARIÁVEIS DE DATA DINÂMICAS
-# Permite usar {DD}, {MM}, {AAAA}, {AA}, {DD/MM/AAAA}, {DD/MM/AA}
-# no texto de remarketing (e outros). Substitui pela data atual BR.
+# 📅 SUBSTITUIÇÃO DE VARIÁVEIS DE DATA DINÂMICAS (VERSÃO DEFINITIVA E UNIFICADA)
 # ============================================================
 def replace_date_variables(text: str) -> str:
     """
-    Substitui variáveis de data dinâmicas pela data atual (fuso BR).
+    Substitui variáveis de data dinâmicas pela data atual (fuso de Brasília).
     
     Variáveis suportadas:
       {DD}           → dia com 2 dígitos (ex: 05)
@@ -236,38 +230,85 @@ def replace_date_variables(text: str) -> str:
       {MES}          → nome do mês por extenso (ex: março)
       {DIA_SEMANA}   → dia da semana (ex: quarta-feira)
     """
-    if not text or '{' not in text:
+    # Se o texto for vazio, ou não for string, ou não tiver '{', ignoramos (ganho de performance)
+    if not text or not isinstance(text, str) or '{' not in text:
         return text
     
+    from datetime import datetime
+    import pytz
+    
+    # Garantimos que a data e hora sejam sempre de Brasília para não ter erro na virada da noite
     try:
-        agora = datetime.now(tz_br) if tz_br else datetime.now()
+        fuso_horario = pytz.timezone('America/Sao_Paulo')
+        agora = datetime.now(fuso_horario)
     except:
-        agora = datetime.now()
+        agora = datetime.now() # Fallback de segurança caso a biblioteca falhe
     
     dd = f"{agora.day:02d}"
     mm = f"{agora.month:02d}"
     aaaa = str(agora.year)
-    aa = aaaa[-2:]
+    aa = str(agora.year)[-2:]
     
-    meses_br = {1:'janeiro',2:'fevereiro',3:'março',4:'abril',5:'maio',6:'junho',
-                7:'julho',8:'agosto',9:'setembro',10:'outubro',11:'novembro',12:'dezembro'}
-    dias_br = {0:'segunda-feira',1:'terça-feira',2:'quarta-feira',3:'quinta-feira',
-               4:'sexta-feira',5:'sábado',6:'domingo'}
+    meses_br = {1:'janeiro', 2:'fevereiro', 3:'março', 4:'abril', 5:'maio', 6:'junho',
+                7:'julho', 8:'agosto', 9:'setembro', 10:'outubro', 11:'novembro', 12:'dezembro'}
+    dias_br = {0:'segunda-feira', 1:'terça-feira', 2:'quarta-feira', 3:'quinta-feira',
+               4:'sexta-feira', 5:'sábado', 6:'domingo'}
     
     mes_nome = meses_br.get(agora.month, str(agora.month))
     dia_semana = dias_br.get(agora.weekday(), '')
     
-    # Substituições (ordem importa: mais específico primeiro)
-    text = text.replace('{DD/MM/AAAA}', f'{dd}/{mm}/{aaaa}')
-    text = text.replace('{DD/MM/AA}', f'{dd}/{mm}/{aa}')
-    text = text.replace('{DD}', dd)
-    text = text.replace('{MM}', mm)
-    text = text.replace('{AAAA}', aaaa)
-    text = text.replace('{AA}', aa)
-    text = text.replace('{MES}', mes_nome)
-    text = text.replace('{DIA_SEMANA}', dia_semana)
+    # Fazemos as substituições com muito cuidado!
+    # A ordem importa: as maiores e mais específicas vêm primeiro para o Python não se confundir
+    texto_convertido = text.replace('{DD/MM/AAAA}', f'{dd}/{mm}/{aaaa}')
+    texto_convertido = texto_convertido.replace('{DD/MM/AA}', f'{dd}/{mm}/{aa}')
+    texto_convertido = texto_convertido.replace('{DD}', dd)
+    texto_convertido = texto_convertido.replace('{MM}', mm)
+    texto_convertido = texto_convertido.replace('{AAAA}', aaaa)
+    texto_convertido = texto_convertido.replace('{AA}', aa)
+    texto_convertido = texto_convertido.replace('{MES}', mes_nome)
+    texto_convertido = texto_convertido.replace('{DIA_SEMANA}', dia_semana)
     
-    return text
+    return texto_convertido
+
+# =========================================================
+# 🆓 FUNÇÃO: APROVAR ENTRADA NO CANAL FREE
+# =========================================================
+def aprovar_entrada_canal_free(bot_token: str, canal_id: str, user_id: int):
+    """
+    Aprova entrada do usuário no canal após o delay configurado.
+    Executado pelo scheduler.
+    🔥 FIX: threaded=False para não criar threads extras no Railway.
+    🔥 FIX: Retry com 3 tentativas para lidar com erros temporários.
+    """
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            bot = telebot.TeleBot(bot_token, threaded=False)
+            bot.approve_chat_join_request(int(canal_id), user_id)
+            logger.info(f"✅ [CANAL FREE] Usuário {user_id} aprovado no canal {canal_id}")
+            return  # Sucesso, sai da função
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Se o usuário já foi aprovado ou não tem request pendente, ignora
+            if "user_already_participant" in error_msg or "hide_requester_missing" in error_msg or "request not found" in error_msg:
+                logger.info(f"ℹ️ [CANAL FREE] Usuário {user_id} já aprovado/participante no canal {canal_id}")
+                return
+            
+            if attempt < max_retries - 1:
+                logger.warning(f"⚠️ [CANAL FREE] Tentativa {attempt+1}/{max_retries} falhou para {user_id}: {e}")
+                import time
+                time.sleep(2)  # Espera 2s antes de tentar novamente
+            else:
+                logger.error(f"❌ [CANAL FREE] Todas as {max_retries} tentativas falharam para {user_id}: {e}")
+
+# Configuração de Log
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Zenyx Gbot SaaS")
+
+# 🔥 CONFIGURAÇÃO DE FUSO HORÁRIO - BRASÍLIA/SÃO PAULO
+BRAZIL_TZ = timezone('America/Sao_Paulo')
 
 # ============================================================
 # 🎯 SISTEMA DE SESSÃO DE SIMULAÇÃO DE COPY (IN-MEMORY)
