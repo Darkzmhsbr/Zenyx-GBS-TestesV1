@@ -4437,13 +4437,11 @@ async def gerar_pix_paradise(
         if not bot or not bot.paradise_api_key:
             return None
 
-        # Recupera as chaves mestras para o split
         system_config = db.query(SystemConfig).all()
         config_dict = {item.key: item.value for item in system_config}
         master_recipient_id = config_dict.get("master_paradise_account_id", "")
         master_secret_key = config_dict.get("master_paradise_secret_key", "")
         
-        # Pega a taxa da plataforma
         taxa_centavos = 60
         owner = None
         if bot.owner_id:
@@ -4468,10 +4466,12 @@ async def gerar_pix_paradise(
         email_fake = f"cliente_{user_telegram_id}@telegram.com" if user_telegram_id else "cliente@telegram.com"
         telefone_fake = "11999999999"
 
+        # 🔥 CORREÇÃO: "source": "api_externa" IGNORA A NECESSIDADE DE PRODUTO CADASTRADO
         payload = {
             "amount": valor_total_centavos,
             "description": f"Pedido {transaction_id} - {plano_nome or 'Acesso'}",
             "reference": str(transaction_id),
+            "source": "api_externa",  # <==== A MÁGICA AQUI!
             "postback_url": f"https://{clean_domain}/webhook/paradise",
             "customer": {
                 "name": user_first_name or "Cliente Telegram",
@@ -4481,7 +4481,6 @@ async def gerar_pix_paradise(
             }
         }
         
-        # 🔥 A MÁGICA ACONTECE AQUI: VERIFICA SE A CHAVE DO BOT É A CHAVE DO ADMIN
         is_admin_bot = False
         if bot.paradise_api_key == master_secret_key:
             is_admin_bot = True
