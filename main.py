@@ -216,6 +216,183 @@ def invalidate_premium_emoji_cache():
 # =========================================================
 # 🆓 FUNÇÃO: APROVAR ENTRADA NO CANAL FREE
 # =========================================================
+# ============================================================
+# 🎯 SISTEMA DE SESSÃO DE SIMULAÇÃO DE COPY (IN-MEMORY)
+# Armazena sessões temporárias de simulação interativa.
+# Cada sessão tem TTL de 10 minutos e é limpa automaticamente.
+# ============================================================
+import uuid as _uuid_mod
+import threading as _threading_mod
+
+_simcopy_sessions = {}  # {session_id: {steps: [...], current_step: 0, bot_token: str, admin_id: str, created_at: float, ...}}
+_simcopy_lock = _threading_mod.Lock()
+
+def _simcopy_cleanup():
+    """Remove sessões expiradas (>10 min)"""
+    now = time.time()
+    with _simcopy_lock:
+        expired = [sid for sid, s in _simcopy_sessions.items() if now - s.get('created_at', 0) > 600]
+        for sid in expired:
+            del _simcopy_sessions[sid]
+
+def _simcopy_create_session(steps, bot_token, admin_id, bot_name, protect=False):
+    """
+    Cria uma sessão de simulação interativa.
+    steps = lista de dicts, cada um representando uma mensagem a enviar:
+    {
+        'texto': str,
+        'media_url': str|None,
+        'media_type': str|None,
+        'audio_url': str|None,
+        'buttons': [{'text': str, 'action': 'next'|'link', 'url': str|None}],
+        'autodestruir': bool,
+        'label': str,  # Ex: "Boas-Vindas", "Step Extra 1", "Order Bump"
+        'show_plans': bool,  # Se deve mostrar botões de planos
+    }
+    """
+    _simcopy_cleanup()
+    session_id = str(_uuid_mod.uuid4())[:8]
+    with _simcopy_lock:
+        _simcopy_sessions[session_id] = {
+            'steps': steps,
+            'current_step': 0,
+            'bot_token': bot_token,
+            'admin_id': str(admin_id),
+            'bot_name': bot_name,
+            'protect': protect,
+            'created_at': time.time(),
+            'sent_message_ids': [],  # IDs de mensagens enviadas (para autodestruição)
+        }
+    return session_id
+
+def _simcopy_send_step(session_id, step_index=None):
+    """
+    Envia o próximo passo da simulação.
+    Retorna True se enviou, False se acabou.
+    """
+    with _simcopy_lock:
+        session = _simcopy_sessions.get(session_id)
+        if not session:
+            return False
+        
+        idx = step_index if step_index is not None else session['current_step']
+        if idx >= len(session['steps']):
+            # Simulação concluída
+            try:
+                bot_sender = TeleBot(session['bot_token'], threaded=False)
+                total = len(session['steps'])
+                bot_sender.send_message(
+                    session['admin_id'],
+                    f"{'─' * 30}\n\n✅ <b>Simulação interativa concluída!</b>\n📊 {total} etapas completadas\n🎨 Copy personalizada",
+                    parse_mode="HTML"
+                )
+            except: pass
+            del _simcopy_sessions[session_id]
+            return False
+        
+        step = session['steps'][idx]
+        session['current_step'] = idx + 1
+    
+    try:
+        bot_sender = TeleBot(session['bot_token'], threaded=False)
+        admin_id = session['admin_id']
+        protect = session.get('protect', False)
+        
+        texto = (step.get('texto') or '').replace('{first_name}', 'Usuário Teste').replace('{nome}', 'Teste').replace('{username}', '@teste').replace('{id}', str(admin_id))
+        texto = convert_premium_emojis(texto)
+        
+        media_url = step.get('media_url')
+        media_type = step.get('media_type')
+        audio_url = step.get('audio_url')
+        autodestruir = step.get('autodestruir', False)
+        buttons = step.get('buttons', [])
+        label = step.get('label', f'Passo {idx + 1}')
+        
+        # Monta o markup com callbacks interativos
+        markup = None
+        has_next_button = False
+        if buttons:
+            markup = types.InlineKeyboardMarkup()
+            for btn in buttons:
+                if btn.get('action') == 'next':
+                    # Botão que avança para o próximo passo
+                    markup.add(types.InlineKeyboardButton(
+                        btn.get('text', 'Próximo ▶️'),
+                        callback_data=f"simcopy_{session_id}_{idx + 1}"
+                    ))
+                    has_next_button = True
+                elif btn.get('action') == 'link' and btn.get('url'):
+                    markup.add(types.InlineKeyboardButton(btn.get('text', 'Link'), url=btn['url']))
+                else:
+                    # Botão genérico (avança também)
+                    markup.add(types.InlineKeyboardButton(
+                        btn.get('text', 'Continuar'),
+                        callback_data=f"simcopy_{session_id}_{idx + 1}"
+                    ))
+                    has_next_button = True
+        
+        # Se não tem botão de next e ainda tem mais passos, adiciona automaticamente
+        if not has_next_button and (idx + 1) < len(session['steps']):
+            if not markup:
+                markup = types.InlineKeyboardMarkup()
+            # Envia sem botão - o próximo passo vem automaticamente após 2s
+            pass  # Será enviado automaticamente
+        
+        sent_msg = None
+        
+        # Enviar áudio separado primeiro (se tiver)
+        if audio_url:
+            try:
+                audio_bytes, _, _ = _download_audio_bytes(audio_url)
+                bot_sender.send_chat_action(admin_id, 'record_voice')
+                time.sleep(1)
+                if audio_bytes:
+                    bot_sender.send_voice(admin_id, audio_bytes, protect_content=protect)
+                else:
+                    bot_sender.send_voice(admin_id, audio_url, protect_content=protect)
+                time.sleep(0.5)
+            except Exception as e:
+                logger.warning(f"⚠️ [SIMCOPY] Áudio falhou: {e}")
+        
+        # Enviar mídia + caption OU só texto
+        if media_url:
+            try:
+                url_lower = (media_url or '').lower()
+                mt = media_type or ''
+                if mt == 'video' or url_lower.endswith(('.mp4', '.mov')):
+                    sent_msg = bot_sender.send_video(admin_id, media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+                else:
+                    sent_msg = bot_sender.send_photo(admin_id, media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+            except Exception as e:
+                logger.warning(f"⚠️ [SIMCOPY] Mídia falhou: {e}")
+                if texto:
+                    sent_msg = bot_sender.send_message(admin_id, texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+        elif texto:
+            sent_msg = bot_sender.send_message(admin_id, texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
+        
+        # Armazena ID da mensagem enviada (para autodestruição)
+        if sent_msg:
+            with _simcopy_lock:
+                s = _simcopy_sessions.get(session_id)
+                if s:
+                    s['sent_message_ids'].append({
+                        'msg_id': sent_msg.message_id,
+                        'chat_id': admin_id,
+                        'autodestruir': autodestruir
+                    })
+        
+        # Se não tem botão interativo mas tem mais passos, envia o próximo automaticamente após delay
+        if not has_next_button and (idx + 1) < len(session['steps']):
+            time.sleep(2)
+            _simcopy_send_step(session_id)
+        
+        return True
+    
+    except Exception as e:
+        logger.error(f"❌ [SIMCOPY] Erro ao enviar step {idx}: {e}")
+        return False
+
+
 def aprovar_entrada_canal_free(bot_token: str, canal_id: str, user_id: int):
     """
     Aprova entrada do usuário no canal após o delay configurado.
@@ -10791,6 +10968,38 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 return {"status": "ok"}
 
             # --- A) NAVEGAÇÃO (step_) COM AUTO-DESTRUIÇÃO INTELIGENTE ---
+
+            # --- 🎯 SIMULAÇÃO DE COPY INTERATIVA (simcopy_) ---
+            elif data.startswith("simcopy_"):
+                try:
+                    parts = data.split("_")
+                    # Format: simcopy_{session_id}_{step_index}
+                    if len(parts) >= 3:
+                        session_id = parts[1]
+                        next_step = int(parts[2])
+                        
+                        # Autodestruir mensagem anterior se configurado
+                        with _simcopy_lock:
+                            session = _simcopy_sessions.get(session_id)
+                            if session:
+                                for sm in session.get('sent_message_ids', []):
+                                    if sm.get('autodestruir'):
+                                        try:
+                                            bot_temp.delete_message(sm['chat_id'], sm['msg_id'])
+                                        except: pass
+                                # Limpa as mensagens enviadas até agora
+                                session['sent_message_ids'] = []
+                        
+                        # Envia próximo passo em thread separada para não bloquear
+                        from concurrent.futures import ThreadPoolExecutor
+                        executor = ThreadPoolExecutor(max_workers=1)
+                        executor.submit(_simcopy_send_step, session_id, next_step)
+                        executor.shutdown(wait=False)
+                    else:
+                        logger.warning(f"⚠️ [SIMCOPY] Callback mal formatado: {data}")
+                except Exception as e:
+                    logger.error(f"❌ [SIMCOPY] Erro no callback: {e}")
+
             elif data.startswith("step_"):
                 try: current_step = int(data.split("_")[1])
                 except: current_step = 1
@@ -17805,11 +18014,11 @@ def clonar_funil(
 # =========================================================
 class SimularCopyRequest(BaseModel):
     tipo: str  # flow, remarketing, orderbump, upsell, downsell, canalfree, auto_remarketing, completo
-    custom_data: Optional[dict] = None  # Dados personalizados para teste (se None, usa os salvos)
+    custom_data: Optional[dict] = None  # Dados personalizados para teste
 
 
 # ============================================================
-# 📋 ENDPOINT: GET COPY DATA (para Revisão de Copy personalizada)
+# 📋 GET COPY DATA (para Revisão de Copy personalizada)
 # ============================================================
 @app.get("/api/admin/recursos-prime/get-copy-data/{bot_id}/{tipo}")
 def get_copy_data(
@@ -17818,10 +18027,6 @@ def get_copy_data(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """
-    Retorna os dados atuais da copy configurada para um bot,
-    permitindo que o frontend exiba os campos para edição.
-    """
     try:
         verificar_bot_pertence_usuario(bot_id, current_user.id, db)
         
@@ -17829,112 +18034,48 @@ def get_copy_data(
             flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
             if not flow:
                 raise HTTPException(400, "Flow não configurado para este bot")
-            
-            steps = db.query(BotFlowStep).filter(
-                BotFlowStep.bot_id == bot_id
-            ).order_by(BotFlowStep.step_order).all()
-            
+            steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
             return {
                 "tipo": "flow",
                 "msg_boas_vindas": flow.msg_boas_vindas or "",
                 "media_url": flow.media_url or "",
                 "btn_text_1": flow.btn_text_1 or "📋 Ver Planos",
                 "buttons_config": flow.buttons_config,
+                "button_mode": flow.button_mode or "next_step",
+                "autodestruir_1": flow.autodestruir_1 or False,
+                "mostrar_planos_1": flow.mostrar_planos_1 if flow.mostrar_planos_1 is not None else True,
                 "msg_2_texto": flow.msg_2_texto or "",
                 "msg_2_media": flow.msg_2_media or "",
                 "msg_pix": flow.msg_pix or "",
                 "buttons_config_2": flow.buttons_config_2,
-                "steps": [
-                    {
-                        "id": s.id,
-                        "step_order": s.step_order,
-                        "msg_texto": s.msg_texto or "",
-                        "msg_media": s.msg_media or "",
-                        "btn_texto": s.btn_texto or "Próximo ▶️",
-                        "buttons_config": s.buttons_config,
-                        "autodestruir": s.autodestruir,
-                        "mostrar_botao": s.mostrar_botao,
-                        "delay_seconds": s.delay_seconds or 0,
-                    }
-                    for s in steps
-                ]
+                "mostrar_planos_2": flow.mostrar_planos_2 or False,
+                "steps": [{"id": s.id, "step_order": s.step_order, "msg_texto": s.msg_texto or "", "msg_media": s.msg_media or "", "btn_texto": s.btn_texto or "Próximo ▶️", "buttons_config": s.buttons_config, "autodestruir": s.autodestruir or False, "mostrar_botao": s.mostrar_botao if s.mostrar_botao is not None else True, "delay_seconds": s.delay_seconds or 0} for s in steps]
             }
-        
         elif tipo == "orderbump":
             ob = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
-            if not ob:
-                raise HTTPException(400, "Order Bump não configurado para este bot")
-            return {
-                "tipo": "orderbump",
-                "msg_texto": ob.msg_texto or "",
-                "msg_media": ob.msg_media or "",
-                "audio_url": getattr(ob, 'audio_url', "") or "",
-                "btn_aceitar": ob.btn_aceitar or "✅ SIM",
-                "btn_recusar": ob.btn_recusar or "❌ NÃO",
-            }
-        
+            if not ob: raise HTTPException(400, "Order Bump não configurado")
+            return {"tipo": "orderbump", "msg_texto": ob.msg_texto or "", "msg_media": ob.msg_media or "", "audio_url": getattr(ob, 'audio_url', "") or "", "btn_aceitar": ob.btn_aceitar or "✅ SIM", "btn_recusar": ob.btn_recusar or "❌ NÃO"}
         elif tipo == "upsell":
             up = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
-            if not up:
-                raise HTTPException(400, "Upsell não configurado para este bot")
-            return {
-                "tipo": "upsell",
-                "msg_texto": up.msg_texto or "",
-                "msg_media": up.msg_media or "",
-                "audio_url": getattr(up, 'audio_url', "") or "",
-                "btn_aceitar": getattr(up, 'btn_aceitar', "✅ QUERO") or "✅ QUERO",
-                "btn_recusar": getattr(up, 'btn_recusar', "") or "",
-            }
-        
+            if not up: raise HTTPException(400, "Upsell não configurado")
+            return {"tipo": "upsell", "msg_texto": up.msg_texto or "", "msg_media": up.msg_media or "", "audio_url": getattr(up, 'audio_url', "") or "", "btn_aceitar": getattr(up, 'btn_aceitar', "✅ QUERO") or "✅ QUERO", "btn_recusar": getattr(up, 'btn_recusar', "") or ""}
         elif tipo == "downsell":
             ds = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
-            if not ds:
-                raise HTTPException(400, "Downsell não configurado para este bot")
-            return {
-                "tipo": "downsell",
-                "msg_texto": ds.msg_texto or "",
-                "msg_media": ds.msg_media or "",
-                "audio_url": getattr(ds, 'audio_url', "") or "",
-                "btn_aceitar": getattr(ds, 'btn_aceitar', "✅ QUERO") or "✅ QUERO",
-                "btn_recusar": getattr(ds, 'btn_recusar', "") or "",
-            }
-        
+            if not ds: raise HTTPException(400, "Downsell não configurado")
+            return {"tipo": "downsell", "msg_texto": ds.msg_texto or "", "msg_media": ds.msg_media or "", "audio_url": getattr(ds, 'audio_url', "") or "", "btn_aceitar": getattr(ds, 'btn_aceitar', "✅ QUERO") or "✅ QUERO", "btn_recusar": getattr(ds, 'btn_recusar', "") or ""}
         elif tipo == "canalfree":
             cf = db.query(CanalFreeConfig).filter(CanalFreeConfig.bot_id == bot_id).first()
-            if not cf:
-                raise HTTPException(400, "Canal Free não configurado para este bot")
-            return {
-                "tipo": "canalfree",
-                "message_text": cf.message_text or "",
-                "media_url": cf.media_url or "",
-                "media_type": getattr(cf, 'media_type', "") or "",
-                "audio_url": getattr(cf, 'audio_url', "") or "",
-                "buttons": cf.buttons if isinstance(cf.buttons, list) else [],
-            }
-        
+            if not cf: raise HTTPException(400, "Canal Free não configurado")
+            return {"tipo": "canalfree", "message_text": cf.message_text or "", "media_url": cf.media_url or "", "media_type": getattr(cf, 'media_type', "") or "", "audio_url": getattr(cf, 'audio_url', "") or "", "buttons": cf.buttons if isinstance(cf.buttons, list) else []}
         elif tipo in ["remarketing", "auto_remarketing"]:
             rmk = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
-            if not rmk:
-                raise HTTPException(400, "Remarketing não configurado para este bot")
-            return {
-                "tipo": "remarketing",
-                "message_text": rmk.message_text or "",
-                "media_url": rmk.media_url or "",
-                "media_type": getattr(rmk, 'media_type', "") or "",
-                "audio_url": getattr(rmk, 'audio_url', "") or "",
-            }
-        
+            if not rmk: raise HTTPException(400, "Remarketing não configurado")
+            return {"tipo": "remarketing", "message_text": rmk.message_text or "", "media_url": rmk.media_url or "", "media_type": getattr(rmk, 'media_type', "") or "", "audio_url": getattr(rmk, 'audio_url', "") or ""}
         elif tipo == "completo":
-            return {
-                "tipo": "completo",
-                "info": "O fluxo completo usa os dados salvos de cada etapa. Personalize cada etapa individualmente."
-            }
-        
+            return {"tipo": "completo", "info": "O fluxo completo envia todas as etapas em sequência interativa."}
         else:
             raise HTTPException(400, f"Tipo '{tipo}' não reconhecido")
-    
-    except HTTPException:
-        raise
+    except HTTPException: raise
     except Exception as e:
         logger.error(f"❌ Erro ao buscar copy data: {e}")
         raise HTTPException(500, f"Erro interno: {str(e)}")
@@ -17947,8 +18088,9 @@ def simular_copy(
     current_user = Depends(get_current_user)
 ):
     """
-    Envia a sequência real configurada para o admin do bot como preview.
-    Lê as configurações existentes e dispara as mensagens pelo bot.
+    Cria uma sessão de simulação INTERATIVA.
+    Envia apenas a primeira mensagem. O admin clica nos botões para avançar.
+    Se custom_data for fornecido, usa os dados personalizados.
     """
     try:
         verificar_bot_pertence_usuario(bot_id, current_user.id, db)
@@ -17958,312 +18100,250 @@ def simular_copy(
         
         admin_id = bot_db.admin_principal_id
         if not admin_id:
-            raise HTTPException(400, "Nenhum admin principal configurado. Vá em Config do Bot e defina o Admin.")
+            raise HTTPException(400, "Nenhum admin principal configurado.")
         
-        bot_sender = TeleBot(bot_db.token, threaded=False)
         protect = getattr(bot_db, 'protect_content', False) or False
-        mensagens_enviadas = 0
         custom = req.custom_data  # Dados personalizados (pode ser None)
         
-        def enviar_msg(texto, media_url=None, media_type=None, audio_url=None, markup=None, label=""):
-            """Helper para enviar uma mensagem com mídia/texto/botões"""
-            nonlocal mensagens_enviadas
-            
-            texto = (texto or "").replace("{first_name}", "Usuário Teste").replace("{nome}", "Teste").replace("{username}", "@teste").replace("{id}", str(admin_id))
-            texto = convert_premium_emojis(texto)
-            
-            # Áudio separado
-            if audio_url:
-                try:
-                    audio_bytes, _, _ = _download_audio_bytes(audio_url)
-                    bot_sender.send_chat_action(admin_id, 'record_voice')
-                    time.sleep(1)
-                    if audio_bytes:
-                        bot_sender.send_voice(admin_id, audio_bytes, protect_content=protect)
-                    else:
-                        bot_sender.send_voice(admin_id, audio_url, protect_content=protect)
-                    mensagens_enviadas += 1
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.warning(f"⚠️ [SIMULAR] Áudio falhou: {e}")
-            
-            # Mídia + caption
-            if media_url:
-                try:
-                    url_lower = (media_url or "").lower()
-                    mt = media_type or ""
-                    if mt == 'video' or url_lower.endswith(('.mp4', '.mov')):
-                        bot_sender.send_video(admin_id, media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
-                    else:
-                        bot_sender.send_photo(admin_id, media_url, caption=texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
-                    mensagens_enviadas += 1
-                    return
-                except Exception as e:
-                    logger.warning(f"⚠️ [SIMULAR] Mídia falhou: {e}")
-            
-            # Só texto
-            if texto:
-                bot_sender.send_message(admin_id, texto, reply_markup=markup, parse_mode="HTML", protect_content=protect)
-                mensagens_enviadas += 1
+        # ══════════════════════════════════════════
+        # MONTAR LISTA DE STEPS PARA A SESSÃO
+        # ══════════════════════════════════════════
+        simulation_steps = []
         
-        # ===== HEADER =====
-        modo_label = 'PERSONALIZADA' if custom else 'SALVA'
-        bot_sender.send_message(admin_id, f"🎯 <b>REVISÃO DE COPY — {req.tipo.upper()} ({modo_label})</b>\n\n<i>Simulação do fluxo configurado para o bot {bot_db.nome}.\nAs mensagens abaixo representam exatamente o que seus clientes verão.</i>\n\n{'─' * 30}", parse_mode="HTML")
-        time.sleep(1)
-        
-        # ===== FLOW CHAT =====
-        if req.tipo == "flow":
+        def build_flow_steps():
+            """Monta os steps do Flow Chat"""
             flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
             if not flow:
                 raise HTTPException(400, "Flow não configurado para este bot")
             
-            # Usa dados custom se fornecidos, senão usa os salvos
+            # Step 1: Boas-vindas
             msg_bv = custom.get('msg_boas_vindas', flow.msg_boas_vindas) if custom else flow.msg_boas_vindas
-            media_flow = custom.get('media_url', flow.media_url) if custom else flow.media_url
+            media = custom.get('media_url', flow.media_url) if custom else flow.media_url
             btn_1 = custom.get('btn_text_1', flow.btn_text_1) if custom else flow.btn_text_1
+            autodestruir_1 = custom.get('autodestruir_1', flow.autodestruir_1) if custom else flow.autodestruir_1
+            buttons_cfg = custom.get('buttons_config', flow.buttons_config) if custom else flow.buttons_config
+            button_mode = custom.get('button_mode', flow.button_mode) if custom else flow.button_mode
             
-            # Msg 1 - Boas-vindas
-            markup1 = types.InlineKeyboardMarkup()
-            
-            # Buttons config customizado
-            buttons_cfg = getattr(flow, 'buttons_config', None)
-            if buttons_cfg and isinstance(buttons_cfg, list):
-                for btn_cfg in buttons_cfg:
-                    if btn_cfg.get('type') == 'link':
-                        markup1.add(types.InlineKeyboardButton(btn_cfg.get('text', 'Link'), url=btn_cfg.get('url', '#')))
+            # Monta botões da mensagem 1
+            step1_buttons = []
+            if button_mode == 'custom' and buttons_cfg and isinstance(buttons_cfg, list):
+                for bc in buttons_cfg:
+                    if bc.get('type') == 'link' and bc.get('url'):
+                        step1_buttons.append({'text': bc.get('text', 'Link'), 'action': 'link', 'url': bc['url']})
                     else:
-                        markup1.add(types.InlineKeyboardButton(btn_cfg.get('text', flow.btn_text_1 or '📋 Ver Planos'), callback_data="sim_noop"))
+                        step1_buttons.append({'text': bc.get('text', btn_1 or '📋 Ver Planos'), 'action': 'next'})
             else:
-                markup1.add(types.InlineKeyboardButton(flow.btn_text_1 or "📋 Ver Planos", callback_data="sim_noop"))
+                step1_buttons.append({'text': btn_1 or '📋 Ver Planos', 'action': 'next'})
             
-            enviar_msg(msg_bv, media_url=media_flow, markup=markup1, label="Boas-vindas")
-            time.sleep(1.5)
+            simulation_steps.append({
+                'texto': msg_bv,
+                'media_url': media,
+                'audio_url': None,
+                'buttons': step1_buttons,
+                'autodestruir': autodestruir_1 or False,
+                'label': 'Boas-Vindas',
+            })
             
             # Steps extras
-            steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
-            for i, step in enumerate(steps):
-                delay = min(getattr(step, 'delay_seconds', 0) or 0, 3)
-                time.sleep(max(delay, 1))
-                
-                step_markup = None
-                step_btns = getattr(step, 'buttons_config', None)
-                if step_btns and isinstance(step_btns, list):
-                    step_markup = types.InlineKeyboardMarkup()
-                    for btn in step_btns:
-                        if btn.get('url'):
-                            step_markup.add(types.InlineKeyboardButton(btn.get('text', ''), url=btn['url']))
-                        else:
-                            step_markup.add(types.InlineKeyboardButton(btn.get('text', step.btn_texto or 'Próximo'), callback_data="sim_noop"))
-                elif getattr(step, 'mostrar_botao', True):
-                    step_markup = types.InlineKeyboardMarkup()
-                    step_markup.add(types.InlineKeyboardButton(step.btn_texto or "Próximo ▶️", callback_data="sim_noop"))
-                
-                enviar_msg(step.msg_texto, media_url=step.msg_media, markup=step_markup, label=f"Step {i+1}")
+            if custom and custom.get('steps'):
+                for i, cs in enumerate(custom['steps']):
+                    step_btns = []
+                    if cs.get('mostrar_botao', True):
+                        step_btns.append({'text': cs.get('btn_texto', 'Próximo ▶️'), 'action': 'next'})
+                    simulation_steps.append({
+                        'texto': cs.get('msg_texto', ''),
+                        'media_url': cs.get('msg_media'),
+                        'audio_url': None,
+                        'buttons': step_btns,
+                        'autodestruir': cs.get('autodestruir', False),
+                        'label': f'Step Extra {i+1}',
+                    })
+            else:
+                db_steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
+                for i, step in enumerate(db_steps):
+                    step_btns = []
+                    step_btn_cfg = getattr(step, 'buttons_config', None)
+                    if step_btn_cfg and isinstance(step_btn_cfg, list):
+                        for sb in step_btn_cfg:
+                            if sb.get('url'):
+                                step_btns.append({'text': sb.get('text', ''), 'action': 'link', 'url': sb['url']})
+                            else:
+                                step_btns.append({'text': sb.get('text', step.btn_texto or 'Próximo'), 'action': 'next'})
+                    elif getattr(step, 'mostrar_botao', True):
+                        step_btns.append({'text': step.btn_texto or 'Próximo ▶️', 'action': 'next'})
+                    
+                    simulation_steps.append({
+                        'texto': step.msg_texto,
+                        'media_url': step.msg_media,
+                        'audio_url': None,
+                        'buttons': step_btns,
+                        'autodestruir': step.autodestruir or False,
+                        'label': f'Step Extra {i+1}',
+                    })
+            
+            # Mensagem de oferta final
+            msg_2 = custom.get('msg_2_texto') if custom else flow.msg_2_texto
+            if msg_2:
+                simulation_steps.append({
+                    'texto': msg_2,
+                    'media_url': custom.get('msg_2_media', flow.msg_2_media) if custom else flow.msg_2_media,
+                    'audio_url': None,
+                    'buttons': [],
+                    'autodestruir': False,
+                    'label': 'Oferta Final',
+                })
+            
+            # Mensagem PIX
+            msg_pix = custom.get('msg_pix') if custom else flow.msg_pix
+            if msg_pix:
+                simulation_steps.append({
+                    'texto': msg_pix,
+                    'media_url': None,
+                    'audio_url': None,
+                    'buttons': [],
+                    'autodestruir': False,
+                    'label': 'Mensagem PIX',
+                })
         
-        # ===== ORDER BUMP =====
+        def build_simple_step(tipo_nome, msg_texto, msg_media, audio_url, btn_aceitar, btn_recusar):
+            """Monta step simples (OrderBump, Upsell, Downsell)"""
+            btns = []
+            if btn_aceitar:
+                btns.append({'text': btn_aceitar, 'action': 'next'})
+            if btn_recusar:
+                btns.append({'text': btn_recusar, 'action': 'next'})
+            simulation_steps.append({
+                'texto': msg_texto,
+                'media_url': msg_media,
+                'audio_url': audio_url,
+                'buttons': btns,
+                'autodestruir': False,
+                'label': tipo_nome,
+            })
+        
+        # ══════════════════════════════════════════
+        # CONSTRUIR STEPS CONFORME O TIPO
+        # ══════════════════════════════════════════
+        if req.tipo == "flow":
+            build_flow_steps()
+        
         elif req.tipo == "orderbump":
             ob = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
-            if not ob:
-                raise HTTPException(400, "Order Bump não configurado para este bot")
-            
-            ob_msg = custom.get('msg_texto', ob.msg_texto) if custom else ob.msg_texto
-            ob_media = custom.get('msg_media', ob.msg_media) if custom else ob.msg_media
-            ob_audio = custom.get('audio_url', getattr(ob, 'audio_url', None)) if custom else getattr(ob, 'audio_url', None)
-            ob_btn_a = custom.get('btn_aceitar', ob.btn_aceitar) if custom else ob.btn_aceitar
-            ob_btn_r = custom.get('btn_recusar', ob.btn_recusar) if custom else ob.btn_recusar
-            
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(ob_btn_a or "✅ SIM", callback_data="sim_noop"))
-            markup.add(types.InlineKeyboardButton(ob_btn_r or "❌ NÃO", callback_data="sim_noop"))
-            
-            enviar_msg(
-                ob_msg, 
-                media_url=ob_media, 
-                audio_url=ob_audio,
-                markup=markup, 
-                label="Order Bump"
-            )
+            if not ob: raise HTTPException(400, "Order Bump não configurado")
+            build_simple_step("Order Bump",
+                custom.get('msg_texto', ob.msg_texto) if custom else ob.msg_texto,
+                custom.get('msg_media', ob.msg_media) if custom else ob.msg_media,
+                custom.get('audio_url', getattr(ob, 'audio_url', None)) if custom else getattr(ob, 'audio_url', None),
+                custom.get('btn_aceitar', ob.btn_aceitar) if custom else ob.btn_aceitar,
+                custom.get('btn_recusar', ob.btn_recusar) if custom else ob.btn_recusar)
         
-        # ===== UPSELL =====
         elif req.tipo == "upsell":
             up = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
-            if not up:
-                raise HTTPException(400, "Upsell não configurado para este bot")
-            
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(getattr(up, 'btn_aceitar', '✅ QUERO'), callback_data="sim_noop"))
-            btn_recusar = getattr(up, 'btn_recusar', None)
-            if btn_recusar:
-                markup.add(types.InlineKeyboardButton(btn_recusar, callback_data="sim_noop"))
-            
-            up_msg = custom.get('msg_texto', up.msg_texto) if custom else up.msg_texto
-            up_media = custom.get('msg_media', up.msg_media) if custom else up.msg_media
-            up_audio = custom.get('audio_url', getattr(up, 'audio_url', None)) if custom else getattr(up, 'audio_url', None)
-            
-            enviar_msg(
-                up_msg,
-                media_url=up_media,
-                audio_url=up_audio,
-                markup=markup,
-                label="Upsell"
-            )
+            if not up: raise HTTPException(400, "Upsell não configurado")
+            build_simple_step("Upsell",
+                custom.get('msg_texto', up.msg_texto) if custom else up.msg_texto,
+                custom.get('msg_media', up.msg_media) if custom else up.msg_media,
+                custom.get('audio_url', getattr(up, 'audio_url', None)) if custom else getattr(up, 'audio_url', None),
+                custom.get('btn_aceitar', getattr(up, 'btn_aceitar', '✅ QUERO')) if custom else getattr(up, 'btn_aceitar', '✅ QUERO'),
+                custom.get('btn_recusar', getattr(up, 'btn_recusar', None)) if custom else getattr(up, 'btn_recusar', None))
         
-        # ===== DOWNSELL =====
         elif req.tipo == "downsell":
             ds = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
-            if not ds:
-                raise HTTPException(400, "Downsell não configurado para este bot")
-            
-            markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(getattr(ds, 'btn_aceitar', '✅ QUERO'), callback_data="sim_noop"))
-            btn_recusar = getattr(ds, 'btn_recusar', None)
-            if btn_recusar:
-                markup.add(types.InlineKeyboardButton(btn_recusar, callback_data="sim_noop"))
-            
-            ds_msg = custom.get('msg_texto', ds.msg_texto) if custom else ds.msg_texto
-            ds_media = custom.get('msg_media', ds.msg_media) if custom else ds.msg_media
-            ds_audio = custom.get('audio_url', getattr(ds, 'audio_url', None)) if custom else getattr(ds, 'audio_url', None)
-            
-            enviar_msg(
-                ds_msg,
-                media_url=ds_media,
-                audio_url=ds_audio,
-                markup=markup,
-                label="Downsell"
-            )
+            if not ds: raise HTTPException(400, "Downsell não configurado")
+            build_simple_step("Downsell",
+                custom.get('msg_texto', ds.msg_texto) if custom else ds.msg_texto,
+                custom.get('msg_media', ds.msg_media) if custom else ds.msg_media,
+                custom.get('audio_url', getattr(ds, 'audio_url', None)) if custom else getattr(ds, 'audio_url', None),
+                custom.get('btn_aceitar', getattr(ds, 'btn_aceitar', '✅ QUERO')) if custom else getattr(ds, 'btn_aceitar', '✅ QUERO'),
+                custom.get('btn_recusar', getattr(ds, 'btn_recusar', None)) if custom else getattr(ds, 'btn_recusar', None))
         
-        # ===== CANAL FREE =====
         elif req.tipo == "canalfree":
             cf = db.query(CanalFreeConfig).filter(CanalFreeConfig.bot_id == bot_id).first()
-            if not cf:
-                raise HTTPException(400, "Canal Free não configurado para este bot")
-            
-            markup = None
-            btns = cf.buttons if isinstance(cf.buttons, list) else []
-            if btns:
-                markup = types.InlineKeyboardMarkup()
-                for btn in btns:
-                    if btn.get('url'):
-                        markup.add(types.InlineKeyboardButton(btn.get('text', 'Link'), url=btn['url']))
-                    else:
-                        markup.add(types.InlineKeyboardButton(btn.get('text', 'Botão'), callback_data="sim_noop"))
-            
-            cf_msg = custom.get('message_text', cf.message_text) if custom else cf.message_text
-            cf_media = custom.get('media_url', cf.media_url) if custom else cf.media_url
-            cf_mt = custom.get('media_type', getattr(cf, 'media_type', None)) if custom else getattr(cf, 'media_type', None)
-            cf_audio = custom.get('audio_url', getattr(cf, 'audio_url', None)) if custom else getattr(cf, 'audio_url', None)
-            
-            enviar_msg(
-                cf_msg,
-                media_url=cf_media,
-                media_type=cf_mt,
-                audio_url=cf_audio,
-                markup=markup,
-                label="Canal Free"
-            )
+            if not cf: raise HTTPException(400, "Canal Free não configurado")
+            simulation_steps.append({
+                'texto': custom.get('message_text', cf.message_text) if custom else cf.message_text,
+                'media_url': custom.get('media_url', cf.media_url) if custom else cf.media_url,
+                'media_type': custom.get('media_type', getattr(cf, 'media_type', None)) if custom else getattr(cf, 'media_type', None),
+                'audio_url': custom.get('audio_url', getattr(cf, 'audio_url', None)) if custom else getattr(cf, 'audio_url', None),
+                'buttons': [],
+                'autodestruir': False,
+                'label': 'Canal Free',
+            })
         
-        # ===== REMARKETING (DISPARO AUTOMÁTICO) =====
         elif req.tipo in ["remarketing", "auto_remarketing"]:
             rmk = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
-            if not rmk:
-                raise HTTPException(400, "Remarketing não configurado para este bot")
-            
-            # Mensagem principal
-            rmk_msg = custom.get('message_text', rmk.message_text) if custom else rmk.message_text
-            rmk_media = custom.get('media_url', rmk.media_url) if custom else rmk.media_url
-            rmk_mt = custom.get('media_type', getattr(rmk, 'media_type', None)) if custom else getattr(rmk, 'media_type', None)
-            rmk_audio = custom.get('audio_url', getattr(rmk, 'audio_url', None)) if custom else getattr(rmk, 'audio_url', None)
-            
-            enviar_msg(
-                rmk_msg,
-                media_url=rmk_media,
-                media_type=rmk_mt,
-                audio_url=rmk_audio,
-                label="Remarketing Principal"
-            )
-            
-            # Mensagens alternadas
-            alt = db.query(AlternatingMessages).filter(AlternatingMessages.bot_id == bot_id).all()
-            for i, msg in enumerate(alt):
-                time.sleep(1.5)
-                msgs_list = msg.messages if isinstance(msg.messages, list) else []
-                for j, m_text in enumerate(msgs_list[:3]):  # Max 3 por config
-                    if m_text:
-                        enviar_msg(m_text, label=f"Alternada {i+1}.{j+1}")
-                        time.sleep(1)
+            if not rmk: raise HTTPException(400, "Remarketing não configurado")
+            simulation_steps.append({
+                'texto': custom.get('message_text', rmk.message_text) if custom else rmk.message_text,
+                'media_url': custom.get('media_url', rmk.media_url) if custom else rmk.media_url,
+                'media_type': custom.get('media_type', getattr(rmk, 'media_type', None)) if custom else getattr(rmk, 'media_type', None),
+                'audio_url': custom.get('audio_url', getattr(rmk, 'audio_url', None)) if custom else getattr(rmk, 'audio_url', None),
+                'buttons': [],
+                'autodestruir': False,
+                'label': 'Remarketing',
+            })
         
-        # ===== FLUXO COMPLETO =====
         elif req.tipo == "completo":
-            # Envia tudo em sequência: flow → orderbump → upsell → downsell
-            # Flow
-            flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
-            if flow:
-                markup1 = types.InlineKeyboardMarkup()
-                markup1.add(types.InlineKeyboardButton(flow.btn_text_1 or "📋 Ver Planos", callback_data="sim_noop"))
-                enviar_msg(flow.msg_boas_vindas, media_url=flow.media_url, markup=markup1, label="Flow")
-                time.sleep(2)
-                
-                steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_id).order_by(BotFlowStep.step_order).all()
-                for step in steps:
-                    time.sleep(1.5)
-                    enviar_msg(step.msg_texto, media_url=step.msg_media, label="Flow Step")
-            
-            # OrderBump
+            build_flow_steps()
+            # Add OrderBump, Upsell, Downsell
             ob = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
             if ob and ob.ativo:
-                time.sleep(2)
-                bot_sender.send_message(admin_id, "⏳ <i>— Simulando Order Bump —</i>", parse_mode="HTML")
-                time.sleep(1)
-                ob_markup = types.InlineKeyboardMarkup()
-                ob_markup.add(types.InlineKeyboardButton(ob.btn_aceitar or "✅ SIM", callback_data="sim_noop"))
-                ob_markup.add(types.InlineKeyboardButton(ob.btn_recusar or "❌ NÃO", callback_data="sim_noop"))
-                enviar_msg(ob.msg_texto, media_url=ob.msg_media, audio_url=getattr(ob, 'audio_url', None), markup=ob_markup)
-            
-            # Upsell
+                build_simple_step("Order Bump", ob.msg_texto, ob.msg_media, getattr(ob, 'audio_url', None), ob.btn_aceitar, ob.btn_recusar)
             up = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
-            if up and up.ativo:
-                time.sleep(2)
-                bot_sender.send_message(admin_id, "⏳ <i>— Simulando Upsell —</i>", parse_mode="HTML")
-                time.sleep(1)
-                up_markup = types.InlineKeyboardMarkup()
-                up_markup.add(types.InlineKeyboardButton(getattr(up, 'btn_aceitar', '✅ QUERO'), callback_data="sim_noop"))
-                enviar_msg(up.msg_texto, media_url=up.msg_media, audio_url=getattr(up, 'audio_url', None), markup=up_markup)
-            
-            # Downsell
+            if up and getattr(up, 'ativo', False):
+                build_simple_step("Upsell", up.msg_texto, up.msg_media, getattr(up, 'audio_url', None), getattr(up, 'btn_aceitar', '✅ QUERO'), getattr(up, 'btn_recusar', None))
             ds = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
-            if ds and ds.ativo:
-                time.sleep(2)
-                bot_sender.send_message(admin_id, "⏳ <i>— Simulando Downsell —</i>", parse_mode="HTML")
-                time.sleep(1)
-                ds_markup = types.InlineKeyboardMarkup()
-                ds_markup.add(types.InlineKeyboardButton(getattr(ds, 'btn_aceitar', '✅ QUERO'), callback_data="sim_noop"))
-                enviar_msg(ds.msg_texto, media_url=ds.msg_media, audio_url=getattr(ds, 'audio_url', None), markup=ds_markup)
+            if ds and getattr(ds, 'ativo', False):
+                build_simple_step("Downsell", ds.msg_texto, ds.msg_media, getattr(ds, 'audio_url', None), getattr(ds, 'btn_aceitar', '✅ QUERO'), getattr(ds, 'btn_recusar', None))
         
         else:
-            raise HTTPException(400, f"Tipo de simulação inválido: {req.tipo}")
+            raise HTTPException(400, f"Tipo '{req.tipo}' não reconhecido")
         
-        # ===== FOOTER =====
-        time.sleep(1)
-        bot_sender.send_message(
-            admin_id,
-            f"{'─' * 30}\n✅ <b>SIMULAÇÃO CONCLUÍDA</b>\n\n📨 {mensagens_enviadas} mensagens enviadas\n🤖 Bot: {bot_db.nome}\n📋 Tipo: {req.tipo.upper()}\n\n<i>Esta foi uma prévia. Seus clientes verão exatamente essas mensagens.</i>",
-            parse_mode="HTML"
+        if not simulation_steps:
+            raise HTTPException(400, "Nenhuma mensagem configurada para simular")
+        
+        # ══════════════════════════════════════════
+        # CRIAR SESSÃO E ENVIAR PRIMEIRO PASSO
+        # ══════════════════════════════════════════
+        session_id = _simcopy_create_session(
+            steps=simulation_steps,
+            bot_token=bot_db.token,
+            admin_id=admin_id,
+            bot_name=bot_db.nome,
+            protect=protect
         )
         
-        logger.info(f"🎯 [SIMULAR-COPY] {current_user.username}: bot={bot_id}, tipo={req.tipo}, msgs={mensagens_enviadas}")
+        # Header
+        modo = "PERSONALIZADA" if custom else "SALVA"
+        bot_sender = TeleBot(bot_db.token, threaded=False)
+        bot_sender.send_message(
+            admin_id,
+            f"🎯 <b>REVISÃO DE COPY — {req.tipo.upper()} ({modo})</b>\n\n"
+            f"<i>Simulação interativa do bot {bot_db.nome}.\n"
+            f"Clique nos botões para avançar entre as etapas.</i>\n"
+            f"📊 Total de etapas: {len(simulation_steps)}\n\n{'─' * 30}",
+            parse_mode="HTML"
+        )
+        time.sleep(1)
+        
+        # Envia o primeiro passo
+        _simcopy_send_step(session_id, 0)
         
         return {
             "status": "success",
-            "message": f"Simulação enviada! {mensagens_enviadas} mensagens para o admin.",
-            "mensagens_enviadas": mensagens_enviadas,
-            "admin_id": admin_id
+            "mensagens_enviadas": len(simulation_steps),
+            "tipo": req.tipo,
+            "personalizada": custom is not None,
+            "interativa": True,
+            "session_id": session_id
         }
-        
+    
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ [SIMULAR-COPY] Erro: {str(e)}", exc_info=True)
-        raise HTTPException(500, detail=str(e))
+        logger.error(f"❌ Erro ao simular copy: {e}")
+        raise HTTPException(500, f"Erro ao simular: {str(e)}")
+
 
 # =========================================================
 # 📁 ROTA DE UPLOAD DE MÍDIA (BACKBLAZE B2)
