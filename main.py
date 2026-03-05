@@ -17804,7 +17804,140 @@ def clonar_funil(
 # 🎯 REVISÃO DE COPY — SIMULAÇÃO VIA BOT
 # =========================================================
 class SimularCopyRequest(BaseModel):
-    tipo: str  # flow, remarketing, orderbump, upsell, downsell, canalfree, auto_remarketing
+    tipo: str  # flow, remarketing, orderbump, upsell, downsell, canalfree, auto_remarketing, completo
+    custom_data: Optional[dict] = None  # Dados personalizados para teste (se None, usa os salvos)
+
+
+# ============================================================
+# 📋 ENDPOINT: GET COPY DATA (para Revisão de Copy personalizada)
+# ============================================================
+@app.get("/api/admin/recursos-prime/get-copy-data/{bot_id}/{tipo}")
+def get_copy_data(
+    bot_id: int,
+    tipo: str,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Retorna os dados atuais da copy configurada para um bot,
+    permitindo que o frontend exiba os campos para edição.
+    """
+    try:
+        verificar_bot_pertence_usuario(bot_id, current_user.id, db)
+        
+        if tipo == "flow":
+            flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
+            if not flow:
+                raise HTTPException(400, "Flow não configurado para este bot")
+            
+            steps = db.query(BotFlowStep).filter(
+                BotFlowStep.bot_id == bot_id
+            ).order_by(BotFlowStep.step_order).all()
+            
+            return {
+                "tipo": "flow",
+                "msg_boas_vindas": flow.msg_boas_vindas or "",
+                "media_url": flow.media_url or "",
+                "btn_text_1": flow.btn_text_1 or "📋 Ver Planos",
+                "buttons_config": flow.buttons_config,
+                "msg_2_texto": flow.msg_2_texto or "",
+                "msg_2_media": flow.msg_2_media or "",
+                "msg_pix": flow.msg_pix or "",
+                "buttons_config_2": flow.buttons_config_2,
+                "steps": [
+                    {
+                        "id": s.id,
+                        "step_order": s.step_order,
+                        "msg_texto": s.msg_texto or "",
+                        "msg_media": s.msg_media or "",
+                        "btn_texto": s.btn_texto or "Próximo ▶️",
+                        "buttons_config": s.buttons_config,
+                        "autodestruir": s.autodestruir,
+                        "mostrar_botao": s.mostrar_botao,
+                        "delay_seconds": s.delay_seconds or 0,
+                    }
+                    for s in steps
+                ]
+            }
+        
+        elif tipo == "orderbump":
+            ob = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
+            if not ob:
+                raise HTTPException(400, "Order Bump não configurado para este bot")
+            return {
+                "tipo": "orderbump",
+                "msg_texto": ob.msg_texto or "",
+                "msg_media": ob.msg_media or "",
+                "audio_url": getattr(ob, 'audio_url', "") or "",
+                "btn_aceitar": ob.btn_aceitar or "✅ SIM",
+                "btn_recusar": ob.btn_recusar or "❌ NÃO",
+            }
+        
+        elif tipo == "upsell":
+            up = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
+            if not up:
+                raise HTTPException(400, "Upsell não configurado para este bot")
+            return {
+                "tipo": "upsell",
+                "msg_texto": up.msg_texto or "",
+                "msg_media": up.msg_media or "",
+                "audio_url": getattr(up, 'audio_url', "") or "",
+                "btn_aceitar": getattr(up, 'btn_aceitar', "✅ QUERO") or "✅ QUERO",
+                "btn_recusar": getattr(up, 'btn_recusar', "") or "",
+            }
+        
+        elif tipo == "downsell":
+            ds = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
+            if not ds:
+                raise HTTPException(400, "Downsell não configurado para este bot")
+            return {
+                "tipo": "downsell",
+                "msg_texto": ds.msg_texto or "",
+                "msg_media": ds.msg_media or "",
+                "audio_url": getattr(ds, 'audio_url', "") or "",
+                "btn_aceitar": getattr(ds, 'btn_aceitar', "✅ QUERO") or "✅ QUERO",
+                "btn_recusar": getattr(ds, 'btn_recusar', "") or "",
+            }
+        
+        elif tipo == "canalfree":
+            cf = db.query(CanalFreeConfig).filter(CanalFreeConfig.bot_id == bot_id).first()
+            if not cf:
+                raise HTTPException(400, "Canal Free não configurado para este bot")
+            return {
+                "tipo": "canalfree",
+                "message_text": cf.message_text or "",
+                "media_url": cf.media_url or "",
+                "media_type": getattr(cf, 'media_type', "") or "",
+                "audio_url": getattr(cf, 'audio_url', "") or "",
+                "buttons": cf.buttons if isinstance(cf.buttons, list) else [],
+            }
+        
+        elif tipo in ["remarketing", "auto_remarketing"]:
+            rmk = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_id).first()
+            if not rmk:
+                raise HTTPException(400, "Remarketing não configurado para este bot")
+            return {
+                "tipo": "remarketing",
+                "message_text": rmk.message_text or "",
+                "media_url": rmk.media_url or "",
+                "media_type": getattr(rmk, 'media_type', "") or "",
+                "audio_url": getattr(rmk, 'audio_url', "") or "",
+            }
+        
+        elif tipo == "completo":
+            return {
+                "tipo": "completo",
+                "info": "O fluxo completo usa os dados salvos de cada etapa. Personalize cada etapa individualmente."
+            }
+        
+        else:
+            raise HTTPException(400, f"Tipo '{tipo}' não reconhecido")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro ao buscar copy data: {e}")
+        raise HTTPException(500, f"Erro interno: {str(e)}")
 
 @app.post("/api/admin/recursos-prime/simular-copy/{bot_id}")
 def simular_copy(
@@ -17830,6 +17963,7 @@ def simular_copy(
         bot_sender = TeleBot(bot_db.token, threaded=False)
         protect = getattr(bot_db, 'protect_content', False) or False
         mensagens_enviadas = 0
+        custom = req.custom_data  # Dados personalizados (pode ser None)
         
         def enviar_msg(texto, media_url=None, media_type=None, audio_url=None, markup=None, label=""):
             """Helper para enviar uma mensagem com mídia/texto/botões"""
@@ -17873,7 +18007,8 @@ def simular_copy(
                 mensagens_enviadas += 1
         
         # ===== HEADER =====
-        bot_sender.send_message(admin_id, f"🎯 <b>REVISÃO DE COPY — {req.tipo.upper()}</b>\n\n<i>Simulação do fluxo configurado para o bot {bot_db.nome}.\nAs mensagens abaixo representam exatamente o que seus clientes verão.</i>\n\n{'─' * 30}", parse_mode="HTML")
+        modo_label = 'PERSONALIZADA' if custom else 'SALVA'
+        bot_sender.send_message(admin_id, f"🎯 <b>REVISÃO DE COPY — {req.tipo.upper()} ({modo_label})</b>\n\n<i>Simulação do fluxo configurado para o bot {bot_db.nome}.\nAs mensagens abaixo representam exatamente o que seus clientes verão.</i>\n\n{'─' * 30}", parse_mode="HTML")
         time.sleep(1)
         
         # ===== FLOW CHAT =====
@@ -17881,6 +18016,11 @@ def simular_copy(
             flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_id).first()
             if not flow:
                 raise HTTPException(400, "Flow não configurado para este bot")
+            
+            # Usa dados custom se fornecidos, senão usa os salvos
+            msg_bv = custom.get('msg_boas_vindas', flow.msg_boas_vindas) if custom else flow.msg_boas_vindas
+            media_flow = custom.get('media_url', flow.media_url) if custom else flow.media_url
+            btn_1 = custom.get('btn_text_1', flow.btn_text_1) if custom else flow.btn_text_1
             
             # Msg 1 - Boas-vindas
             markup1 = types.InlineKeyboardMarkup()
@@ -17896,7 +18036,7 @@ def simular_copy(
             else:
                 markup1.add(types.InlineKeyboardButton(flow.btn_text_1 or "📋 Ver Planos", callback_data="sim_noop"))
             
-            enviar_msg(flow.msg_boas_vindas, media_url=flow.media_url, markup=markup1, label="Boas-vindas")
+            enviar_msg(msg_bv, media_url=media_flow, markup=markup1, label="Boas-vindas")
             time.sleep(1.5)
             
             # Steps extras
@@ -17926,14 +18066,20 @@ def simular_copy(
             if not ob:
                 raise HTTPException(400, "Order Bump não configurado para este bot")
             
+            ob_msg = custom.get('msg_texto', ob.msg_texto) if custom else ob.msg_texto
+            ob_media = custom.get('msg_media', ob.msg_media) if custom else ob.msg_media
+            ob_audio = custom.get('audio_url', getattr(ob, 'audio_url', None)) if custom else getattr(ob, 'audio_url', None)
+            ob_btn_a = custom.get('btn_aceitar', ob.btn_aceitar) if custom else ob.btn_aceitar
+            ob_btn_r = custom.get('btn_recusar', ob.btn_recusar) if custom else ob.btn_recusar
+            
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton(ob.btn_aceitar or "✅ SIM", callback_data="sim_noop"))
-            markup.add(types.InlineKeyboardButton(ob.btn_recusar or "❌ NÃO", callback_data="sim_noop"))
+            markup.add(types.InlineKeyboardButton(ob_btn_a or "✅ SIM", callback_data="sim_noop"))
+            markup.add(types.InlineKeyboardButton(ob_btn_r or "❌ NÃO", callback_data="sim_noop"))
             
             enviar_msg(
-                ob.msg_texto, 
-                media_url=ob.msg_media, 
-                audio_url=getattr(ob, 'audio_url', None),
+                ob_msg, 
+                media_url=ob_media, 
+                audio_url=ob_audio,
                 markup=markup, 
                 label="Order Bump"
             )
@@ -17950,10 +18096,14 @@ def simular_copy(
             if btn_recusar:
                 markup.add(types.InlineKeyboardButton(btn_recusar, callback_data="sim_noop"))
             
+            up_msg = custom.get('msg_texto', up.msg_texto) if custom else up.msg_texto
+            up_media = custom.get('msg_media', up.msg_media) if custom else up.msg_media
+            up_audio = custom.get('audio_url', getattr(up, 'audio_url', None)) if custom else getattr(up, 'audio_url', None)
+            
             enviar_msg(
-                up.msg_texto,
-                media_url=up.msg_media,
-                audio_url=getattr(up, 'audio_url', None),
+                up_msg,
+                media_url=up_media,
+                audio_url=up_audio,
                 markup=markup,
                 label="Upsell"
             )
@@ -17970,10 +18120,14 @@ def simular_copy(
             if btn_recusar:
                 markup.add(types.InlineKeyboardButton(btn_recusar, callback_data="sim_noop"))
             
+            ds_msg = custom.get('msg_texto', ds.msg_texto) if custom else ds.msg_texto
+            ds_media = custom.get('msg_media', ds.msg_media) if custom else ds.msg_media
+            ds_audio = custom.get('audio_url', getattr(ds, 'audio_url', None)) if custom else getattr(ds, 'audio_url', None)
+            
             enviar_msg(
-                ds.msg_texto,
-                media_url=ds.msg_media,
-                audio_url=getattr(ds, 'audio_url', None),
+                ds_msg,
+                media_url=ds_media,
+                audio_url=ds_audio,
                 markup=markup,
                 label="Downsell"
             )
@@ -17994,11 +18148,16 @@ def simular_copy(
                     else:
                         markup.add(types.InlineKeyboardButton(btn.get('text', 'Botão'), callback_data="sim_noop"))
             
+            cf_msg = custom.get('message_text', cf.message_text) if custom else cf.message_text
+            cf_media = custom.get('media_url', cf.media_url) if custom else cf.media_url
+            cf_mt = custom.get('media_type', getattr(cf, 'media_type', None)) if custom else getattr(cf, 'media_type', None)
+            cf_audio = custom.get('audio_url', getattr(cf, 'audio_url', None)) if custom else getattr(cf, 'audio_url', None)
+            
             enviar_msg(
-                cf.message_text,
-                media_url=cf.media_url,
-                media_type=getattr(cf, 'media_type', None),
-                audio_url=getattr(cf, 'audio_url', None),
+                cf_msg,
+                media_url=cf_media,
+                media_type=cf_mt,
+                audio_url=cf_audio,
                 markup=markup,
                 label="Canal Free"
             )
@@ -18010,11 +18169,16 @@ def simular_copy(
                 raise HTTPException(400, "Remarketing não configurado para este bot")
             
             # Mensagem principal
+            rmk_msg = custom.get('message_text', rmk.message_text) if custom else rmk.message_text
+            rmk_media = custom.get('media_url', rmk.media_url) if custom else rmk.media_url
+            rmk_mt = custom.get('media_type', getattr(rmk, 'media_type', None)) if custom else getattr(rmk, 'media_type', None)
+            rmk_audio = custom.get('audio_url', getattr(rmk, 'audio_url', None)) if custom else getattr(rmk, 'audio_url', None)
+            
             enviar_msg(
-                rmk.message_text,
-                media_url=rmk.media_url,
-                media_type=getattr(rmk, 'media_type', None),
-                audio_url=getattr(rmk, 'audio_url', None),
+                rmk_msg,
+                media_url=rmk_media,
+                media_type=rmk_mt,
+                audio_url=rmk_audio,
                 label="Remarketing Principal"
             )
             
@@ -20443,6 +20607,129 @@ async def migrate_reports_v3(db: Session = Depends(get_db)):
             "status": "success",
             "message": "🚨 Correção de Donos V3 concluída!",
             "details": log_msgs
+        }
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+
+# ============================================================
+# 🔧 MIGRAÇÃO: Fix primeiro_contato para Tempo Médio /START → PAGAMENTO
+# ============================================================
+@app.get("/migrate-fix-primeiro-contato")
+async def migrate_fix_primeiro_contato(db: Session = Depends(get_db)):
+    """
+    Preenche o campo 'primeiro_contato' nos pedidos que não têm,
+    buscando do Lead correspondente ou usando created_at como fallback.
+    Acesse UMA VEZ: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-fix-primeiro-contato
+    """
+    try:
+        from sqlalchemy import text
+        
+        # 1. Pedidos sem primeiro_contato que têm um Lead correspondente
+        result1 = db.execute(text("""
+            UPDATE pedidos p
+            SET primeiro_contato = l.primeiro_contato
+            FROM leads l
+            WHERE p.telegram_id = l.user_id
+            AND p.bot_id = l.bot_id
+            AND p.primeiro_contato IS NULL
+            AND l.primeiro_contato IS NOT NULL
+        """))
+        updated_from_leads = result1.rowcount
+        
+        # 2. Pedidos que AINDA não têm: usa created_at como fallback
+        result2 = db.execute(text("""
+            UPDATE pedidos
+            SET primeiro_contato = created_at
+            WHERE primeiro_contato IS NULL
+            AND created_at IS NOT NULL
+        """))
+        updated_from_created = result2.rowcount
+        
+        db.commit()
+        
+        return {
+            "status": "success",
+            "message": "✅ Migração primeiro_contato concluída!",
+            "details": {
+                "preenchidos_via_lead": updated_from_leads,
+                "preenchidos_via_created_at": updated_from_created,
+                "total_corrigidos": updated_from_leads + updated_from_created
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+
+
+# ============================================================
+# 🔧 MIGRAÇÃO: Copiar credenciais de gateway do primeiro bot para novos bots
+# ============================================================
+@app.get("/api/admin/sync-gateway-credentials")
+def sync_gateway_credentials(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Copia as credenciais de gateway do primeiro bot configurado do usuário
+    para todos os outros bots que ainda não têm credenciais.
+    A ordem de contingência permanece individual por bot.
+    """
+    try:
+        bots = db.query(BotModel).filter(BotModel.owner_id == current_user.id).all()
+        if not bots:
+            return {"status": "error", "message": "Nenhum bot encontrado"}
+        
+        # Encontra o primeiro bot com credenciais configuradas
+        source_bot = None
+        for b in bots:
+            if b.pushin_token or b.wiinpay_api_key or b.syncpay_client_id:
+                source_bot = b
+                break
+        
+        if not source_bot:
+            return {"status": "error", "message": "Nenhum bot possui credenciais de gateway configuradas"}
+        
+        updated = 0
+        for b in bots:
+            if b.id == source_bot.id:
+                continue
+            
+            changed = False
+            # Copia PushinPay
+            if source_bot.pushin_token and not b.pushin_token:
+                b.pushin_token = source_bot.pushin_token
+                b.pushinpay_ativo = source_bot.pushinpay_ativo
+                changed = True
+            
+            # Copia WiinPay
+            if source_bot.wiinpay_api_key and not b.wiinpay_api_key:
+                b.wiinpay_api_key = source_bot.wiinpay_api_key
+                b.wiinpay_ativo = source_bot.wiinpay_ativo
+                changed = True
+            
+            # Copia SyncPay
+            if source_bot.syncpay_client_id and not b.syncpay_client_id:
+                b.syncpay_client_id = source_bot.syncpay_client_id
+                b.syncpay_client_secret = source_bot.syncpay_client_secret
+                b.syncpay_access_token = source_bot.syncpay_access_token
+                b.syncpay_token_expires_at = source_bot.syncpay_token_expires_at
+                b.syncpay_ativo = source_bot.syncpay_ativo
+                changed = True
+            
+            # NÃO copia gateway_principal/fallback (mantém individual por bot)
+            
+            if changed:
+                updated += 1
+        
+        db.commit()
+        
+        return {
+            "status": "success",
+            "message": f"✅ Credenciais sincronizadas para {updated} bots!",
+            "source_bot": source_bot.nome,
+            "bots_atualizados": updated,
+            "nota": "A ordem de contingência (gateway_principal/fallback) permanece individual por bot."
         }
     except Exception as e:
         db.rollback()
