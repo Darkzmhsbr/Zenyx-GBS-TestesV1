@@ -4466,12 +4466,15 @@ async def gerar_pix_paradise(
         raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
         clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
         
-        # 🔥 CORREÇÃO: A API EXIGE A CHAVE "customer" EM VEZ DE "payer"
+        # 🔥 CORREÇÃO: ADICIONADO O CAMPO DE E-MAIL (Usando ID do Telegram para ser único)
+        email_fake = f"cliente_{user_telegram_id}@telegram.com" if user_telegram_id else "cliente@telegram.com"
+
         payload = {
             "value": valor_total_centavos,
             "customer": {
                 "name": user_first_name or "Cliente Telegram",
                 "document": "00000000000",
+                "email": email_fake  # <--- AGORA A PARADISE VAI ACEITAR!
             },
             "external_id": transaction_id,
             "webhook_url": f"https://{clean_domain}/webhook/paradise"
