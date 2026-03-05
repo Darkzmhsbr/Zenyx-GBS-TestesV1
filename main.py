@@ -4422,9 +4422,6 @@ async def gerar_pix_syncpay(
 # =========================================================
 # 🚀 GERADOR E WEBHOOK: PARADISE PAGAMENTOS
 # =========================================================
-# =========================================================
-# 🚀 GERADOR E WEBHOOK: PARADISE PAGAMENTOS
-# =========================================================
 async def gerar_pix_paradise(
     valor_float: float, 
     transaction_id: str, 
@@ -4440,12 +4437,10 @@ async def gerar_pix_paradise(
         if not bot or not bot.paradise_api_key:
             return None
 
-        # Recupera as chaves mestras para o split
         system_config = db.query(SystemConfig).all()
         config_dict = {item.key: item.value for item in system_config}
         master_recipient_id = config_dict.get("master_paradise_account_id", "")
         
-        # Pega a taxa da plataforma
         taxa_centavos = 60
         if bot.owner_id:
             from database import User
@@ -4462,35 +4457,35 @@ async def gerar_pix_paradise(
         }
         
         valor_total_centavos = int(valor_float * 100)
-        
         raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
         clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
         
-        # 🔥 CORREÇÃO: ADICIONADO O CAMPO DE E-MAIL (Usando ID do Telegram para ser único)
+        # 🔥 DADOS OBRIGATÓRIOS SEGUNDO A DOC DA PARADISE
         email_fake = f"cliente_{user_telegram_id}@telegram.com" if user_telegram_id else "cliente@telegram.com"
+        telefone_fake = "11999999999" # 11 dígitos exigidos
 
         payload = {
-            "value": valor_total_centavos,
+            "amount": valor_total_centavos,
+            "description": f"Pedido {transaction_id} - {plano_nome or 'Acesso'}",
+            "reference": str(transaction_id),
+            "postback_url": f"https://{clean_domain}/webhook/paradise",
             "customer": {
                 "name": user_first_name or "Cliente Telegram",
                 "document": "00000000000",
-                "email": email_fake  # <--- AGORA A PARADISE VAI ACEITAR!
-            },
-            "external_id": transaction_id,
-            "webhook_url": f"https://{clean_domain}/webhook/paradise"
+                "email": email_fake,
+                "phone": telefone_fake
+            }
         }
         
-        # Se for para o bot do Admin, não tem split
         is_admin_bot = False
         if bot.owner_id and owner and getattr(owner, 'paradise_account_id', '') == master_recipient_id:
             is_admin_bot = True
 
         if master_recipient_id and not is_admin_bot and taxa_centavos > 0:
-            payload["split"] = [
+            payload["splits"] = [
                 {
-                    "recipient_id": master_recipient_id,
-                    "amount": taxa_centavos,
-                    "type": "fixed"
+                    "recipientId": int(master_recipient_id), # Exige ID numérico
+                    "amount": taxa_centavos
                 }
             ]
         
@@ -4499,9 +4494,8 @@ async def gerar_pix_paradise(
             
         if resp.status_code in (200, 201):
             dados = resp.json()
-            identifier = dados.get("transaction_id") or transaction_id
+            identifier = dados.get("transaction_id") or transaction_id # ID numérico interno
             
-            # Remarketing
             if agendar_remarketing and user_telegram_id:
                 try:
                     chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
@@ -4516,7 +4510,7 @@ async def gerar_pix_paradise(
             return {
                 "id": identifier,
                 "qr_code": dados.get("qr_code") or dados.get("copy_paste"),
-                "qrcode_url": dados.get("qr_code_url") or dados.get("qr_image") or "",
+                "qrcode_url": dados.get("qr_code_url") or dados.get("qr_code_base64") or "",
                 "gateway": "paradise"
             }
         else:
@@ -4534,61 +4528,32 @@ async def webhook_paradise(request: Request, db: Session = Depends(get_db)):
         logger.info(f"📩 [PARADISE WEBHOOK] {data}")
         
         status = data.get("status")
-        if status in ["PAID", "APPROVED", "COMPLETED", "succeeded"]:
+        # Segundo a doc, o status de sucesso é 'approved'
+        if status in ["approved", "PAID", "APPROVED", "COMPLETED", "succeeded"]:
             txid = str(data.get("external_id")).lower()
             
             pedido = db.query(Pedido).filter(
                 (Pedido.txid == txid) | (Pedido.transaction_id == txid)
             ).first()
             
-            if not pedido:
-                logger.warning(f"⚠️ [PARADISE] Pedido {txid} não encontrado")
-                return {"status": "ignored"}
-                
-            if pedido.status in ["approved", "paid", "active"]:
-                return {"status": "ok", "msg": "Already paid"}
+            if not pedido: return {"status": "ignored"}
+            if pedido.status in ["approved", "paid", "active"]: return {"status": "ok"}
 
-            # Redireciona para o webhook principal (MÁGICA DE REAPROVEITAMENTO)
             try:
-                fake_payload = json.dumps({
-                    "data": {
-                        "id": txid,
-                        "status": "completed",
-                        "amount": pedido.valor
-                    }
-                }).encode("utf-8")
-                
-                scope = {
-                    "type": "http",
-                    "method": "POST",
-                    "path": "/webhook/pix",
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"event", b"cashin.update"), 
-                    ],
-                }
-                
+                fake_payload = json.dumps({"data": {"id": txid, "status": "completed", "amount": pedido.valor}}).encode("utf-8")
+                scope = {"type": "http", "method": "POST", "path": "/webhook/pix", "headers": [(b"content-type", b"application/json"), (b"event", b"cashin.update")]}
                 class FakeReceive:
-                    def __init__(self, body):
-                        self._body = body
-                        self._sent = False
+                    def __init__(self, body): self._body, self._sent = body, False
                     async def __call__(self):
-                        if not self._sent:
-                            self._sent = True
-                            return {"type": "http.request", "body": self._body}
+                        if not self._sent: self._sent = True; return {"type": "http.request", "body": self._body}
                         return {"type": "http.disconnect"}
-                
                 fake_request = Request(scope, receive=FakeReceive(fake_payload))
-                
-                # Executa o webhook_pix nativo
                 await webhook_pix(fake_request, db)
-                logger.info(f"✅ [PARADISE] Pedido {txid} entregue com sucesso via webhook_pix")
             except Exception as e_process:
                 logger.error(f"❌ [PARADISE] Erro na liberação: {e_process}")
                 
         return {"status": "ok"}
     except Exception as e:
-        logger.error(f"❌ [PARADISE WEBHOOK ERRO]: {e}")
         return {"error": str(e)}
 
 # =========================================================
@@ -4622,41 +4587,51 @@ async def gerar_pix_omegapay(
             else:
                 taxa_centavos = int(config_dict.get("default_fee", "60"))
 
-        url = "https://api.omegapay.com.br/v1/pix/qrcode" 
+        url = "https://app.omegapayments.com.br/api/v1/pix/receive" 
         headers = {
             "Content-Type": "application/json",
             "x-public-key": bot.omegapay_client_id,
             "x-secret-key": bot.omegapay_client_secret
         }
         
-        valor_total_centavos = int(valor_float * 100)
         raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
         clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
         
+        email_fake = f"cliente_{user_telegram_id}@telegram.com" if user_telegram_id else "cliente@telegram.com"
+
+        # 🔥 DADOS OBRIGATÓRIOS SEGUNDO A DOC DA OMEGAPAY (Valor em REAIS e objeto client)
         payload = {
-            "amount": valor_total_centavos,
-            "payer_name": user_first_name or "Cliente",
-            "payer_document": "00000000000",
-            "external_reference": transaction_id,
-            "webhook_url": f"https://{clean_domain}/webhook/omegapay"
+            "identifier": str(transaction_id),
+            "amount": float(valor_float), # OMEGAPAY EXIGE FLOAT EM REAIS
+            "callbackUrl": f"https://{clean_domain}/webhook/omegapay",
+            "client": {
+                "name": user_first_name or "Cliente",
+                "document": "00000000000",
+                "email": email_fake,
+                "phone": "11999999999"
+            }
         }
         
         is_admin_bot = False
         if bot.owner_id and owner and getattr(owner, 'omegapay_client_id', '') == master_split_id:
             is_admin_bot = True
 
+        # Split da OmegaPay exige valor em Reais e campo producerId
         if master_split_id and not is_admin_bot and taxa_centavos > 0:
-            payload["split"] = {
-                "receiver_id": master_split_id,
-                "amount": taxa_centavos
-            }
+            taxa_reais = float(taxa_centavos) / 100.0
+            payload["splits"] = [
+                {
+                    "producerId": str(master_split_id),
+                    "amount": taxa_reais
+                }
+            ]
         
         async with httpx.AsyncClient() as client:
             resp = await client.post(url, json=payload, headers=headers, timeout=15.0)
             
         if resp.status_code in (200, 201):
             dados = resp.json()
-            identifier = dados.get("txid") or transaction_id
+            identifier = dados.get("transactionId") or transaction_id
             
             if agendar_remarketing and user_telegram_id:
                 try:
@@ -4669,10 +4644,11 @@ async def gerar_pix_omegapay(
                         )
                 except: pass
 
+            pix_data = dados.get("pix", {})
             return {
                 "id": identifier,
-                "qr_code": dados.get("copy_paste") or dados.get("qr_code"),
-                "qrcode_url": dados.get("qr_image") or dados.get("qr_code_url", ""),
+                "qr_code": pix_data.get("qrCode") or pix_data.get("copy_paste"),
+                "qrcode_url": pix_data.get("qrCodeUrl") or "",
                 "gateway": "omegapay"
             }
         else:
@@ -4683,68 +4659,42 @@ async def gerar_pix_omegapay(
         logger.error(f"❌ Erro ao gerar PIX OmegaPay: {e}")
         return None
 
-
 @app.post("/webhook/omegapay")
 async def webhook_omegapay(request: Request, db: Session = Depends(get_db)):
     try:
         data = await request.json()
         logger.info(f"📩 [OMEGAPAY WEBHOOK] {data}")
         
-        status = data.get("status")
-        if status in ["APPROVED", "PAID", "COMPLETED", "succeeded"]:
-            txid = str(data.get("external_reference")).lower()
+        event = data.get("event")
+        transaction = data.get("transaction", {})
+        status = transaction.get("status")
+        
+        # A doc da OmegaPay manda o status dentro do objeto transaction
+        if event == "TRANSACTION_PAID" or status == "COMPLETED":
+            txid = str(transaction.get("identifier")).lower()
             
             pedido = db.query(Pedido).filter(
                 (Pedido.txid == txid) | (Pedido.transaction_id == txid)
             ).first()
             
-            if not pedido:
-                logger.warning(f"⚠️ [OMEGAPAY] Pedido {txid} não encontrado")
-                return {"status": "ignored"}
-                
-            if pedido.status in ["approved", "paid", "active"]:
-                return {"status": "ok", "msg": "Already paid"}
+            if not pedido: return {"status": "ignored"}
+            if pedido.status in ["approved", "paid", "active"]: return {"status": "ok"}
 
-            # Redireciona para o webhook principal (MÁGICA DE REAPROVEITAMENTO)
             try:
-                fake_payload = json.dumps({
-                    "data": {
-                        "id": txid,
-                        "status": "completed",
-                        "amount": pedido.valor
-                    }
-                }).encode("utf-8")
-                
-                scope = {
-                    "type": "http",
-                    "method": "POST",
-                    "path": "/webhook/pix",
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"event", b"cashin.update"),
-                    ],
-                }
-                
+                fake_payload = json.dumps({"data": {"id": txid, "status": "completed", "amount": pedido.valor}}).encode("utf-8")
+                scope = {"type": "http", "method": "POST", "path": "/webhook/pix", "headers": [(b"content-type", b"application/json"), (b"event", b"cashin.update")]}
                 class FakeReceive:
-                    def __init__(self, body):
-                        self._body = body
-                        self._sent = False
+                    def __init__(self, body): self._body, self._sent = body, False
                     async def __call__(self):
-                        if not self._sent:
-                            self._sent = True
-                            return {"type": "http.request", "body": self._body}
+                        if not self._sent: self._sent = True; return {"type": "http.request", "body": self._body}
                         return {"type": "http.disconnect"}
-                
                 fake_request = Request(scope, receive=FakeReceive(fake_payload))
-                
                 await webhook_pix(fake_request, db)
-                logger.info(f"✅ [OMEGAPAY] Pedido {txid} entregue com sucesso via webhook_pix")
             except Exception as e_process:
                 logger.error(f"❌ [OMEGAPAY] Erro na liberação: {e_process}")
                 
         return {"status": "ok"}
     except Exception as e:
-        logger.error(f"❌ [OMEGAPAY WEBHOOK ERRO]: {e}")
         return {"error": str(e)}
 
 # =========================================================
