@@ -4422,6 +4422,9 @@ async def gerar_pix_syncpay(
 # =========================================================
 # 🚀 GERADOR E WEBHOOK: PARADISE PAGAMENTOS
 # =========================================================
+# =========================================================
+# 🚀 GERADOR E WEBHOOK: PARADISE PAGAMENTOS
+# =========================================================
 async def gerar_pix_paradise(
     valor_float: float, 
     transaction_id: str, 
@@ -4463,9 +4466,10 @@ async def gerar_pix_paradise(
         raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
         clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
         
+        # 🔥 CORREÇÃO: A API EXIGE A CHAVE "customer" EM VEZ DE "payer"
         payload = {
             "value": valor_total_centavos,
-            "payer": {
+            "customer": {
                 "name": user_first_name or "Cliente Telegram",
                 "document": "00000000000",
             },
@@ -4508,8 +4512,8 @@ async def gerar_pix_paradise(
 
             return {
                 "id": identifier,
-                "qr_code": dados.get("qr_code"),
-                "qrcode_url": dados.get("qr_code_url", ""),
+                "qr_code": dados.get("qr_code") or dados.get("copy_paste"),
+                "qrcode_url": dados.get("qr_code_url") or dados.get("qr_image") or "",
                 "gateway": "paradise"
             }
         else:
@@ -4519,7 +4523,6 @@ async def gerar_pix_paradise(
     except Exception as e:
         logger.error(f"❌ Erro ao gerar PIX Paradise: {e}")
         return None
-
 
 @app.post("/webhook/paradise")
 async def webhook_paradise(request: Request, db: Session = Depends(get_db)):
