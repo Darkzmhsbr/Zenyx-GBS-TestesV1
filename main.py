@@ -1423,6 +1423,9 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
         primeira_msg = messages[0]
         texto_primeira = primeira_msg if isinstance(primeira_msg, str) else primeira_msg.get('content', '')
         
+        # 📅 SUBSTITUI VARIÁVEIS DE DATA DINÂMICAS
+        texto_primeira = replace_date_variables(texto_primeira)
+        
         # ✨ CONVERTE EMOJIS PREMIUM
         texto_primeira = convert_premium_emojis(texto_primeira)
         
@@ -1468,6 +1471,9 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
             # ✅ EDITAR A MENSAGEM COM O PRÓXIMO CONTEÚDO
             mensagem_atual = messages[mensagem_index]
             texto_atual = mensagem_atual if isinstance(mensagem_atual, str) else mensagem_atual.get('content', '')
+            
+            # 📅 SUBSTITUI VARIÁVEIS DE DATA DINÂMICAS
+            texto_atual = replace_date_variables(texto_atual)
             
             # ✨ CONVERTE EMOJIS PREMIUM
             texto_atual = convert_premium_emojis(texto_atual)
@@ -1622,6 +1628,9 @@ async def send_remarketing_job(
                 msg_text = msg_text.replace('{first_name}', user_info.get('first_name', ''))
                 msg_text = msg_text.replace('{plano_original}', user_info.get('plano', 'VIP'))
                 msg_text = msg_text.replace('{valor_original}', str(user_info.get('valor', '')))
+
+            # 📅 SUBSTITUI VARIÁVEIS DE DATA DINÂMICAS
+            msg_text = replace_date_variables(msg_text)
 
             # ✨ CONVERTE EMOJIS PREMIUM
             msg_text = convert_premium_emojis(msg_text)
@@ -2270,6 +2279,12 @@ async def enviar_mensagens_alternantes():
                         mensagem_atual = mensagens[proximo_index]
                         
                         texto_envio = mensagem_atual if isinstance(mensagem_atual, str) else mensagem_atual.get('content', '')
+                        
+                        # 📅 SUBSTITUI VARIÁVEIS DE DATA DINÂMICAS
+                        texto_envio = replace_date_variables(texto_envio)
+                        
+                        # ✨ CONVERTE EMOJIS PREMIUM
+                        texto_envio = convert_premium_emojis(texto_envio)
                         
                         if not texto_envio or not texto_envio.strip(): continue
                         
