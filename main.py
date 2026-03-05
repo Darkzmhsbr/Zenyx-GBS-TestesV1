@@ -13070,6 +13070,13 @@ def send_test_message(
         # ✨ Converte emojis premium e variáveis
         texto = req.message or ""
         texto = texto.replace("{first_name}", "Usuário Teste").replace("{nome}", "Teste").replace("{username}", "@teste").replace("{id}", str(admin_id))
+        
+        # =========================================================
+        # 📅 AQUI ESTÁ A MÁGICA: SUBSTITUI A DATA ANTES DE ENVIAR O TESTE
+        # =========================================================
+        texto = replace_date_variables(texto)
+        
+        # Converte os emojis premium logo em seguida
         texto = convert_premium_emojis(texto)
         
         # 🔒 Proteção de conteúdo
@@ -13155,7 +13162,7 @@ def send_test_message(
     except Exception as e:
         logger.error(f"❌ [TEST-SEND] Erro: {e}", exc_info=True)
         raise HTTPException(500, detail=f"Erro ao enviar teste: {str(e)}")
-
+        
 # --- ROTAS FLOW V2 (HÍBRIDO) ---
 @app.get("/api/admin/bots/{bot_id}/flow")
 def get_flow(bot_id: int, db: Session = Depends(get_db)):
