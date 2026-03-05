@@ -5719,16 +5719,21 @@ def save_syncpay_token(bot_id: int, data: SyncPayIntegrationUpdate, db: Session 
 # =========================================================
 # 💳 INTEGRAÇÃO DOS BOTS: PARADISE E OMEGAPAY
 # =========================================================
+# =========================================================
+# 💳 INTEGRAÇÃO DOS BOTS: PARADISE E OMEGAPAY
+# =========================================================
 @app.get("/api/admin/integrations/paradise/{bot_id}")
 async def get_paradise_config(bot_id: int, db: Session = Depends(get_db)):
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
     if not bot: raise HTTPException(status_code=404, detail="Bot não encontrado")
     return {"api_key": bot.paradise_api_key, "ativo": bot.paradise_ativo}
 
 @app.post("/api/admin/integrations/paradise/{bot_id}")
 async def save_paradise_config(bot_id: int, request: Request, db: Session = Depends(get_db)):
     data = await request.json()
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot: raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
     bot.paradise_api_key = data.get("api_key")
     bot.paradise_ativo = data.get("ativo", False)
     db.commit()
@@ -5736,7 +5741,9 @@ async def save_paradise_config(bot_id: int, request: Request, db: Session = Depe
 
 @app.get("/api/admin/integrations/omegapay/{bot_id}")
 async def get_omegapay_config(bot_id: int, db: Session = Depends(get_db)):
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot: raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
     return {
         "client_id": bot.omegapay_client_id, 
         "client_secret": bot.omegapay_client_secret, 
@@ -5746,7 +5753,9 @@ async def get_omegapay_config(bot_id: int, db: Session = Depends(get_db)):
 @app.post("/api/admin/integrations/omegapay/{bot_id}")
 async def save_omegapay_config(bot_id: int, request: Request, db: Session = Depends(get_db)):
     data = await request.json()
-    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+    if not bot: raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
     bot.omegapay_client_id = data.get("client_id")
     bot.omegapay_client_secret = data.get("client_secret")
     bot.omegapay_ativo = data.get("ativo", False)
