@@ -64,6 +64,12 @@ class User(Base):
     # 🆕 MULTI-GATEWAY: Sync Pay (ID para Taxa de Split)
     syncpay_client_id = Column(String, nullable=True) # ID da conta do membro na Sync Pay
     
+    # 👇 [NOVO] COLOQUE ESTE TRECHO AQUI 👇
+    # 🆕 MULTI-GATEWAY: Paradise e OmegaPay (IDs para Taxa de Split)
+    paradise_account_id = Column(String, nullable=True) # ID da loja do usuário na Paradise
+    omegapay_client_id = Column(String, nullable=True)  # Client ID do usuário na OmegaPay
+    # 👆 ================================ 👆
+
     taxa_venda = Column(Integer, default=60)         # Taxa em centavos (Padrão: 60)
 
     # 🆕 SISTEMA DE LIMITES DE BOTS
@@ -126,6 +132,17 @@ class Bot(Base):
     syncpay_access_token = Column(String, nullable=True)  # Token temporário de 1h
     syncpay_token_expires_at = Column(DateTime, nullable=True) # Validade do Token
     
+    # 👇 [NOVO] COLOQUE ESTE TRECHO AQUI 👇
+    # 🆕 MULTI-GATEWAY: Paradise
+    paradise_api_key = Column(String, nullable=True) # A Secret Key do cliente
+    paradise_ativo = Column(Boolean, default=False)  # Botão Liga/Desliga
+
+    # 🆕 MULTI-GATEWAY: OmegaPay
+    omegapay_client_id = Column(String, nullable=True)     # Chave Pública do cliente
+    omegapay_client_secret = Column(String, nullable=True) # Chave Privada do cliente
+    omegapay_ativo = Column(Boolean, default=False)        # Botão Liga/Desliga
+    # 👆 ================================ 👆
+
     # 🆕 MULTI-GATEWAY: Controle de Gateways
     gateway_principal = Column(String, default="pushinpay")  # "pushinpay", "wiinpay" ou "syncpay"
     gateway_fallback = Column(String, nullable=True)          # Gateway de contingência
@@ -134,19 +151,15 @@ class Bot(Base):
     syncpay_ativo = Column(Boolean, default=False)            # Gateway Sync Pay ativa para este bot
 
     # 🔒 PROTEÇÃO DE CONTEÚDO (Telegram protect_content)
-    # Quando ativo, todas as mídias e mensagens enviadas pelo bot ficam protegidas:
-    # - Não podem ser encaminhadas
-    # - Não podem ser salvas/baixadas
-    # - Texto não pode ser copiado
     protect_content = Column(Boolean, default=False)
 
     created_at = Column(DateTime, default=now_brazil)
     
     # 🆕 ORDEM NO SELETOR DE BOTS (drag-and-drop)
-    selector_order = Column(Integer, default=0)  # 0 = sem ordem definida, menor = aparece primeiro
+    selector_order = Column(Integer, default=0)  
     
     # 🆕 RELACIONAMENTO COM USUÁRIO (OWNER)
-    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # nullable=True para migração
+    owner_id = Column(Integer, ForeignKey("users.id"), nullable=True)  
     owner = relationship("User", back_populates="bots")
     
     # --- RELACIONAMENTOS (CASCADE) ---
@@ -155,35 +168,24 @@ class Bot(Base):
     steps = relationship("BotFlowStep", back_populates="bot", cascade="all, delete-orphan")
     admins = relationship("BotAdmin", back_populates="bot", cascade="all, delete-orphan")
     
-    # RELACIONAMENTOS PARA EXCLUSÃO AUTOMÁTICA
     pedidos = relationship("Pedido", backref="bot_ref", cascade="all, delete-orphan")
     leads = relationship("Lead", backref="bot_ref", cascade="all, delete-orphan")
     
-    # ✅ CORREÇÃO APLICADA AQUI:
-    # Mudamos de 'campanhas' para 'remarketing_campaigns' e usamos back_populates="bot"
-    # para casar perfeitamente com a nova classe RemarketingCampaign
     remarketing_campaigns = relationship("RemarketingCampaign", back_populates="bot", cascade="all, delete-orphan")
-    
-    # Relacionamento com Order Bump
     order_bump = relationship("OrderBumpConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     
-    # 🆕 Relacionamentos com Upsell e Downsell
     upsell_config = relationship("UpsellConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     downsell_config = relationship("DownsellConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     
-    # Relacionamento com Tracking (Links pertencem a um bot)
     tracking_links = relationship("TrackingLink", back_populates="bot", cascade="all, delete-orphan")
 
-    # 🔥 Relacionamento com Mini App (Template Personalizável)
     miniapp_config = relationship("MiniAppConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     miniapp_categories = relationship("MiniAppCategory", back_populates="bot", cascade="all, delete-orphan")
     
-    # ✅ NOVOS: REMARKETING AUTOMÁTICO
     remarketing_config = relationship("RemarketingConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     alternating_messages = relationship("AlternatingMessages", uselist=False, back_populates="bot", cascade="all, delete-orphan")
     remarketing_logs = relationship("RemarketingLog", back_populates="bot", cascade="all, delete-orphan")
     
-    # ✅ NOVO: GRUPOS E CANAIS (ESTEIRA DE PRODUTOS)
     bot_groups = relationship("BotGroup", back_populates="bot", cascade="all, delete-orphan")
 
 class BotAdmin(Base):

@@ -4418,6 +4418,329 @@ async def gerar_pix_syncpay(
     except Exception as e:
         logger.error(f"❌ [SYNC PAY EXCEPTION PIX] {type(e).__name__}: {str(e)}")
         return None
+
+# =========================================================
+# 🚀 GERADOR E WEBHOOK: PARADISE PAGAMENTOS
+# =========================================================
+async def gerar_pix_paradise(
+    valor_float: float, 
+    transaction_id: str, 
+    bot_id: int, 
+    db: Session,
+    user_telegram_id: str = None,      
+    user_first_name: str = None,       
+    plano_nome: str = None,
+    agendar_remarketing: bool = True
+):
+    try:
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot or not bot.paradise_api_key:
+            return None
+
+        # Recupera as chaves mestras para o split
+        system_config = db.query(SystemConfig).all()
+        config_dict = {item.key: item.value for item in system_config}
+        master_recipient_id = config_dict.get("master_paradise_account_id", "")
+        
+        # Pega a taxa da plataforma
+        taxa_centavos = 60
+        if bot.owner_id:
+            from database import User
+            owner = db.query(User).filter(User.id == bot.owner_id).first()
+            if owner and owner.taxa_venda:
+                taxa_centavos = owner.taxa_venda
+            else:
+                taxa_centavos = int(config_dict.get("default_fee", "60"))
+
+        url = "https://multi.paradisepags.com/api/v1/transaction.php"
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": bot.paradise_api_key
+        }
+        
+        valor_total_centavos = int(valor_float * 100)
+        
+        raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
+        clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
+        
+        payload = {
+            "value": valor_total_centavos,
+            "payer": {
+                "name": user_first_name or "Cliente Telegram",
+                "document": "00000000000",
+            },
+            "external_id": transaction_id,
+            "webhook_url": f"https://{clean_domain}/webhook/paradise"
+        }
+        
+        # Se for para o bot do Admin, não tem split
+        is_admin_bot = False
+        if bot.owner_id and owner and getattr(owner, 'paradise_account_id', '') == master_recipient_id:
+            is_admin_bot = True
+
+        if master_recipient_id and not is_admin_bot and taxa_centavos > 0:
+            payload["split"] = [
+                {
+                    "recipient_id": master_recipient_id,
+                    "amount": taxa_centavos,
+                    "type": "fixed"
+                }
+            ]
+        
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json=payload, headers=headers, timeout=15.0)
+            
+        if resp.status_code in (200, 201):
+            dados = resp.json()
+            identifier = dados.get("transaction_id") or transaction_id
+            
+            # Remarketing
+            if agendar_remarketing and user_telegram_id:
+                try:
+                    chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
+                    if chat_id_int:
+                        cancelar_remarketing(chat_id_int)
+                        schedule_remarketing_and_alternating(
+                            bot_id=bot_id, chat_id=chat_id_int, payment_message_id=0,
+                            user_info={'first_name': user_first_name or "Cliente", 'plano': plano_nome, 'valor': valor_float}
+                        )
+                except: pass
+
+            return {
+                "id": identifier,
+                "qr_code": dados.get("qr_code"),
+                "qrcode_url": dados.get("qr_code_url", ""),
+                "gateway": "paradise"
+            }
+        else:
+            logger.error(f"❌ Erro Paradise: {resp.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Erro ao gerar PIX Paradise: {e}")
+        return None
+
+
+@app.post("/webhook/paradise")
+async def webhook_paradise(request: Request, db: Session = Depends(get_db)):
+    try:
+        data = await request.json()
+        logger.info(f"📩 [PARADISE WEBHOOK] {data}")
+        
+        status = data.get("status")
+        if status in ["PAID", "APPROVED", "COMPLETED", "succeeded"]:
+            txid = str(data.get("external_id")).lower()
+            
+            pedido = db.query(Pedido).filter(
+                (Pedido.txid == txid) | (Pedido.transaction_id == txid)
+            ).first()
+            
+            if not pedido:
+                logger.warning(f"⚠️ [PARADISE] Pedido {txid} não encontrado")
+                return {"status": "ignored"}
+                
+            if pedido.status in ["approved", "paid", "active"]:
+                return {"status": "ok", "msg": "Already paid"}
+
+            # Redireciona para o webhook principal (MÁGICA DE REAPROVEITAMENTO)
+            try:
+                fake_payload = json.dumps({
+                    "data": {
+                        "id": txid,
+                        "status": "completed",
+                        "amount": pedido.valor
+                    }
+                }).encode("utf-8")
+                
+                scope = {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/webhook/pix",
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"event", b"cashin.update"), 
+                    ],
+                }
+                
+                class FakeReceive:
+                    def __init__(self, body):
+                        self._body = body
+                        self._sent = False
+                    async def __call__(self):
+                        if not self._sent:
+                            self._sent = True
+                            return {"type": "http.request", "body": self._body}
+                        return {"type": "http.disconnect"}
+                
+                fake_request = Request(scope, receive=FakeReceive(fake_payload))
+                
+                # Executa o webhook_pix nativo
+                await webhook_pix(fake_request, db)
+                logger.info(f"✅ [PARADISE] Pedido {txid} entregue com sucesso via webhook_pix")
+            except Exception as e_process:
+                logger.error(f"❌ [PARADISE] Erro na liberação: {e_process}")
+                
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"❌ [PARADISE WEBHOOK ERRO]: {e}")
+        return {"error": str(e)}
+
+# =========================================================
+# 🚀 GERADOR E WEBHOOK: OMEGAPAY
+# =========================================================
+async def gerar_pix_omegapay(
+    valor_float: float, 
+    transaction_id: str, 
+    bot_id: int, 
+    db: Session,
+    user_telegram_id: str = None,      
+    user_first_name: str = None,       
+    plano_nome: str = None,
+    agendar_remarketing: bool = True
+):
+    try:
+        bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
+        if not bot or not bot.omegapay_client_id or not bot.omegapay_client_secret:
+            return None
+
+        system_config = db.query(SystemConfig).all()
+        config_dict = {item.key: item.value for item in system_config}
+        master_split_id = config_dict.get("master_omegapay_client_id", "")
+        
+        taxa_centavos = 60
+        if bot.owner_id:
+            from database import User
+            owner = db.query(User).filter(User.id == bot.owner_id).first()
+            if owner and owner.taxa_venda:
+                taxa_centavos = owner.taxa_venda
+            else:
+                taxa_centavos = int(config_dict.get("default_fee", "60"))
+
+        url = "https://api.omegapay.com.br/v1/pix/qrcode" 
+        headers = {
+            "Content-Type": "application/json",
+            "x-public-key": bot.omegapay_client_id,
+            "x-secret-key": bot.omegapay_client_secret
+        }
+        
+        valor_total_centavos = int(valor_float * 100)
+        raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
+        clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
+        
+        payload = {
+            "amount": valor_total_centavos,
+            "payer_name": user_first_name or "Cliente",
+            "payer_document": "00000000000",
+            "external_reference": transaction_id,
+            "webhook_url": f"https://{clean_domain}/webhook/omegapay"
+        }
+        
+        is_admin_bot = False
+        if bot.owner_id and owner and getattr(owner, 'omegapay_client_id', '') == master_split_id:
+            is_admin_bot = True
+
+        if master_split_id and not is_admin_bot and taxa_centavos > 0:
+            payload["split"] = {
+                "receiver_id": master_split_id,
+                "amount": taxa_centavos
+            }
+        
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json=payload, headers=headers, timeout=15.0)
+            
+        if resp.status_code in (200, 201):
+            dados = resp.json()
+            identifier = dados.get("txid") or transaction_id
+            
+            if agendar_remarketing and user_telegram_id:
+                try:
+                    chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
+                    if chat_id_int:
+                        cancelar_remarketing(chat_id_int)
+                        schedule_remarketing_and_alternating(
+                            bot_id=bot_id, chat_id=chat_id_int, payment_message_id=0,
+                            user_info={'first_name': user_first_name or "Cliente", 'plano': plano_nome, 'valor': valor_float}
+                        )
+                except: pass
+
+            return {
+                "id": identifier,
+                "qr_code": dados.get("copy_paste") or dados.get("qr_code"),
+                "qrcode_url": dados.get("qr_image") or dados.get("qr_code_url", ""),
+                "gateway": "omegapay"
+            }
+        else:
+            logger.error(f"❌ Erro OmegaPay: {resp.text}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Erro ao gerar PIX OmegaPay: {e}")
+        return None
+
+
+@app.post("/webhook/omegapay")
+async def webhook_omegapay(request: Request, db: Session = Depends(get_db)):
+    try:
+        data = await request.json()
+        logger.info(f"📩 [OMEGAPAY WEBHOOK] {data}")
+        
+        status = data.get("status")
+        if status in ["APPROVED", "PAID", "COMPLETED", "succeeded"]:
+            txid = str(data.get("external_reference")).lower()
+            
+            pedido = db.query(Pedido).filter(
+                (Pedido.txid == txid) | (Pedido.transaction_id == txid)
+            ).first()
+            
+            if not pedido:
+                logger.warning(f"⚠️ [OMEGAPAY] Pedido {txid} não encontrado")
+                return {"status": "ignored"}
+                
+            if pedido.status in ["approved", "paid", "active"]:
+                return {"status": "ok", "msg": "Already paid"}
+
+            # Redireciona para o webhook principal (MÁGICA DE REAPROVEITAMENTO)
+            try:
+                fake_payload = json.dumps({
+                    "data": {
+                        "id": txid,
+                        "status": "completed",
+                        "amount": pedido.valor
+                    }
+                }).encode("utf-8")
+                
+                scope = {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/webhook/pix",
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"event", b"cashin.update"),
+                    ],
+                }
+                
+                class FakeReceive:
+                    def __init__(self, body):
+                        self._body = body
+                        self._sent = False
+                    async def __call__(self):
+                        if not self._sent:
+                            self._sent = True
+                            return {"type": "http.request", "body": self._body}
+                        return {"type": "http.disconnect"}
+                
+                fake_request = Request(scope, receive=FakeReceive(fake_payload))
+                
+                await webhook_pix(fake_request, db)
+                logger.info(f"✅ [OMEGAPAY] Pedido {txid} entregue com sucesso via webhook_pix")
+            except Exception as e_process:
+                logger.error(f"❌ [OMEGAPAY] Erro na liberação: {e_process}")
+                
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"❌ [OMEGAPAY WEBHOOK ERRO]: {e}")
+        return {"error": str(e)}
+
 # =========================================================
 # 🔌 INTEGRAÇÃO PUSHIN PAY (DINÂMICA)
 # =========================================================
@@ -5032,6 +5355,12 @@ async def gerar_pix_gateway(
         gateways_disponiveis.append("wiinpay")
     elif principal == "syncpay" and bot.syncpay_ativo and bot.syncpay_client_id:
         gateways_disponiveis.append("syncpay")
+    # 👇 [NOVO] PARADISE E OMEGAPAY 👇
+    elif principal == "paradise" and bot.paradise_ativo and bot.paradise_api_key:
+        gateways_disponiveis.append("paradise")
+    elif principal == "omegapay" and bot.omegapay_ativo and bot.omegapay_client_id and bot.omegapay_client_secret:
+        gateways_disponiveis.append("omegapay")
+    # 👆 ========================== 👆
     
     # Adiciona fallback se diferente da principal e ativa
     if fallback and fallback != principal:
@@ -5041,6 +5370,12 @@ async def gerar_pix_gateway(
             gateways_disponiveis.append("wiinpay")
         elif fallback == "syncpay" and bot.syncpay_ativo and bot.syncpay_client_id:
             gateways_disponiveis.append("syncpay")
+        # 👇 [NOVO] PARADISE E OMEGAPAY 👇
+        elif fallback == "paradise" and bot.paradise_ativo and bot.paradise_api_key:
+            gateways_disponiveis.append("paradise")
+        elif fallback == "omegapay" and bot.omegapay_ativo and bot.omegapay_client_id and bot.omegapay_client_secret:
+            gateways_disponiveis.append("omegapay")
+        # 👆 ========================== 👆
     
     # Se nenhuma gateway multi está ativa, fallback para comportamento legado (pushinpay com token)
     if not gateways_disponiveis:
@@ -5109,14 +5444,52 @@ async def gerar_pix_gateway(
                     return result, "syncpay"
                 else:
                     logger.warning(f"⚠️ [GATEWAY] Sync Pay falhou. Tentando próxima...")
-                    
+            
+            # 👇 [NOVO] ADICIONADO PARADISE AQUI 👇
+            elif gw == "paradise":
+                logger.info(f"📤 [GATEWAY] Tentando Paradise...")
+                result = await gerar_pix_paradise(
+                    valor_float=valor_float,
+                    transaction_id=transaction_id,
+                    bot_id=bot_id,
+                    db=db,
+                    user_telegram_id=user_telegram_id,
+                    user_first_name=user_first_name,
+                    plano_nome=plano_nome,
+                    agendar_remarketing=agendar_remarketing
+                )
+                if result:
+                    logger.info(f"✅ [GATEWAY] Paradise respondeu com sucesso!")
+                    return result, "paradise"
+                else:
+                    logger.warning(f"⚠️ [GATEWAY] Paradise falhou. Tentando próxima...")
+            
+            # 👇 [NOVO] ADICIONADO OMEGAPAY AQUI 👇
+            elif gw == "omegapay":
+                logger.info(f"📤 [GATEWAY] Tentando OmegaPay...")
+                result = await gerar_pix_omegapay(
+                    valor_float=valor_float,
+                    transaction_id=transaction_id,
+                    bot_id=bot_id,
+                    db=db,
+                    user_telegram_id=user_telegram_id,
+                    user_first_name=user_first_name,
+                    plano_nome=plano_nome,
+                    agendar_remarketing=agendar_remarketing
+                )
+                if result:
+                    logger.info(f"✅ [GATEWAY] OmegaPay respondeu com sucesso!")
+                    return result, "omegapay"
+                else:
+                    logger.warning(f"⚠️ [GATEWAY] OmegaPay falhou. Tentando próxima...")
+            # 👆 ========================================== 👆
+
         except Exception as e:
             logger.error(f"❌ [GATEWAY] Erro ao tentar {gw}: {e}")
             continue
     
     logger.error(f"❌ [GATEWAY] TODAS as gateways falharam para bot {bot_id}!")
     return None, None
-
 
 # --- HELPER: Notificar TODOS os Admins (Principal + Extras) ---
 def notificar_admin_principal(bot_db: BotModel, mensagem: str):
@@ -5342,6 +5715,43 @@ def save_syncpay_token(bot_id: int, data: SyncPayIntegrationUpdate, db: Session 
     logger.info(f"🔑 [SYNC PAY] Credenciais salvas para BOT {bot.nome}: {client_id_limpo[:8]}...")
     
     return {"status": "conectado", "msg": f"Integração Sync Pay salva para {bot.nome}!"}
+
+# =========================================================
+# 💳 INTEGRAÇÃO DOS BOTS: PARADISE E OMEGAPAY
+# =========================================================
+@app.get("/api/admin/integrations/paradise/{bot_id}")
+async def get_paradise_config(bot_id: int, db: Session = Depends(get_db)):
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    if not bot: raise HTTPException(status_code=404, detail="Bot não encontrado")
+    return {"api_key": bot.paradise_api_key, "ativo": bot.paradise_ativo}
+
+@app.post("/api/admin/integrations/paradise/{bot_id}")
+async def save_paradise_config(bot_id: int, request: Request, db: Session = Depends(get_db)):
+    data = await request.json()
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    bot.paradise_api_key = data.get("api_key")
+    bot.paradise_ativo = data.get("ativo", False)
+    db.commit()
+    return {"status": "success", "message": "Configuração Paradise salva!"}
+
+@app.get("/api/admin/integrations/omegapay/{bot_id}")
+async def get_omegapay_config(bot_id: int, db: Session = Depends(get_db)):
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    return {
+        "client_id": bot.omegapay_client_id, 
+        "client_secret": bot.omegapay_client_secret, 
+        "ativo": bot.omegapay_ativo
+    }
+
+@app.post("/api/admin/integrations/omegapay/{bot_id}")
+async def save_omegapay_config(bot_id: int, request: Request, db: Session = Depends(get_db)):
+    data = await request.json()
+    bot = db.query(Bot).filter(Bot.id == bot_id).first()
+    bot.omegapay_client_id = data.get("client_id")
+    bot.omegapay_client_secret = data.get("client_secret")
+    bot.omegapay_ativo = data.get("ativo", False)
+    db.commit()
+    return {"status": "success", "message": "Configuração OmegaPay salva!"}
 
 # =========================================================
 # 🔄 ROTAS DE CONFIGURAÇÃO MULTI-GATEWAY (POR BOT)
@@ -13162,7 +13572,7 @@ def send_test_message(
     except Exception as e:
         logger.error(f"❌ [TEST-SEND] Erro: {e}", exc_info=True)
         raise HTTPException(500, detail=f"Erro ao enviar teste: {str(e)}")
-        
+
 # --- ROTAS FLOW V2 (HÍBRIDO) ---
 @app.get("/api/admin/bots/{bot_id}/flow")
 def get_flow(bot_id: int, db: Session = Depends(get_db)):
@@ -17644,6 +18054,14 @@ class SystemConfigSchema(BaseModel):
     master_pushin_pay_id: Optional[str] = ""
     master_wiinpay_user_id: Optional[str] = ""
     master_syncpay_client_id: Optional[str] = ""  # 🆕 NOVO: Chave Mestra Sync Pay
+    
+    # 👇 [NOVO] CHAVES PARADISE E OMEGAPAY 👇
+    master_paradise_account_id: Optional[str] = ""
+    master_paradise_secret_key: Optional[str] = ""
+    master_omegapay_client_id: Optional[str] = ""
+    master_omegapay_client_secret: Optional[str] = ""
+    # 👆 ================================== 👆
+    
     maintenance_mode: bool = False
 
 class BroadcastSchema(BaseModel):
@@ -17669,6 +18087,14 @@ def get_global_config(
         "master_pushin_pay_id": config_map.get("master_pushin_pay_id", ""),
         "master_wiinpay_user_id": config_map.get("master_wiinpay_user_id", ""),
         "master_syncpay_client_id": config_map.get("master_syncpay_client_id", ""), # 🆕 ADICIONADO AQUI
+        
+        # 👇 [NOVO] RETORNO DAS CHAVES MESTRAS 👇
+        "master_paradise_account_id": config_map.get("master_paradise_account_id", ""),
+        "master_paradise_secret_key": config_map.get("master_paradise_secret_key", ""),
+        "master_omegapay_client_id": config_map.get("master_omegapay_client_id", ""),
+        "master_omegapay_client_secret": config_map.get("master_omegapay_client_secret", ""),
+        # 👆 ================================== 👆
+        
         "maintenance_mode": config_map.get("maintenance_mode", "false") == "true"
     }
 
@@ -17695,6 +18121,14 @@ def update_global_config(
         upsert("master_pushin_pay_id", config.master_pushin_pay_id)
         upsert("master_wiinpay_user_id", config.master_wiinpay_user_id)
         upsert("master_syncpay_client_id", config.master_syncpay_client_id) # 🆕 ADICIONADO AQUI
+        
+        # 👇 [NOVO] SALVANDO AS CHAVES MESTRAS 👇
+        upsert("master_paradise_account_id", config.master_paradise_account_id)
+        upsert("master_paradise_secret_key", config.master_paradise_secret_key)
+        upsert("master_omegapay_client_id", config.master_omegapay_client_id)
+        upsert("master_omegapay_client_secret", config.master_omegapay_client_secret)
+        # 👆 ================================== 👆
+        
         upsert("maintenance_mode", "true" if config.maintenance_mode else "false")
         db.commit()
         
@@ -17702,6 +18136,11 @@ def update_global_config(
         logger.info(f"  master_pushin_pay_id: {config.master_pushin_pay_id}")
         logger.info(f"  master_wiinpay_user_id: {config.master_wiinpay_user_id}")
         logger.info(f"  master_syncpay_client_id: {config.master_syncpay_client_id}") # 🆕 ADICIONADO AQUI
+        
+        # 👇 [NOVO] LOG DAS CHAVES MESTRAS 👇
+        logger.info(f"  master_paradise_account_id: {config.master_paradise_account_id}")
+        logger.info(f"  master_omegapay_client_id: {config.master_omegapay_client_id}")
+        
         return {"message": "Configurações salvas com sucesso!"}
     except Exception as e:
         db.rollback()
@@ -21026,3 +21465,79 @@ def sync_gateway_credentials(
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+
+# ============================================================
+# 🚨 MIGRAÇÃO V4: ADIÇÃO DAS GATEWAYS PARADISE E OMEGAPAY 
+# ============================================================
+@app.get("/migrate-gateways-v4")
+async def migrate_gateways_v4(db: Session = Depends(get_db)):
+    """
+    Adiciona colunas para Paradise e OmegaPay e salva credenciais Master do Admin.
+    Acesse UMA VEZ após atualizar: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-gateways-v4
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        # 1. Adicionando as colunas na tabela de USUÁRIOS
+        comandos_users = [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS paradise_account_id VARCHAR;",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS omegapay_client_id VARCHAR;"
+        ]
+        for cmd in comandos_users:
+            try:
+                db.execute(text(cmd))
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower():
+                    log_msgs.append(f"Aviso User: {e}")
+
+        # 2. Adicionando as colunas na tabela de BOTS
+        comandos_bots = [
+            "ALTER TABLE bots ADD COLUMN IF NOT EXISTS paradise_api_key VARCHAR;",
+            "ALTER TABLE bots ADD COLUMN IF NOT EXISTS paradise_ativo BOOLEAN DEFAULT FALSE;",
+            "ALTER TABLE bots ADD COLUMN IF NOT EXISTS omegapay_client_id VARCHAR;",
+            "ALTER TABLE bots ADD COLUMN IF NOT EXISTS omegapay_client_secret VARCHAR;",
+            "ALTER TABLE bots ADD COLUMN IF NOT EXISTS omegapay_ativo BOOLEAN DEFAULT FALSE;"
+        ]
+        for cmd in comandos_bots:
+            try:
+                db.execute(text(cmd))
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                if "already exists" not in str(e).lower() and "duplicate column" not in str(e).lower():
+                    log_msgs.append(f"Aviso Bot: {e}")
+
+        # 3. Salvando suas credenciais MESTRAS (Admin) na tabela SystemConfig
+        # Essas são as chaves que receberão a comissão pelas vendas dos clientes!
+        try:
+            configs_mestre = [
+                ("master_paradise_account_id", "6225"),
+                ("master_paradise_secret_key", "sk_a8d689ceac0b72df245e38948a566e185f583a51d8755d6d6824b5318c50b586"),
+                ("master_omegapay_client_id", "luisdedeus2512_w933zm9thr0y2gc5"),
+                ("master_omegapay_client_secret", "nrbqx75vleydalbvuotrhmab11i3u9swncbls27kvdkoe3cx7p70wtqag6tylwlk")
+            ]
+            
+            for key, value in configs_mestre:
+                db.execute(text(f"""
+                    INSERT INTO system_config (key, value, updated_at) 
+                    VALUES (:key, :val, NOW()) 
+                    ON CONFLICT (key) DO UPDATE SET value = :val, updated_at = NOW()
+                """), {"key": key, "val": value})
+                
+            db.commit()
+            log_msgs.append("✅ Credenciais MESTRAS da Paradise e OmegaPay salvas com sucesso!")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"❌ Erro ao salvar Config Global: {e}")
+
+        return {
+            "status": "success",
+            "message": "🚨 Migração V4 concluída! Banco de dados preparado.",
+            "details": log_msgs
+        }
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro Crítico: {str(e)}"}
