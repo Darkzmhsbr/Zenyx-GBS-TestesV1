@@ -5767,11 +5767,14 @@ async def save_omegapay_config(bot_id: int, request: Request, db: Session = Depe
 # =========================================================
 
 class GatewayConfigUpdate(BaseModel):
-    gateway_principal: Optional[str] = None   # "pushinpay", "wiinpay" ou "syncpay"
-    gateway_fallback: Optional[str] = None    # "pushinpay", "wiinpay", "syncpay" ou None
+    gateway_principal: Optional[str] = None   # "pushinpay", "wiinpay", "syncpay", "paradise" ou "omegapay"
+    gateway_fallback: Optional[str] = None    # "pushinpay", "wiinpay", "syncpay", "paradise", "omegapay" ou None
     pushinpay_ativo: Optional[bool] = None
     wiinpay_ativo: Optional[bool] = None
-    syncpay_ativo: Optional[bool] = None      # 🆕 NOVO: Ativador da Sync Pay
+    syncpay_ativo: Optional[bool] = None      
+    # 👇 [NOVO] ATIVADORES DAS NOVAS GATEWAYS 👇
+    paradise_ativo: Optional[bool] = None
+    omegapay_ativo: Optional[bool] = None
 
 @app.get("/api/admin/integrations/gateway-config/{bot_id}")
 def get_gateway_config(bot_id: int, db: Session = Depends(get_db)):
@@ -5799,6 +5802,18 @@ def get_gateway_config(bot_id: int, db: Session = Depends(get_db)):
             "ativo": bot.syncpay_ativo or False,
             "configurado": bool(bot.syncpay_client_id),
             "token_mask": f"{bot.syncpay_client_id[:8]}...{bot.syncpay_client_id[-4:]}" if bot.syncpay_client_id and len(bot.syncpay_client_id) > 12 else ""
+        },
+        # 👇 [NOVO] RETORNANDO STATUS DA PARADISE 👇
+        "paradise": {
+            "ativo": bot.paradise_ativo or False,
+            "configurado": bool(bot.paradise_api_key),
+            "token_mask": f"{bot.paradise_api_key[:8]}...{bot.paradise_api_key[-4:]}" if bot.paradise_api_key and len(bot.paradise_api_key) > 12 else ""
+        },
+        # 👇 [NOVO] RETORNANDO STATUS DA OMEGAPAY 👇
+        "omegapay": {
+            "ativo": bot.omegapay_ativo or False,
+            "configurado": bool(bot.omegapay_client_id and bot.omegapay_client_secret),
+            "token_mask": f"{bot.omegapay_client_id[:8]}...{bot.omegapay_client_id[-4:]}" if bot.omegapay_client_id and len(bot.omegapay_client_id) > 12 else ""
         }
     }
 
@@ -5810,12 +5825,12 @@ def update_gateway_config(bot_id: int, config: GatewayConfigUpdate, db: Session 
         raise HTTPException(status_code=404, detail="Bot não encontrado")
     
     if config.gateway_principal is not None:
-        if config.gateway_principal not in ["pushinpay", "wiinpay", "syncpay"]:
-            raise HTTPException(status_code=400, detail="Gateway principal inválida. Use 'pushinpay', 'wiinpay' ou 'syncpay'.")
+        if config.gateway_principal not in ["pushinpay", "wiinpay", "syncpay", "paradise", "omegapay"]:
+            raise HTTPException(status_code=400, detail="Gateway principal inválida.")
         bot.gateway_principal = config.gateway_principal
         
     if config.gateway_fallback is not None:
-        if config.gateway_fallback not in ["pushinpay", "wiinpay", "syncpay", ""]:
+        if config.gateway_fallback not in ["pushinpay", "wiinpay", "syncpay", "paradise", "omegapay", ""]:
             raise HTTPException(status_code=400, detail="Gateway fallback inválida.")
         bot.gateway_fallback = config.gateway_fallback if config.gateway_fallback != "" else None
         
@@ -5833,6 +5848,18 @@ def update_gateway_config(bot_id: int, config: GatewayConfigUpdate, db: Session 
         if config.syncpay_ativo and not bot.syncpay_client_id:
             raise HTTPException(status_code=400, detail="Não é possível ativar Sync Pay sem Credenciais configuradas.")
         bot.syncpay_ativo = config.syncpay_ativo
+        
+    # 👇 [NOVO] VALIDAÇÃO DA PARADISE 👇
+    if config.paradise_ativo is not None:
+        if config.paradise_ativo and not bot.paradise_api_key:
+            raise HTTPException(status_code=400, detail="Não é possível ativar Paradise sem API Key configurada.")
+        bot.paradise_ativo = config.paradise_ativo
+
+    # 👇 [NOVO] VALIDAÇÃO DA OMEGAPAY 👇
+    if config.omegapay_ativo is not None:
+        if config.omegapay_ativo and not bot.omegapay_client_id:
+            raise HTTPException(status_code=400, detail="Não é possível ativar OmegaPay sem Credenciais configuradas.")
+        bot.omegapay_ativo = config.omegapay_ativo
     
     db.commit()
     
@@ -5845,7 +5872,9 @@ def update_gateway_config(bot_id: int, config: GatewayConfigUpdate, db: Session 
         "gateway_fallback": bot.gateway_fallback,
         "pushinpay_ativo": bot.pushinpay_ativo,
         "wiinpay_ativo": bot.wiinpay_ativo,
-        "syncpay_ativo": bot.syncpay_ativo
+        "syncpay_ativo": bot.syncpay_ativo,
+        "paradise_ativo": bot.paradise_ativo,
+        "omegapay_ativo": bot.omegapay_ativo
     }
 
 # =========================================================
