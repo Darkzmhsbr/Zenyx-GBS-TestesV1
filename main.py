@@ -4420,7 +4420,7 @@ async def gerar_pix_syncpay(
         return None
 
 # =========================================================
-# 🚀 GERADOR E WEBHOOK: PARADISE PAGAMENTOS
+# 🚀 GERADOR: PARADISE PAGAMENTOS
 # =========================================================
 async def gerar_pix_paradise(
     valor_float: float, 
@@ -4437,11 +4437,15 @@ async def gerar_pix_paradise(
         if not bot or not bot.paradise_api_key:
             return None
 
+        # Recupera as chaves mestras para o split
         system_config = db.query(SystemConfig).all()
         config_dict = {item.key: item.value for item in system_config}
         master_recipient_id = config_dict.get("master_paradise_account_id", "")
+        master_secret_key = config_dict.get("master_paradise_secret_key", "")
         
+        # Pega a taxa da plataforma
         taxa_centavos = 60
+        owner = None
         if bot.owner_id:
             from database import User
             owner = db.query(User).filter(User.id == bot.owner_id).first()
@@ -4457,12 +4461,12 @@ async def gerar_pix_paradise(
         }
         
         valor_total_centavos = int(valor_float * 100)
+        
         raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
         clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
         
-        # 🔥 DADOS OBRIGATÓRIOS SEGUNDO A DOC DA PARADISE
         email_fake = f"cliente_{user_telegram_id}@telegram.com" if user_telegram_id else "cliente@telegram.com"
-        telefone_fake = "11999999999" # 11 dígitos exigidos
+        telefone_fake = "11999999999"
 
         payload = {
             "amount": valor_total_centavos,
@@ -4477,25 +4481,31 @@ async def gerar_pix_paradise(
             }
         }
         
+        # 🔥 A MÁGICA ACONTECE AQUI: VERIFICA SE A CHAVE DO BOT É A CHAVE DO ADMIN
         is_admin_bot = False
-        if bot.owner_id and owner and getattr(owner, 'paradise_account_id', '') == master_recipient_id:
+        if bot.paradise_api_key == master_secret_key:
+            is_admin_bot = True
+        elif owner and getattr(owner, 'paradise_account_id', '') == master_recipient_id:
             is_admin_bot = True
 
         if master_recipient_id and not is_admin_bot and taxa_centavos > 0:
             payload["splits"] = [
                 {
-                    "recipientId": int(master_recipient_id), # Exige ID numérico
+                    "recipientId": int(master_recipient_id),
                     "amount": taxa_centavos
                 }
             ]
+        else:
+            logger.info("ℹ️ [PARADISE] O Bot usa a mesma chave Mestra ou é o Admin. PIX SEM split.")
         
         async with httpx.AsyncClient() as client:
             resp = await client.post(url, json=payload, headers=headers, timeout=15.0)
             
         if resp.status_code in (200, 201):
             dados = resp.json()
-            identifier = dados.get("transaction_id") or transaction_id # ID numérico interno
+            identifier = dados.get("transaction_id") or transaction_id
             
+            # Remarketing
             if agendar_remarketing and user_telegram_id:
                 try:
                     chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
@@ -4557,7 +4567,7 @@ async def webhook_paradise(request: Request, db: Session = Depends(get_db)):
         return {"error": str(e)}
 
 # =========================================================
-# 🚀 GERADOR E WEBHOOK: OMEGAPAY
+# 🚀 GERADOR: OMEGAPAY
 # =========================================================
 async def gerar_pix_omegapay(
     valor_float: float, 
@@ -4579,6 +4589,7 @@ async def gerar_pix_omegapay(
         master_split_id = config_dict.get("master_omegapay_client_id", "")
         
         taxa_centavos = 60
+        owner = None
         if bot.owner_id:
             from database import User
             owner = db.query(User).filter(User.id == bot.owner_id).first()
@@ -4599,10 +4610,9 @@ async def gerar_pix_omegapay(
         
         email_fake = f"cliente_{user_telegram_id}@telegram.com" if user_telegram_id else "cliente@telegram.com"
 
-        # 🔥 DADOS OBRIGATÓRIOS SEGUNDO A DOC DA OMEGAPAY (Valor em REAIS e objeto client)
         payload = {
             "identifier": str(transaction_id),
-            "amount": float(valor_float), # OMEGAPAY EXIGE FLOAT EM REAIS
+            "amount": float(valor_float), 
             "callbackUrl": f"https://{clean_domain}/webhook/omegapay",
             "client": {
                 "name": user_first_name or "Cliente",
@@ -4612,11 +4622,13 @@ async def gerar_pix_omegapay(
             }
         }
         
+        # 🔥 A MÁGICA ACONTECE AQUI: VERIFICA SE A CHAVE DO BOT É A CHAVE DO ADMIN
         is_admin_bot = False
-        if bot.owner_id and owner and getattr(owner, 'omegapay_client_id', '') == master_split_id:
+        if bot.omegapay_client_id == master_split_id:
+            is_admin_bot = True
+        elif owner and getattr(owner, 'omegapay_client_id', '') == master_split_id:
             is_admin_bot = True
 
-        # Split da OmegaPay exige valor em Reais e campo producerId
         if master_split_id and not is_admin_bot and taxa_centavos > 0:
             taxa_reais = float(taxa_centavos) / 100.0
             payload["splits"] = [
@@ -4625,6 +4637,8 @@ async def gerar_pix_omegapay(
                     "amount": taxa_reais
                 }
             ]
+        else:
+            logger.info("ℹ️ [OMEGAPAY] O Bot usa a mesma chave Mestra ou é o Admin. PIX SEM split.")
         
         async with httpx.AsyncClient() as client:
             resp = await client.post(url, json=payload, headers=headers, timeout=15.0)
