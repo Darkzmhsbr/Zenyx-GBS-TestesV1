@@ -4597,7 +4597,9 @@ async def gerar_pix_omegapay(
             else:
                 taxa_centavos = int(config_dict.get("default_fee", "60"))
 
-        url = "https://app.omegapayments.com.br/api/v1/pix/receive" 
+        # 🔥 CORREÇÃO 404: ADICIONADO '/gateway/' NA URL CONFORME A DOC (PAG 44)
+        url = "https://app.omegapayments.com.br/api/v1/gateway/pix/receive" 
+        
         headers = {
             "Content-Type": "application/json",
             "x-public-key": bot.omegapay_client_id,
@@ -4621,7 +4623,6 @@ async def gerar_pix_omegapay(
             }
         }
         
-        # 🔥 A MÁGICA ACONTECE AQUI: VERIFICA SE A CHAVE DO BOT É A CHAVE DO ADMIN
         is_admin_bot = False
         if bot.omegapay_client_id == master_split_id:
             is_admin_bot = True
@@ -5027,14 +5028,6 @@ async def gerar_pix_wiinpay(
 ):
     """
     Gera PIX via WiinPay com Split automático de taxa para a plataforma.
-    
-    Diferenças em relação à PushinPay:
-    - API Key vai no body (não no header)
-    - Valor em reais (float), não centavos
-    - Mínimo de R$ 3,00
-    - Split usa user_id + value/percentage
-    - Webhook retorna status "PAID" (maiúsculo)
-    - Campos obrigatórios extras: name, email, description
     """
     
     # ======================================================================
@@ -5238,13 +5231,12 @@ async def gerar_pix_wiinpay(
                 return None
                 
             elif response.status_code == 422:
-                # ⚠️ PROTEÇÃO AUTOMÁTICA: Se o erro é "mesma conta de split",
-                # remove o split e retenta UMA VEZ sem split
+                # 🔥 CORREÇÃO DA WIINPAY AQUI: Escudo ativado para o erro de "próprio recebedor"
                 resp_text = response.text or ""
-                if "mesma conta" in resp_text.lower() and "split" in payload:
-                    logger.warning(f"⚠️ [WIINPAY] Split rejeitado (mesma conta). Retentando SEM split...")
+                if ("mesma conta" in resp_text.lower() or "próprio recebedor" in resp_text.lower()) and "split" in payload:
+                    logger.warning(f"⚠️ [WIINPAY] Split rejeitado (mesma conta/próprio recebedor). Retentando SEM split...")
                     del payload["split"]
-                    retry_count = max_retries - 1  # Só mais uma tentativa
+                    retry_count = max_retries - 1  # Vai forçar a próxima requisição a ser a última para evitar looping infinito
                     continue
                 else:
                     logger.error(f"❌ [WIINPAY] Erro 422: {resp_text}")
@@ -5282,6 +5274,7 @@ async def gerar_pix_wiinpay(
     
     logger.error(f"❌ [WIINPAY] Falha definitiva após {max_retries} tentativas")
     return None
+    
 # =========================================================
 # 🔄 ORQUESTRADOR MULTI-GATEWAY COM CONTINGÊNCIA
 # =========================================================
