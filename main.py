@@ -5943,6 +5943,9 @@ class BotUpdate(BaseModel):
     id_canal_notificacao: Optional[str] = None
     protect_content: Optional[bool] = None
     notificar_no_bot: Optional[bool] = None  # 🔥 NOVO: Toggle notificação no bot
+    # 👇 [NOVO] VARIÁVEIS DO ESCUDO PRIME 👇
+    escudo_ativo: Optional[bool] = None
+    escudo_limite_pix: Optional[int] = None
 
 # Modelo para Criar Admin
 class BotAdminCreate(BaseModel):
@@ -7159,20 +7162,18 @@ def criar_bot(
 def update_bot(
     bot_id: int, 
     dados: BotUpdate, 
-    request: Request,  # 🆕 ADICIONADO para auditoria
+    request: Request,
     db: Session = Depends(get_db),
-    current_user = Depends(get_current_user)  # 🆕 ADICIONADO para auditoria e verificação
+    current_user = Depends(get_current_user)
 ):
     """
-    Atualiza bot (MANTÉM TODA A LÓGICA ORIGINAL + AUDITORIA 🆕)
+    Atualiza bot (MANTÉM TODA A LÓGICA ORIGINAL + AUDITORIA + ESCUDO PRIME 🛡️)
     """
-    # 🔒 VERIFICA SE O BOT PERTENCE AO USUÁRIO
     bot_db = verificar_bot_pertence_usuario(bot_id, current_user.id, db)
     
-    # Guarda valores antigos para o log de auditoria
     old_values = {
         "nome": bot_db.nome,
-        "token": "***" if bot_db.token else None,  # Não loga token completo
+        "token": "***" if bot_db.token else None,
         "canal_vip": bot_db.id_canal_vip,
         "admin_principal": bot_db.admin_principal_id,
         "suporte": bot_db.suporte_username,
@@ -7180,9 +7181,8 @@ def update_bot(
     }
     
     old_token = bot_db.token
-    changes = {}  # Rastreia mudanças para auditoria
+    changes = {}
 
-    # 1. Atualiza campos administrativos
     if dados.id_canal_vip and dados.id_canal_vip != bot_db.id_canal_vip:
         changes["canal_vip"] = {"old": bot_db.id_canal_vip, "new": dados.id_canal_vip}
         bot_db.id_canal_vip = dados.id_canal_vip
@@ -7195,22 +7195,28 @@ def update_bot(
         changes["suporte"] = {"old": bot_db.suporte_username, "new": dados.suporte_username}
         bot_db.suporte_username = dados.suporte_username
     
-    # ✅ Canal de Notificações
     if dados.id_canal_notificacao is not None and dados.id_canal_notificacao != bot_db.id_canal_notificacao:
         changes["canal_notificacao"] = {"old": bot_db.id_canal_notificacao, "new": dados.id_canal_notificacao}
         bot_db.id_canal_notificacao = dados.id_canal_notificacao if dados.id_canal_notificacao.strip() else None
     
-    # 🔒 Proteção de Conteúdo
     if dados.protect_content is not None and dados.protect_content != getattr(bot_db, 'protect_content', False):
         changes["protect_content"] = {"old": getattr(bot_db, 'protect_content', False), "new": dados.protect_content}
         bot_db.protect_content = dados.protect_content
     
-    # 🔥 NOVO: Toggle de notificação no bot
     if dados.notificar_no_bot is not None and dados.notificar_no_bot != getattr(bot_db, 'notificar_no_bot', True):
         changes["notificar_no_bot"] = {"old": getattr(bot_db, 'notificar_no_bot', True), "new": dados.notificar_no_bot}
         bot_db.notificar_no_bot = dados.notificar_no_bot
+
+    # 👇 [NOVO] LÓGICA DE SALVAMENTO DO ESCUDO ANTI-CURIOSOS 👇
+    if dados.escudo_ativo is not None and dados.escudo_ativo != getattr(bot_db, 'escudo_ativo', False):
+        changes["escudo_ativo"] = {"old": getattr(bot_db, 'escudo_ativo', False), "new": dados.escudo_ativo}
+        bot_db.escudo_ativo = dados.escudo_ativo
+        
+    if dados.escudo_limite_pix is not None and dados.escudo_limite_pix != getattr(bot_db, 'escudo_limite_pix', 5):
+        changes["escudo_limite_pix"] = {"old": getattr(bot_db, 'escudo_limite_pix', 5), "new": dados.escudo_limite_pix}
+        bot_db.escudo_limite_pix = dados.escudo_limite_pix
+    # 👆 ==================================================== 👆
     
-    # 2. LÓGICA DE TROCA DE TOKEN (MANTIDA INTACTA)
     if dados.token and dados.token != old_token:
         try:
             logger.info(f"🔄 Detectada troca de token para o bot ID {bot_id}...")
@@ -7242,7 +7248,6 @@ def update_bot(
             changes["status"] = {"old": old_values["status"], "new": "ativo"}
             
         except Exception as e:
-            # 📋 AUDITORIA: Falha ao trocar token
             log_action(
                 db=db,
                 user_id=current_user.id,
@@ -7259,12 +7264,10 @@ def update_bot(
             raise HTTPException(status_code=400, detail=f"Token inválido: {str(e)}")
             
     else:
-        # Se não trocou token, permite atualizar nome manualmente
         if dados.nome and dados.nome != bot_db.nome:
             changes["nome"] = {"old": bot_db.nome, "new": dados.nome}
             bot_db.nome = dados.nome
     
-    # 🔥 ATUALIZA O MENU SEMPRE QUE SALVAR (MANTIDO INTACTO)
     try:
         configurar_menu_bot(bot_db.token)
     except Exception as e:
@@ -7273,7 +7276,6 @@ def update_bot(
     db.commit()
     db.refresh(bot_db)
     
-    # 📋 AUDITORIA: Bot atualizado com sucesso
     log_action(
         db=db,
         user_id=current_user.id,
@@ -11439,6 +11441,35 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
 
+            # ==============================================================================
+            # 🛡️ MOTOR DO ESCUDO ANTI-CURIOSOS (RECURSO PRIME)
+            # ==============================================================================
+            # Intercepta qualquer clique que vá gerar um novo PIX
+            payment_prefixes = ("checkout_", "checkout_promo_", "remarketing_plano_", "bump_yes_", "bump_no_", "upsell_accept_", "downsell_accept_")
+            
+            if any(data.startswith(p) for p in payment_prefixes):
+                if getattr(bot_db, 'escudo_ativo', False):
+                    limite_pix = getattr(bot_db, 'escudo_limite_pix', 5)
+                    
+                    # Conta quantos PIX pendentes esse usuário já tem neste bot
+                    pendentes_count = db.query(Pedido).filter(
+                        Pedido.bot_id == bot_db.id,
+                        Pedido.telegram_id == str(chat_id),
+                        Pedido.status == 'pending'
+                    ).count()
+                    
+                    if pendentes_count >= limite_pix:
+                        logger.warning(f"🛡️ [ESCUDO ATIVADO] Usuário {chat_id} bloqueado. Tentativas pendentes: {pendentes_count}/{limite_pix}")
+                        try:
+                            bot_temp.answer_callback_query(update.callback_query.id, "⚠️ Limite de PIX atingido!", show_alert=True)
+                            bot_temp.send_message(
+                                chat_id, 
+                                f"🛡️ <b>AÇÃO BLOQUEADA</b>\n\nVocê já gerou <b>{pendentes_count} pedidos de PIX</b> recentemente e não realizou o pagamento.\n\nPara evitar fraudes e custos para a loja, o sistema bloqueou novas tentativas.\n\n👉 <i>Por favor, pague um dos seus PIX anteriores ou aguarde algumas horas para tentar novamente.</i>", 
+                                parse_mode="HTML"
+                            )
+                        except: pass
+                        return {"status": "blocked_by_shield"}
+
             # --- 🔄 VERIFICAR PAGAMENTO (check_payment_) ---
             if data.startswith("check_payment_"):
                 try:
@@ -12113,8 +12144,32 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     logger.error(f"❌ Erro no handler remarketing_plano_: {str(e)}", exc_info=True)
                     bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
 
-            # --- B2) CHECKOUT NORMAL (AGORA VEM DEPOIS) ---
+            # --- B2) CHECKOUT NORMAL (AGORA COM ESCUDO ANTI-CURIOSOS 🛡️) ---
             elif data.startswith("checkout_"):
+                # ==============================================================================
+                # 🛡️ MOTOR DO ESCUDO ANTI-CURIOSOS (RECURSO PRIME)
+                # ==============================================================================
+                if getattr(bot_db, 'escudo_ativo', False):
+                    limite_pix = getattr(bot_db, 'escudo_limite_pix', 5)
+                    pendentes_count = db.query(Pedido).filter(
+                        Pedido.bot_id == bot_db.id,
+                        Pedido.telegram_id == str(chat_id),
+                        Pedido.status == 'pending'
+                    ).count()
+                    
+                    if pendentes_count >= limite_pix:
+                        logger.warning(f"🛡️ [ESCUDO ATIVADO] Usuário {chat_id} bloqueado. Tentativas pendentes: {pendentes_count}/{limite_pix}")
+                        try:
+                            bot_temp.answer_callback_query(update.callback_query.id, "⚠️ Limite de PIX atingido!", show_alert=True)
+                            bot_temp.send_message(
+                                chat_id, 
+                                f"🛡️ <b>AÇÃO BLOQUEADA</b>\n\nVocê já gerou <b>{pendentes_count} pedidos de PIX</b> recentemente e não realizou o pagamento.\n\nPara evitar fraudes, o sistema bloqueou novas tentativas.\n\n👉 <i>Por favor, pague um dos seus PIX anteriores ou aguarde 24 horas para tentar novamente.</i>", 
+                                parse_mode="HTML"
+                            )
+                        except: pass
+                        return {"status": "blocked_by_shield"}
+                # ==============================================================================
+
                 plano_id = data.split("_")[1]
                 plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
                 if not plano: return {"status": "error"}
@@ -15114,6 +15169,73 @@ def dashboard_stats(
         import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Erro ao buscar estatísticas: {str(e)}")
+
+# =========================================================
+# 🏆 MULTI-BOT COMMAND CENTER (RECURSO PRIME)
+# =========================================================
+@app.get("/api/admin/multi-bot-stats")
+def get_multi_bot_stats(db: Session = Depends(get_db), current_user = Depends(get_current_user)):
+    """
+    Retorna as métricas essenciais agrupadas de TODOS os bots do usuário,
+    para renderizar a tabela comparativa do Command Center.
+    """
+    try:
+        # Busca todos os bots ativos do usuário
+        bots = db.query(BotModel).filter(
+            BotModel.owner_id == current_user.id, 
+            BotModel.status != 'deletado'
+        ).all()
+        
+        stats_list = []
+        is_super = current_user.is_superuser
+        taxa_centavos = current_user.taxa_venda or 60
+        
+        for b in bots:
+            # Pega as vendas pagas
+            q_vendas = db.query(Pedido).filter(
+                Pedido.bot_id == b.id, 
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
+            ).all()
+            total_vendas = len(q_vendas)
+            
+            # Calcula faturamento real baseado na visão do usuário
+            if is_super and current_user.pushin_pay_id:
+                revenue = total_vendas * taxa_centavos
+            else:
+                revenue = sum(int((p.valor or 0) * 100) for p in q_vendas)
+            
+            # Conta Leads Totais
+            leads = db.query(Lead).filter(Lead.bot_id == b.id).count()
+            
+            # Conta Usuários com acesso Ativo
+            ativos = db.query(Pedido).filter(
+                Pedido.bot_id == b.id,
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired']),
+                or_(Pedido.data_expiracao > now_brazil(), Pedido.data_expiracao == None)
+            ).count()
+            
+            # Taxa de Conversão Real
+            conversao = round((total_vendas / leads) * 100, 1) if leads > 0 else 0
+            
+            stats_list.append({
+                "bot_id": b.id,
+                "nome": b.nome,
+                "username": getattr(b, 'username', 'N/A'),
+                "revenue": revenue,
+                "vendas": total_vendas,
+                "leads": leads,
+                "ativos": ativos,
+                "conversao": conversao,
+                "status": b.status
+            })
+            
+        # Ordena a lista de bots pelo que faturou mais (O "Vencedor" em cima)
+        stats_list.sort(key=lambda x: x["revenue"], reverse=True)
+        
+        return {"status": "success", "data": stats_list}
+    except Exception as e:
+        logger.error(f"❌ Erro na rota Multi-Bot Stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # =========================================================
 # 📊 ESTATÍSTICAS AVANÇADAS (PÁGINA DEDICADA)
@@ -21559,3 +21681,41 @@ async def migrate_gateways_v4(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"❌ Erro Crítico: {str(e)}"}
+
+# ============================================================
+# 🚨 MIGRAÇÃO V4: ESCUDO ANTI-CURIOSOS (RECURSOS PRIME)
+# ============================================================
+@app.get("/migrate-prime-v4")
+async def migrate_prime_v4(db: Session = Depends(get_db)):
+    """
+    Cria as colunas do Escudo Anti-Curiosos para proteger contra PIX Falsos.
+    Acesse UMA VEZ após o deploy: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-prime-v4
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        try:
+            db.execute(text("ALTER TABLE bots ADD COLUMN IF NOT EXISTS escudo_ativo BOOLEAN DEFAULT FALSE;"))
+            db.commit()
+            log_msgs.append("✅ Coluna escudo_ativo adicionada em bots")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ escudo_ativo: {str(e)}")
+            
+        try:
+            db.execute(text("ALTER TABLE bots ADD COLUMN IF NOT EXISTS escudo_limite_pix INTEGER DEFAULT 5;"))
+            db.commit()
+            log_msgs.append("✅ Coluna escudo_limite_pix adicionada em bots")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ escudo_limite_pix: {str(e)}")
+
+        return {
+            "status": "success",
+            "message": "🚨 Migração Escudo Prime V4 concluída!",
+            "details": log_msgs
+        }
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}

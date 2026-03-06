@@ -153,6 +153,10 @@ class Bot(Base):
     # 🔒 PROTEÇÃO DE CONTEÚDO (Telegram protect_content)
     protect_content = Column(Boolean, default=False)
 
+    # 🛡️ ESCUDO ANTI-CURIOSOS (Recursos Prime)
+    escudo_ativo = Column(Boolean, default=False)
+    escudo_limite_pix = Column(Integer, default=5)
+
     created_at = Column(DateTime, default=now_brazil)
     
     # 🆕 ORDEM NO SELETOR DE BOTS (drag-and-drop)
