@@ -4608,10 +4608,6 @@ async def gerar_pix_omegapay(
         clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
         
         email_fake = f"cliente_{user_telegram_id}@telegram.com" if user_telegram_id else "cliente@telegram.com"
-        
-        # 🔥 CORREÇÃO: CPF MATEMATICAMENTE VÁLIDO!
-        # O CPF anterior reprovava no cálculo do dígito verificador.
-        # Este CPF (05531510101) é o modelo padrão válido que passa em qualquer gateway.
         cpf_fake_valido = "05531510101"
 
         payload = {
@@ -4621,13 +4617,12 @@ async def gerar_pix_omegapay(
             "client": {
                 "name": user_first_name or "Cliente",
                 "document": cpf_fake_valido,
-                "cpf": cpf_fake_valido, # Garantia dupla para a API
+                "cpf": cpf_fake_valido, 
                 "email": email_fake,
                 "phone": "11999999999"
             }
         }
         
-        # 🔥 A MÁGICA ACONTECE AQUI: VERIFICA SE A CHAVE DO BOT É A CHAVE DO ADMIN
         is_admin_bot = False
         if bot.omegapay_client_id == master_split_id:
             is_admin_bot = True
@@ -4663,11 +4658,23 @@ async def gerar_pix_omegapay(
                         )
                 except: pass
 
-            pix_data = dados.get("pix", {})
+            # 🔥 MÁGICA DO CAÇADOR DE QR CODE:
+            # A documentação diz que vem em "pix", mas na realidade pode vir em "pixInformation".
+            pix_obj = dados.get("pix") or dados.get("pixInformation") or dados.get("transaction", {}).get("pixInformation") or dados
+            
+            qr_code = pix_obj.get("qrCode") or pix_obj.get("qr_code") or pix_obj.get("copy_paste") or ""
+            qrcode_url = pix_obj.get("qrCodeUrl") or pix_obj.get("qr_code_url") or pix_obj.get("image") or ""
+            
+            if not qr_code:
+                logger.error(f"❌ [OMEGAPAY] QR Code não encontrado na resposta! Payload recebido: {dados}")
+                return None
+
+            logger.info("✅ [OMEGAPAY] QR Code extraído com sucesso!")
+            
             return {
                 "id": identifier,
-                "qr_code": pix_data.get("qrCode") or pix_data.get("copy_paste"),
-                "qrcode_url": pix_data.get("qrCodeUrl") or "",
+                "qr_code": qr_code,
+                "qrcode_url": qrcode_url,
                 "gateway": "omegapay"
             }
         else:
