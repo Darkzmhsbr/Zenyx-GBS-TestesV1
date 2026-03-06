@@ -19127,7 +19127,7 @@ def simular_copy(
     except Exception as e:
         logger.error(f"❌ Erro ao simular copy: {e}")
         raise HTTPException(500, f"Erro ao simular: {str(e)}")
-        
+
 # =========================================================
 # 📁 ROTA DE UPLOAD DE MÍDIA (BACKBLAZE B2)
 # =========================================================
@@ -21668,7 +21668,7 @@ async def migrate_prime_v4(db: Session = Depends(get_db)):
 @app.get("/injetar-novos-recursos")
 async def injetar_novos_recursos(db: Session = Depends(get_db)):
     """
-    Cria a tabela recursos_prime e injeta os itens do sistema.
+    Cria a tabela recursos_prime e injeta TODOS os itens do sistema (incluindo os Em Breve).
     Acesse UMA VEZ no navegador após o deploy: https://zenyx-gbs-testesv1-production.up.railway.app/injetar-novos-recursos
     """
     try:
@@ -21690,20 +21690,20 @@ async def injetar_novos_recursos(db: Session = Depends(get_db)):
                 );
             """))
             db.commit()
-            log_msgs.append("✅ Tabela 'recursos_prime' verificada/criada.")
+            log_msgs.append("✅ Tabela 'recursos_prime' verificada.")
         except Exception as e:
             db.rollback()
             return {"status": "error", "message": f"Erro ao criar tabela: {str(e)}"}
 
-        # 2. LISTA DE TODOS OS RECURSOS DA PLATAFORMA
-        recursos_novos = [
+        # 2. LISTA DE TODOS OS RECURSOS (Ativos e Em Desenvolvimento)
+        recursos_completos = [
             {
                 "id": "revisao_copy",
                 "nome": "Simulador de Copy",
                 "descricao": "Teste todo o seu funil enviando mensagens simuladas para o seu próprio Telegram.",
                 "icone": "MessageSquare",
                 "cor": "#f97316",
-                "meta_reais": 0, # Grátis para todos
+                "meta_reais": 0,
                 "implementado": True
             },
             {
@@ -21712,7 +21712,7 @@ async def injetar_novos_recursos(db: Session = Depends(get_db)):
                 "descricao": "Copie toda a estrutura (mensagens, botões e atrasos) de um bot de sucesso para um novo bot.",
                 "icone": "Copy",
                 "cor": "#c333ff",
-                "meta_reais": 100, # Libera após R$ 100
+                "meta_reais": 100,
                 "implementado": True
             },
             {
@@ -21721,7 +21721,7 @@ async def injetar_novos_recursos(db: Session = Depends(get_db)):
                 "descricao": "Inteligência Artificial que prevê o seu faturamento para os próximos 30, 60 ou 90 dias.",
                 "icone": "TrendingUp",
                 "cor": "#22c55e",
-                "meta_reais": 300, # Libera após R$ 300
+                "meta_reais": 300,
                 "implementado": True
             },
             {
@@ -21730,7 +21730,7 @@ async def injetar_novos_recursos(db: Session = Depends(get_db)):
                 "descricao": "Bloqueia usuários que geram vários PIX falsos, economizando taxas da gateway.",
                 "icone": "Shield",
                 "cor": "#ef4444",
-                "meta_reais": 500, # Libera após R$ 500
+                "meta_reais": 500,
                 "implementado": True
             },
             {
@@ -21739,22 +21739,59 @@ async def injetar_novos_recursos(db: Session = Depends(get_db)):
                 "descricao": "Visão de CEO: Acompanhe o faturamento, leads e conversão de todos os seus bots em uma tela.",
                 "icone": "TrendingUp",
                 "cor": "#3b82f6",
-                "meta_reais": 1500, # Libera após R$ 1500
+                "meta_reais": 1500,
                 "implementado": True
             },
+            # 👇 RECURSOS "EM DESENVOLVIMENTO" 👇
             {
-                "id": "smart_downsell",
-                "nome": "Smart Downsell",
-                "descricao": "Gere um PIX automático com desconto na última mensagem de remarketing para não perder a venda.",
+                "id": "clonador_previas",
+                "nome": "Clonador de Prévias/VIPs",
+                "descricao": "Clone postagens automaticamente entre canais e grupos. O bot copia conteúdo do canal de origem para o destino.",
+                "icone": "Repeat",
+                "cor": "#c333ff",
+                "meta_reais": 2000,
+                "implementado": False
+            },
+            {
+                "id": "remarketing_inteligente",
+                "nome": "Remarketing Inteligente",
+                "descricao": "Segmentação automática de leads: identifica quem visitou e não comprou, quem abandonou PIX, e quem não renovou.",
+                "icone": "Brain",
+                "cor": "#f59e0b",
+                "meta_reais": 3000,
+                "implementado": False
+            },
+            {
+                "id": "analisador_concorrentes",
+                "nome": "Analisador de Concorrentes",
+                "descricao": "Monitore canais públicos de concorrentes. Relatórios com frequência de postagens e horários de pico.",
+                "icone": "Search",
+                "cor": "#ef4444",
+                "meta_reais": 4000,
+                "implementado": False
+            },
+            {
+                "id": "multi_gateway",
+                "nome": "Multi-Gateway Inteligente",
+                "descricao": "Roteamento automático de pagamentos para o gateway com maior taxa de aprovação por faixa de valor.",
                 "icone": "Zap",
-                "cor": "#eab308",
-                "meta_reais": 3000, # Em Breve
+                "cor": "#06b6d4",
+                "meta_reais": 5000,
+                "implementado": False
+            },
+            {
+                "id": "anti_vazamento",
+                "nome": "Proteção Anti-Vazamento",
+                "descricao": "Marca d'água invisível em mídias do canal VIP. Identifique quem vazou seu conteúdo.",
+                "icone": "Shield",
+                "cor": "#8b5cf6",
+                "meta_reais": 10000,
                 "implementado": False
             }
         ]
         
-        # 3. INSERE OS DADOS
-        for rec in recursos_novos:
+        # 3. INSERE OS DADOS (Só insere os que faltam, não duplica)
+        for rec in recursos_completos:
             existe = db.execute(text("SELECT id FROM recursos_prime WHERE id = :id"), {"id": rec["id"]}).fetchone()
             
             if not existe:
@@ -21770,7 +21807,7 @@ async def injetar_novos_recursos(db: Session = Depends(get_db)):
 
         return {
             "status": "success",
-            "message": "Tabela criada e Recursos injetados com sucesso!",
+            "message": "Todos os Recursos injetados com sucesso!",
             "details": log_msgs
         }
     except Exception as e:
