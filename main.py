@@ -18483,116 +18483,59 @@ def get_recursos_prime(
     Retorna o faturamento total do usuário e quais recursos estão desbloqueados.
     """
     try:
+        from sqlalchemy import text
+        # 1. Pega os bots do usuário
         user_bots = db.query(BotModel.id).filter(BotModel.owner_id == current_user.id).all()
-        bots_ids = [b.id for b in user_bots]
+        bot_ids = [b.id for b in user_bots]
         
+        # 2. Calcula o faturamento total em REAIS
         faturamento_total = 0
         total_vendas = 0
-        if bots_ids:
+        if bot_ids:
             vendas = db.query(Pedido).filter(
-                Pedido.bot_id.in_(bots_ids),
-                Pedido.status.in_(['paid', 'approved', 'active', 'expired'])
+                Pedido.bot_id.in_(bot_ids),
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
             ).all()
-            faturamento_total = sum(int((p.valor or 0) * 100) for p in vendas)
+            
             total_vendas = len(vendas)
+            
+            # Se for super admin com split, o faturamento dele é baseado nas taxas
+            if current_user.is_superuser and getattr(current_user, 'pushin_pay_id', None):
+                taxa = current_user.taxa_venda or 60
+                faturamento_total = (total_vendas * taxa) / 100.0
+            else:
+                faturamento_total = sum(float(v.valor or 0) for v in vendas)
         
-        faturamento_reais = faturamento_total / 100
+        # 3. Busca a lista de recursos que injetamos no banco
+        recursos_db = db.execute(text("SELECT * FROM recursos_prime ORDER BY meta_reais ASC")).fetchall()
         
-        recursos = [
-            {
-                "id": "revisao_copy",
-                "nome": "Revisão de Copy",
-                "descricao": "Simule o fluxo completo do seu bot no Telegram: Flow, Remarketing, Order Bump, Upsell e Downsell. Veja exatamente o que seus clientes recebem.",
-                "icone": "MessageSquare",
-                "meta_reais": 0,
-                "cor": "#f97316",
-                "status": "disponivel",
-                "implementado": True
-            },
-            {
-                "id": "projecao_receita",
-                "nome": "Projeção de Receita",
-                "descricao": "Simulador inteligente que projeta seu faturamento futuro com base nos dados reais de vendas. Cenários otimista, realista e conservador.",
-                "icone": "TrendingUp",
-                "meta_reais": 0,
-                "cor": "#22c55e",
-                "status": "disponivel",
-                "implementado": True
-            },
-            {
-                "id": "clonador_funil",
-                "nome": "Clonador de Funil",
-                "descricao": "Copie toda a estratégia de vendas de um bot para outro: planos, preços, flow, remarketing, order bump, upsell e downsell em um clique.",
-                "icone": "Copy",
-                "meta_reais": 100,
-                "cor": "#3b82f6",
-                "status": "disponivel" if faturamento_reais >= 100 else "bloqueado",
-                "implementado": True
-            },
-            {
-                "id": "clonador_previas",
-                "nome": "Clonador de Prévias/VIPs",
-                "descricao": "Clone postagens automaticamente entre canais e grupos. O bot copia conteúdo do canal de origem para o destino com intervalo configurável.",
-                "icone": "Repeat",
-                "meta_reais": 500,
-                "cor": "#c333ff",
-                "status": "disponivel" if faturamento_reais >= 500 else "bloqueado",
-                "implementado": False
-            },
-            {
-                "id": "remarketing_inteligente",
-                "nome": "Remarketing Inteligente",
-                "descricao": "Segmentação automática de leads: identifica quem visitou e não comprou, quem abandonou PIX, e quem não renovou. Sugere mensagens e horários ideais.",
-                "icone": "Brain",
-                "meta_reais": 1000,
-                "cor": "#f59e0b",
-                "status": "disponivel" if faturamento_reais >= 1000 else "bloqueado",
-                "implementado": False
-            },
-            {
-                "id": "analisador_concorrentes",
-                "nome": "Analisador de Concorrentes",
-                "descricao": "Monitore canais públicos de concorrentes. Relatórios com frequência de postagens, horários de pico, crescimento de membros e padrões de conteúdo.",
-                "icone": "Search",
-                "meta_reais": 2000,
-                "cor": "#ef4444",
-                "status": "disponivel" if faturamento_reais >= 2000 else "bloqueado",
-                "implementado": False
-            },
-            {
-                "id": "multi_gateway",
-                "nome": "Multi-Gateway Inteligente",
-                "descricao": "Roteamento automático de pagamentos para o gateway com maior taxa de aprovação por faixa de valor. Dashboard comparativo de performance.",
-                "icone": "Zap",
-                "meta_reais": 5000,
-                "cor": "#06b6d4",
-                "status": "disponivel" if faturamento_reais >= 5000 else "bloqueado",
-                "implementado": False
-            },
-            {
-                "id": "anti_vazamento",
-                "nome": "Proteção Anti-Vazamento",
-                "descricao": "Marca d'água invisível em mídias do canal VIP. Cada comprador recebe versão com ID único. Identifique quem vazou seu conteúdo.",
-                "icone": "Shield",
-                "meta_reais": 10000,
-                "cor": "#8b5cf6",
-                "status": "disponivel" if faturamento_reais >= 10000 else "bloqueado",
-                "implementado": False
-            }
-        ]
-        
-        desbloqueados = sum(1 for r in recursos if r["status"] == "disponivel")
-        
+        recursos = []
+        desbloqueados = 0
         proxima_meta = None
-        for r in recursos:
-            if r["status"] == "bloqueado":
-                proxima_meta = {"nome": r["nome"], "meta_reais": r["meta_reais"], "falta_reais": round(r["meta_reais"] - faturamento_reais, 2)}
-                break
         
+        for r in recursos_db:
+            rec = dict(r._mapping)
+            
+            # Regra de Gamificação: Se faturou mais que a meta, desbloqueia!
+            if faturamento_total >= rec["meta_reais"]:
+                rec["status"] = "desbloqueado" if rec["implementado"] else "em_breve"
+                desbloqueados += 1
+            else:
+                rec["status"] = "bloqueado"
+                # Define a próxima meta baseada no primeiro recurso bloqueado da fila
+                if not proxima_meta:
+                    proxima_meta = {
+                        "nome": rec["nome"],
+                        "meta_reais": rec["meta_reais"],
+                        "falta_reais": float(rec["meta_reais"] - faturamento_total)
+                    }
+            
+            recursos.append(rec)
+            
         return {
             "status": "success",
-            "faturamento_total_centavos": faturamento_total,
-            "faturamento_total_reais": round(faturamento_reais, 2),
+            "faturamento_total_centavos": int(faturamento_total * 100),
+            "faturamento_total_reais": round(faturamento_total, 2),
             "total_vendas": total_vendas,
             "recursos": recursos,
             "desbloqueados": desbloqueados,
@@ -19184,8 +19127,7 @@ def simular_copy(
     except Exception as e:
         logger.error(f"❌ Erro ao simular copy: {e}")
         raise HTTPException(500, f"Erro ao simular: {str(e)}")
-
-
+        
 # =========================================================
 # 📁 ROTA DE UPLOAD DE MÍDIA (BACKBLAZE B2)
 # =========================================================
