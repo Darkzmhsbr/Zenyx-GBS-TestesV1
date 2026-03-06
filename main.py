@@ -21721,41 +21721,98 @@ async def migrate_prime_v4(db: Session = Depends(get_db)):
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
 
 # ============================================================
-# 🚨 INJETAR NOVOS RECURSOS PRIME NO BANCO
+# 🚨 CRIAR E INJETAR RECURSOS PRIME NO BANCO
 # ============================================================
 @app.get("/injetar-novos-recursos")
 async def injetar_novos_recursos(db: Session = Depends(get_db)):
     """
-    Injeta o Escudo e o Command Center na tabela de Recursos Prime.
-    Acesse UMA VEZ no navegador após o deploy: https://zenyx-gbs-testesv1-production.up.railway.app/injetar-novos-recursos
+    Cria a tabela recursos_prime e injeta os itens do sistema.
+    Acesse UMA VEZ no navegador após o deploy.
     """
     try:
         from sqlalchemy import text
         log_msgs = []
         
+        # 1. CRIA A TABELA SE NÃO EXISTIR
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS recursos_prime (
+                    id VARCHAR(50) PRIMARY KEY,
+                    nome VARCHAR(100) NOT NULL,
+                    descricao TEXT NOT NULL,
+                    icone VARCHAR(50),
+                    cor VARCHAR(20),
+                    meta_reais INTEGER DEFAULT 0,
+                    status VARCHAR(20) DEFAULT 'bloqueado',
+                    implementado BOOLEAN DEFAULT TRUE
+                );
+            """))
+            db.commit()
+            log_msgs.append("✅ Tabela 'recursos_prime' verificada/criada.")
+        except Exception as e:
+            db.rollback()
+            return {"status": "error", "message": f"Erro ao criar tabela: {str(e)}"}
+
+        # 2. LISTA DE TODOS OS RECURSOS DA PLATAFORMA
         recursos_novos = [
+            {
+                "id": "revisao_copy",
+                "nome": "Simulador de Copy",
+                "descricao": "Teste todo o seu funil enviando mensagens simuladas para o seu próprio Telegram.",
+                "icone": "MessageSquare",
+                "cor": "#f97316",
+                "meta_reais": 0, # Grátis para todos
+                "implementado": True
+            },
+            {
+                "id": "clonador_funil",
+                "nome": "Clonador de Funil",
+                "descricao": "Copie toda a estrutura (mensagens, botões e atrasos) de um bot de sucesso para um novo bot.",
+                "icone": "Copy",
+                "cor": "#c333ff",
+                "meta_reais": 100, # Libera após R$ 100
+                "implementado": True
+            },
+            {
+                "id": "projecao_receita",
+                "nome": "Projeção de Receita",
+                "descricao": "Inteligência Artificial que prevê o seu faturamento para os próximos 30, 60 ou 90 dias.",
+                "icone": "TrendingUp",
+                "cor": "#22c55e",
+                "meta_reais": 300, # Libera após R$ 300
+                "implementado": True
+            },
             {
                 "id": "escudo_anticuriosos",
                 "nome": "Escudo Anti-Curiosos",
                 "descricao": "Bloqueia usuários que geram vários PIX falsos, economizando taxas da gateway.",
                 "icone": "Shield",
                 "cor": "#ef4444",
-                "meta_reais": 500, # Libera após R$ 500 de faturamento
+                "meta_reais": 500, # Libera após R$ 500
                 "implementado": True
             },
             {
                 "id": "multibot_center",
                 "nome": "Command Center",
-                "descricao": "Visão de CEO: Acompanhe o faturamento, leads e conversão de todos os seus bots em uma única tela.",
+                "descricao": "Visão de CEO: Acompanhe o faturamento, leads e conversão de todos os seus bots em uma tela.",
                 "icone": "TrendingUp",
                 "cor": "#3b82f6",
-                "meta_reais": 1500, # Libera após R$ 1500 de faturamento
+                "meta_reais": 1500, # Libera após R$ 1500
                 "implementado": True
+            },
+            {
+                "id": "smart_downsell",
+                "nome": "Smart Downsell",
+                "descricao": "Gere um PIX automático com desconto na última mensagem de remarketing para não perder a venda.",
+                "icone": "Zap",
+                "cor": "#eab308",
+                "meta_reais": 3000, # Em Breve
+                "implementado": False
             }
         ]
         
+        # 3. INSERE OS DADOS
         for rec in recursos_novos:
-            # Verifica se já existe
             existe = db.execute(text("SELECT id FROM recursos_prime WHERE id = :id"), {"id": rec["id"]}).fetchone()
             
             if not existe:
@@ -21771,9 +21828,9 @@ async def injetar_novos_recursos(db: Session = Depends(get_db)):
 
         return {
             "status": "success",
-            "message": "Novos recursos injetados com sucesso!",
+            "message": "Tabela criada e Recursos injetados com sucesso!",
             "details": log_msgs
         }
     except Exception as e:
         db.rollback()
-        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+        return {"status": "error", "message": f"❌ Erro Geral: {str(e)}"}
