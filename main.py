@@ -21719,3 +21719,61 @@ async def migrate_prime_v4(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+
+# ============================================================
+# 🚨 INJETAR NOVOS RECURSOS PRIME NO BANCO
+# ============================================================
+@app.get("/injetar-novos-recursos")
+async def injetar_novos_recursos(db: Session = Depends(get_db)):
+    """
+    Injeta o Escudo e o Command Center na tabela de Recursos Prime.
+    Acesse UMA VEZ no navegador após o deploy: https://zenyx-gbs-testesv1-production.up.railway.app/injetar-novos-recursos
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        recursos_novos = [
+            {
+                "id": "escudo_anticuriosos",
+                "nome": "Escudo Anti-Curiosos",
+                "descricao": "Bloqueia usuários que geram vários PIX falsos, economizando taxas da gateway.",
+                "icone": "Shield",
+                "cor": "#ef4444",
+                "meta_reais": 500, # Libera após R$ 500 de faturamento
+                "implementado": True
+            },
+            {
+                "id": "multibot_center",
+                "nome": "Command Center",
+                "descricao": "Visão de CEO: Acompanhe o faturamento, leads e conversão de todos os seus bots em uma única tela.",
+                "icone": "TrendingUp",
+                "cor": "#3b82f6",
+                "meta_reais": 1500, # Libera após R$ 1500 de faturamento
+                "implementado": True
+            }
+        ]
+        
+        for rec in recursos_novos:
+            # Verifica se já existe
+            existe = db.execute(text("SELECT id FROM recursos_prime WHERE id = :id"), {"id": rec["id"]}).fetchone()
+            
+            if not existe:
+                db.execute(text("""
+                    INSERT INTO recursos_prime (id, nome, descricao, icone, cor, meta_reais, implementado)
+                    VALUES (:id, :nome, :descricao, :icone, :cor, :meta_reais, :implementado)
+                """), rec)
+                log_msgs.append(f"✅ Recurso '{rec['nome']}' inserido com sucesso!")
+            else:
+                log_msgs.append(f"ℹ️ Recurso '{rec['nome']}' já existia.")
+                
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": "Novos recursos injetados com sucesso!",
+            "details": log_msgs
+        }
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
