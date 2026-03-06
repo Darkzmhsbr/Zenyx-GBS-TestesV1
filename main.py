@@ -21623,7 +21623,6 @@ async def migrate_gateways_v4(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"❌ Erro Crítico: {str(e)}"}
-
 # ============================================================
 # 🚨 MIGRAÇÃO V4: ESCUDO ANTI-CURIOSOS (RECURSOS PRIME)
 # ============================================================
@@ -21661,7 +21660,6 @@ async def migrate_prime_v4(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
-
 
 # ============================================================
 # 🚨 CRIAR E INJETAR RECURSOS PRIME NO BANCO
