@@ -21662,6 +21662,7 @@ async def migrate_prime_v4(db: Session = Depends(get_db)):
         db.rollback()
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
 
+
 # ============================================================
 # 🚨 CRIAR E INJETAR RECURSOS PRIME NO BANCO
 # ============================================================
