@@ -21727,7 +21727,7 @@ async def migrate_prime_v4(db: Session = Depends(get_db)):
 async def injetar_novos_recursos(db: Session = Depends(get_db)):
     """
     Cria a tabela recursos_prime e injeta os itens do sistema.
-    Acesse UMA VEZ no navegador após o deploy.
+    Acesse UMA VEZ no navegador após o deploy: https://zenyx-gbs-testesv1-production.up.railway.app/injetar-novos-recursos
     """
     try:
         from sqlalchemy import text
