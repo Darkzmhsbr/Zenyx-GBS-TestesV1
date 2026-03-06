@@ -4658,12 +4658,18 @@ async def gerar_pix_omegapay(
                         )
                 except: pass
 
-            # 🔥 MÁGICA DO CAÇADOR DE QR CODE:
-            # A documentação diz que vem em "pix", mas na realidade pode vir em "pixInformation".
+            # 🔥 MÁGICA APRIMORADA: Adaptado para o Payload REAL que a OmegaPay enviou no log
             pix_obj = dados.get("pix") or dados.get("pixInformation") or dados.get("transaction", {}).get("pixInformation") or dados
             
-            qr_code = pix_obj.get("qrCode") or pix_obj.get("qr_code") or pix_obj.get("copy_paste") or ""
-            qrcode_url = pix_obj.get("qrCodeUrl") or pix_obj.get("qr_code_url") or pix_obj.get("image") or ""
+            # Buscar o PIX copia e cola (adicionada a chave "code")
+            qr_code = pix_obj.get("code") or pix_obj.get("qrCode") or pix_obj.get("qr_code") or pix_obj.get("copy_paste") or ""
+            
+            # Buscar a Imagem (adicionada a chave "base64")
+            qrcode_url = pix_obj.get("base64") or pix_obj.get("qrCodeUrl") or pix_obj.get("qr_code_url") or pix_obj.get("image") or ""
+            
+            # Formatar o base64 para imagem se vier puro
+            if qrcode_url and not qrcode_url.startswith("http") and not qrcode_url.startswith("data:image"):
+                qrcode_url = f"data:image/png;base64,{qrcode_url}"
             
             if not qr_code:
                 logger.error(f"❌ [OMEGAPAY] QR Code não encontrado na resposta! Payload recebido: {dados}")
