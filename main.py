@@ -22632,6 +22632,18 @@ def get_invite_requirement_status(
     return {"status": "success", "invite_required": is_required}
 
 
+@app.get("/api/public/invite-required")
+def public_invite_required(db: Session = Depends(get_db)):
+    """
+    Rota PÚBLICA (sem autenticação) para o Register.jsx consultar
+    se o código de convite é obrigatório no momento.
+    Retorna True durante pré-lançamento, False após lançamento.
+    """
+    config = db.query(SystemConfig).filter(SystemConfig.key == "invite_required").first()
+    is_required = config and config.value == "true"
+    return {"invite_required": is_required}
+
+
 # =========================================================
 # 🚨 MIGRAÇÃO V11: CÓDIGOS DE CONVITE (PRÉ-LANÇAMENTO)
 # =========================================================
