@@ -1150,3 +1150,25 @@ class UserPrimeOverride(Base):
     
     def __repr__(self):
         return f"<UserPrimeOverride(user_id={self.user_id}, recurso='{self.recurso_id}', force='{self.force_status}')>"
+
+# =========================================================
+# 🎟️ CÓDIGOS DE CONVITE (PRÉ-LANÇAMENTO)
+# =========================================================
+class InviteCode(Base):
+    """
+    Códigos de convite para controle de acesso no pré-lançamento.
+    Cada código é de uso único: uma vez utilizado, fica queimado.
+    Formato: ABCDE1-FGHJ2 (6-6 com hífen)
+    """
+    __tablename__ = "invite_codes"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(20), unique=True, index=True, nullable=False)  # Ex: KSCE35-W569JA
+    is_used = Column(Boolean, default=False, index=True)
+    used_by = Column(Integer, ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
+    used_by_username = Column(String, nullable=True)  # Denormalizado para exibição rápida
+    created_at = Column(DateTime, default=now_brazil)
+    used_at = Column(DateTime, nullable=True)
+
+    def __repr__(self):
+        return f"<InviteCode(code='{self.code}', is_used={self.is_used})>"

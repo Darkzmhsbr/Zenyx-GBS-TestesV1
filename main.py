@@ -90,7 +90,9 @@ from database import (
     # ✅ NOVO IMPORT PARA DIÁRIO DE MUDANÇAS
     ChangeLog,
     # ✅ NOVO IMPORT PARA OVERRIDES DE RECURSOS PRIME
-    UserPrimeOverride
+    UserPrimeOverride,
+    # ✅ NOVO IMPORT PARA CÓDIGOS DE CONVITE
+    InviteCode
 )
 
 import update_db 
@@ -2416,6 +2418,7 @@ class UserCreate(BaseModel):
     password: str
     full_name: str = None
     turnstile_token: Optional[str] = None
+    invite_code: Optional[str] = None  # 🎟️ Código de convite (pré-lançamento)
 
 class UserLogin(BaseModel):
     username: str
@@ -6693,6 +6696,20 @@ async def register(user_data: UserCreate, request: Request, db: Session = Depend
     #                description="Login bloqueado: Falha na verificação humana", success=False, ip_address=get_client_ip(request))
     #      raise HTTPException(status_code=400, detail="Erro de verificação humana (Captcha). Tente recarregar a página.")
 
+    # 🎟️ VERIFICAÇÃO DE CÓDIGO DE CONVITE (PRÉ-LANÇAMENTO)
+    convite = None
+    if user_data.invite_code:
+        convite = db.query(InviteCode).filter(InviteCode.code == user_data.invite_code.strip().upper()).first()
+        if not convite:
+            raise HTTPException(status_code=400, detail="Código de convite inválido ou inexistente.")
+        if convite.is_used:
+            raise HTTPException(status_code=400, detail="Este código de convite já foi utilizado.")
+    else:
+        # Se não enviou código, verifica se o sistema exige (pré-lançamento)
+        invite_required = db.query(SystemConfig).filter(SystemConfig.key == "invite_required").first()
+        if invite_required and invite_required.value == "true":
+            raise HTTPException(status_code=400, detail="Código de convite é obrigatório para criar uma conta nesta fase.")
+
     # Validações normais
     existing_user = db.query(User).filter(User.username == user_data.username).first()
     if existing_user:
@@ -6715,6 +6732,15 @@ async def register(user_data: UserCreate, request: Request, db: Session = Depend
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
+    
+    # 🎟️ QUEIMA O CÓDIGO DE CONVITE (se usado)
+    if convite:
+        from database import now_brazil
+        convite.is_used = True
+        convite.used_by = new_user.id
+        convite.used_by_username = new_user.username
+        convite.used_at = now_brazil()
+        db.commit()
     
     # 📋 AUDITORIA
     log_action(db=db, user_id=new_user.id, username=new_user.username, action="user_registered", resource_type="auth", 
@@ -22448,6 +22474,216 @@ async def migrate_ranking_prime_v10(db: Session = Depends(get_db)):
         return {
             "status": "success",
             "message": "🚨 Migração V10 (Ranking + Prime) concluída!",
+            "details": log_msgs
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+
+
+# =========================================================
+# 🎟️ ROTAS DE CÓDIGOS DE CONVITE (SUPER ADMIN)
+# =========================================================
+import random
+import string as string_module
+
+def generate_invite_code():
+    """Gera código no formato ABCD12-EFGH34"""
+    part1 = ''.join(random.choices(string_module.ascii_uppercase + string_module.digits, k=6))
+    part2 = ''.join(random.choices(string_module.ascii_uppercase + string_module.digits, k=6))
+    return f"{part1}-{part2}"
+
+@app.post("/api/admin/invites/generate")
+def create_invite_codes(
+    quantidade: int = Query(default=1, ge=1, le=50),
+    db: Session = Depends(get_db), 
+    current_user = Depends(get_current_user)
+):
+    """Gera códigos de convite (apenas Super Admins)"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Apenas Super Admins podem gerar convites.")
+    
+    codigos_gerados = []
+    for _ in range(quantidade):
+        # Garante unicidade
+        for attempt in range(10):
+            novo_codigo = generate_invite_code()
+            exists = db.query(InviteCode).filter(InviteCode.code == novo_codigo).first()
+            if not exists:
+                break
+        
+        db_code = InviteCode(code=novo_codigo)
+        db.add(db_code)
+        codigos_gerados.append(novo_codigo)
+    
+    db.commit()
+    
+    # 📋 AUDITORIA
+    log_action(
+        db=db, user_id=current_user.id, username=current_user.username,
+        action="invite_codes_generated", resource_type="invite",
+        description=f"Gerou {quantidade} código(s) de convite",
+        details={"codes": codigos_gerados}
+    )
+    
+    return {"status": "success", "codes": codigos_gerados, "total_generated": len(codigos_gerados)}
+
+
+@app.get("/api/admin/invites")
+def list_invite_codes(
+    status: Optional[str] = Query(default=None, description="Filtro: 'used', 'available', ou None para todos"),
+    db: Session = Depends(get_db), 
+    current_user = Depends(get_current_user)
+):
+    """Lista todos os códigos de convite (apenas Super Admins)"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Apenas Super Admins podem ver convites.")
+    
+    query = db.query(InviteCode).order_by(InviteCode.created_at.desc())
+    
+    if status == "used":
+        query = query.filter(InviteCode.is_used == True)
+    elif status == "available":
+        query = query.filter(InviteCode.is_used == False)
+    
+    convites = query.all()
+    
+    resultado = []
+    for c in convites:
+        resultado.append({
+            "id": c.id,
+            "code": c.code,
+            "is_used": c.is_used,
+            "used_by": c.used_by,
+            "used_by_username": c.used_by_username,
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "used_at": c.used_at.isoformat() if c.used_at else None
+        })
+    
+    # Contadores
+    total = len(convites)
+    usados = sum(1 for c in convites if c.is_used)
+    disponiveis = total - usados
+    
+    return {
+        "status": "success", 
+        "invites": resultado,
+        "stats": {
+            "total": total,
+            "used": usados,
+            "available": disponiveis
+        }
+    }
+
+
+@app.delete("/api/admin/invites/{invite_id}")
+def delete_invite_code(
+    invite_id: int,
+    db: Session = Depends(get_db), 
+    current_user = Depends(get_current_user)
+):
+    """Deleta um código de convite não utilizado (apenas Super Admins)"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Apenas Super Admins podem deletar convites.")
+    
+    convite = db.query(InviteCode).filter(InviteCode.id == invite_id).first()
+    if not convite:
+        raise HTTPException(status_code=404, detail="Código de convite não encontrado.")
+    
+    if convite.is_used:
+        raise HTTPException(status_code=400, detail="Não é possível deletar um código já utilizado.")
+    
+    db.delete(convite)
+    db.commit()
+    
+    return {"status": "success", "message": f"Código {convite.code} deletado com sucesso."}
+
+
+@app.get("/api/admin/invites/toggle-requirement")
+def toggle_invite_requirement(
+    enabled: bool = Query(...),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Liga/desliga a exigência de código de convite para registro"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Apenas Super Admins.")
+    
+    config = db.query(SystemConfig).filter(SystemConfig.key == "invite_required").first()
+    if config:
+        config.value = "true" if enabled else "false"
+    else:
+        db.add(SystemConfig(key="invite_required", value="true" if enabled else "false"))
+    
+    db.commit()
+    return {"status": "success", "invite_required": enabled}
+
+
+@app.get("/api/admin/invites/requirement-status")
+def get_invite_requirement_status(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Verifica se o código de convite é obrigatório"""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Apenas Super Admins.")
+    
+    config = db.query(SystemConfig).filter(SystemConfig.key == "invite_required").first()
+    is_required = config and config.value == "true"
+    return {"status": "success", "invite_required": is_required}
+
+
+# =========================================================
+# 🚨 MIGRAÇÃO V11: CÓDIGOS DE CONVITE (PRÉ-LANÇAMENTO)
+# =========================================================
+@app.get("/migrate-invites-v11")
+async def migrate_invites_v11(db: Session = Depends(get_db)):
+    """
+    Migração V11:
+    1. Cria tabela invite_codes no banco de dados
+    2. Cria config 'invite_required' no SystemConfig (default True para pré-lançamento)
+    Acesse UMA VEZ após deploy: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-invites-v11
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        # 1. Criar tabela invite_codes
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS invite_codes (
+                    id SERIAL PRIMARY KEY,
+                    code VARCHAR(20) UNIQUE NOT NULL,
+                    is_used BOOLEAN DEFAULT FALSE,
+                    used_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    used_by_username VARCHAR,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    used_at TIMESTAMP
+                )
+            """))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_invite_codes_code ON invite_codes (code)"))
+            db.execute(text("CREATE INDEX IF NOT EXISTS ix_invite_codes_is_used ON invite_codes (is_used)"))
+            db.commit()
+            log_msgs.append("✅ Tabela 'invite_codes' criada/verificada com sucesso")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ invite_codes: {str(e)}")
+        
+        # 2. Criar config invite_required (default True = pré-lançamento ativo)
+        try:
+            existe = db.query(SystemConfig).filter(SystemConfig.key == "invite_required").first()
+            if not existe:
+                db.add(SystemConfig(key="invite_required", value="true"))
+                db.commit()
+                log_msgs.append("✅ Config 'invite_required' criada (default: true - pré-lançamento ATIVO)")
+            else:
+                log_msgs.append(f"ℹ️ Config 'invite_required' já existe (valor: {existe.value})")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ invite_required config: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "🎟️ Migração V11 (Códigos de Convite) concluída!",
             "details": log_msgs
         }
     except Exception as e:
