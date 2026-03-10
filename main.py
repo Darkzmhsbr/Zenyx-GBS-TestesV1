@@ -18510,10 +18510,10 @@ def get_recursos_prime(
             if current_user.is_superuser:
                 rec["status"] = "desbloqueado" if rec["implementado"] else "em_breve"
                 desbloqueados += 1
-            # 🔒 Override forçado pelo admin
+            # 🔒 Override forçado pelo admin — IGNORA o flag 'implementado'
             elif override and override.force_status:
                 if override.force_status == 'desbloqueado':
-                    rec["status"] = "desbloqueado" if rec["implementado"] else "em_breve"
+                    rec["status"] = "desbloqueado"  # 🔥 Admin mandou desbloquear = desbloqueado ponto
                     desbloqueados += 1
                 else:
                     rec["status"] = "bloqueado"
@@ -22376,7 +22376,7 @@ async def migrate_ranking_prime_v10(db: Session = Depends(get_db)):
     Migração V10:
     1. Cria config 'ranking_publico' no SystemConfig (default True)
     2. Força clonador_previas como implementado=False (re-bloquear)
-    Acesse UMA VEZ após deploy : https://zenyx-gbs-testesv1-production.up.railway.app/migrate-ranking-prime-v10
+    Acesse UMA VEZ após deploy: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-ranking-prime-v10
     """
     try:
         from sqlalchemy import text
