@@ -1121,3 +1121,32 @@ class ChangeLog(Base):
 
     def __repr__(self):
         return f"<ChangeLog(id={self.id}, category='{self.category}')>"
+
+
+# =========================================================
+# 🏆 OVERRIDES DE RECURSOS PRIME POR USUÁRIO
+# =========================================================
+class UserPrimeOverride(Base):
+    """
+    Permite ao admin controlar individualmente os recursos prime de cada usuário.
+    - force_status: 'bloqueado' ou 'desbloqueado' (sobrescreve a lógica de meta)
+    - custom_meta: valor personalizado da meta para este recurso/usuário
+    Se não houver override, a lógica padrão (por meta de faturamento) é usada.
+    """
+    __tablename__ = "user_prime_overrides"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    recurso_id = Column(String(100), nullable=False, index=True)  # Ex: 'clonador_previas'
+    
+    # Controle de status forçado (NULL = usar lógica padrão)
+    force_status = Column(String(20), nullable=True)  # 'bloqueado', 'desbloqueado', ou NULL
+    
+    # Meta personalizada (NULL = usar meta padrão)
+    custom_meta = Column(Float, nullable=True)
+    
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
+    
+    def __repr__(self):
+        return f"<UserPrimeOverride(user_id={self.user_id}, recurso='{self.recurso_id}', force='{self.force_status}')>"

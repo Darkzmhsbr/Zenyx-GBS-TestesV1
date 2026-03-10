@@ -88,7 +88,9 @@ from database import (
     Report,
     UserStrike,
     # ✅ NOVO IMPORT PARA DIÁRIO DE MUDANÇAS
-    ChangeLog
+    ChangeLog,
+    # ✅ NOVO IMPORT PARA OVERRIDES DE RECURSOS PRIME
+    UserPrimeOverride
 )
 
 import update_db 
@@ -18480,29 +18482,58 @@ def get_recursos_prime(
         # 3. Busca a lista de recursos que injetamos no banco
         recursos_db = db.execute(text("SELECT * FROM recursos_prime ORDER BY meta_reais ASC")).fetchall()
         
+        # 3.1 Busca overrides do usuário (admin pode personalizar metas/status por user)
+        user_overrides = {}
+        try:
+            overrides = db.query(UserPrimeOverride).filter(
+                UserPrimeOverride.user_id == current_user.id
+            ).all()
+            for ov in overrides:
+                user_overrides[ov.recurso_id] = ov
+        except:
+            pass  # Tabela pode não existir ainda
+        
         recursos = []
         desbloqueados = 0
         proxima_meta = None
         
         for r in recursos_db:
             rec = dict(r._mapping)
+            recurso_id = rec["id"]
+            override = user_overrides.get(recurso_id)
+            
+            # Meta efetiva (override ou padrão)
+            meta_efetiva = override.custom_meta if (override and override.custom_meta is not None) else rec["meta_reais"]
+            rec["meta_reais"] = meta_efetiva  # Mostra a meta personalizada no frontend
             
             # 🔥 REGRA: Super Admin SEMPRE tem tudo desbloqueado
             if current_user.is_superuser:
                 rec["status"] = "desbloqueado" if rec["implementado"] else "em_breve"
                 desbloqueados += 1
+            # 🔒 Override forçado pelo admin
+            elif override and override.force_status:
+                if override.force_status == 'desbloqueado':
+                    rec["status"] = "desbloqueado" if rec["implementado"] else "em_breve"
+                    desbloqueados += 1
+                else:
+                    rec["status"] = "bloqueado"
+                    if not proxima_meta:
+                        proxima_meta = {
+                            "nome": rec["nome"],
+                            "meta_reais": meta_efetiva,
+                            "falta_reais": float(meta_efetiva - faturamento_total)
+                        }
             # Regra de Gamificação: Se faturou mais que a meta, desbloqueia!
-            elif faturamento_total >= rec["meta_reais"]:
+            elif faturamento_total >= meta_efetiva:
                 rec["status"] = "desbloqueado" if rec["implementado"] else "em_breve"
                 desbloqueados += 1
             else:
                 rec["status"] = "bloqueado"
-                # Define a próxima meta baseada no primeiro recurso bloqueado da fila
                 if not proxima_meta:
                     proxima_meta = {
                         "nome": rec["nome"],
-                        "meta_reais": rec["meta_reais"],
-                        "falta_reais": float(rec["meta_reais"] - faturamento_total)
+                        "meta_reais": meta_efetiva,
+                        "falta_reais": float(meta_efetiva - faturamento_total)
                     }
             
             recursos.append(rec)
@@ -22156,6 +22187,187 @@ async def injetar_novos_recursos(db: Session = Depends(get_db)):
 
 
 # =========================================================
+# 👑 ADMIN: GERENCIAR OVERRIDES DE RECURSOS PRIME POR USUÁRIO
+# =========================================================
+
+@app.get("/api/superadmin/prime-overrides")
+def admin_listar_overrides(
+    user_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Lista overrides de recursos prime. Se user_id, filtra por user."""
+    if not current_user.is_superuser:
+        raise HTTPException(403, "Acesso negado")
+    try:
+        from sqlalchemy import text
+        q = db.query(UserPrimeOverride)
+        if user_id:
+            q = q.filter(UserPrimeOverride.user_id == user_id)
+        overrides = q.all()
+        
+        return {
+            "status": "success",
+            "overrides": [{
+                "id": o.id,
+                "user_id": o.user_id,
+                "recurso_id": o.recurso_id,
+                "force_status": o.force_status,
+                "custom_meta": o.custom_meta,
+            } for o in overrides]
+        }
+    except Exception as e:
+        logger.error(f"Erro listar overrides: {e}")
+        return {"status": "error", "overrides": []}
+
+
+@app.get("/api/superadmin/prime-overrides/user/{user_id}")
+def admin_get_user_prime(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Retorna recursos prime com status real de um usuário específico.
+    Inclui: meta padrão, meta customizada, faturamento do user, status efetivo, override.
+    """
+    if not current_user.is_superuser:
+        raise HTTPException(403, "Acesso negado")
+    try:
+        from sqlalchemy import text
+        
+        target_user = db.query(User).filter(User.id == user_id).first()
+        if not target_user:
+            raise HTTPException(404, "Usuário não encontrado")
+        
+        # Faturamento do user
+        user_bots = db.query(BotModel.id).filter(BotModel.owner_id == user_id).all()
+        bot_ids = [b.id for b in user_bots]
+        faturamento = 0
+        if bot_ids:
+            vendas = db.query(Pedido).filter(
+                Pedido.bot_id.in_(bot_ids),
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
+            ).all()
+            faturamento = sum(float(v.valor or 0) for v in vendas)
+        
+        # Recursos
+        recursos_db = db.execute(text("SELECT * FROM recursos_prime ORDER BY meta_reais ASC")).fetchall()
+        
+        # Overrides
+        overrides = db.query(UserPrimeOverride).filter(UserPrimeOverride.user_id == user_id).all()
+        override_map = {o.recurso_id: o for o in overrides}
+        
+        recursos = []
+        for r in recursos_db:
+            rec = dict(r._mapping)
+            ov = override_map.get(rec["id"])
+            meta_efetiva = ov.custom_meta if (ov and ov.custom_meta is not None) else rec["meta_reais"]
+            
+            # Status natural (sem override)
+            if faturamento >= meta_efetiva:
+                status_natural = "desbloqueado" if rec["implementado"] else "em_breve"
+            else:
+                status_natural = "bloqueado"
+            
+            # Status efetivo (com override)
+            if ov and ov.force_status:
+                status_efetivo = ov.force_status
+            else:
+                status_efetivo = status_natural
+            
+            recursos.append({
+                "id": rec["id"],
+                "nome": rec["nome"],
+                "meta_padrao": rec["meta_reais"],
+                "meta_efetiva": meta_efetiva,
+                "implementado": rec["implementado"],
+                "status_natural": status_natural,
+                "status_efetivo": status_efetivo,
+                "has_override": ov is not None,
+                "override_force": ov.force_status if ov else None,
+                "override_meta": ov.custom_meta if ov else None,
+            })
+        
+        return {
+            "status": "success",
+            "user": {
+                "id": target_user.id,
+                "username": target_user.username,
+                "email": target_user.email,
+                "faturamento_reais": round(faturamento, 2),
+            },
+            "recursos": recursos
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro get user prime: {e}")
+        raise HTTPException(500, str(e))
+
+
+class PrimeOverridePayload(BaseModel):
+    recurso_id: str
+    force_status: Optional[str] = None  # 'bloqueado', 'desbloqueado', ou None (remover override)
+    custom_meta: Optional[float] = None  # Valor customizado ou None (usar padrão)
+
+
+@app.post("/api/superadmin/prime-overrides/user/{user_id}")
+def admin_set_user_prime(
+    user_id: int,
+    payload: PrimeOverridePayload,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Cria/atualiza/remove override de recurso prime para um usuário."""
+    if not current_user.is_superuser:
+        raise HTTPException(403, "Acesso negado")
+    try:
+        # Buscar override existente
+        existing = db.query(UserPrimeOverride).filter(
+            UserPrimeOverride.user_id == user_id,
+            UserPrimeOverride.recurso_id == payload.recurso_id
+        ).first()
+        
+        # Se ambos None, remove o override
+        if payload.force_status is None and payload.custom_meta is None:
+            if existing:
+                db.delete(existing)
+                db.commit()
+                return {"status": "success", "message": f"Override removido para {payload.recurso_id}"}
+            return {"status": "success", "message": "Nenhum override para remover"}
+        
+        if existing:
+            existing.force_status = payload.force_status
+            existing.custom_meta = payload.custom_meta
+        else:
+            existing = UserPrimeOverride(
+                user_id=user_id,
+                recurso_id=payload.recurso_id,
+                force_status=payload.force_status,
+                custom_meta=payload.custom_meta
+            )
+            db.add(existing)
+        
+        db.commit()
+        logger.info(f"👑 Override prime: user={user_id}, recurso={payload.recurso_id}, force={payload.force_status}, meta={payload.custom_meta}")
+        
+        return {
+            "status": "success",
+            "message": f"Override salvo para {payload.recurso_id}",
+            "override": {
+                "recurso_id": payload.recurso_id,
+                "force_status": payload.force_status,
+                "custom_meta": payload.custom_meta
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Erro set override: {e}")
+        raise HTTPException(500, str(e))
+
+
+# =========================================================
 # 🚨 MIGRAÇÃO V10: RANKING TOGGLE + FIX CLONADOR PRÉVIAS
 # =========================================================
 @app.get("/migrate-ranking-prime-v10")
@@ -22213,6 +22425,25 @@ async def migrate_ranking_prime_v10(db: Session = Depends(get_db)):
         except Exception as e:
             db.rollback()
             log_msgs.append(f"⚠️ jornada_cliente: {str(e)}")
+        
+        # 4. Criar tabela user_prime_overrides se não existir
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS user_prime_overrides (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    recurso_id VARCHAR(100) NOT NULL,
+                    force_status VARCHAR(20),
+                    custom_meta FLOAT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            db.commit()
+            log_msgs.append("✅ Tabela 'user_prime_overrides' verificada/criada")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ user_prime_overrides: {str(e)}")
         
         return {
             "status": "success",
