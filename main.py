@@ -18466,8 +18466,7 @@ def get_recursos_prime(
         total_vendas = 0
         if bot_ids:
             vendas = db.query(Pedido).filter(
-                Pedido.bot_id.in_(bot_ids),
-                Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
+                Pedido.bot_id.in_(['approved', 'paid', 'active', 'expired'])
             ).all()
             
             total_vendas = len(vendas)
@@ -18514,6 +18513,7 @@ def get_recursos_prime(
             elif override and override.force_status:
                 if override.force_status == 'desbloqueado':
                     rec["status"] = "desbloqueado"  # 🔥 Admin mandou desbloquear = desbloqueado ponto
+                    rec["implementado"] = True      # 🔥 A MÁGICA ACONTECE AQUI! O frontend vai aceitar o comando sem pestanejar.
                     desbloqueados += 1
                 else:
                     rec["status"] = "bloqueado"
@@ -18551,7 +18551,6 @@ def get_recursos_prime(
     except Exception as e:
         logger.error(f"❌ Erro recursos prime: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # =========================================================
 # 🔁 CLONADOR DE FUNIL — COPIAR CONFIGURAÇÃO ENTRE BOTS
