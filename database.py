@@ -24,11 +24,12 @@ if DATABASE_URL:
     engine = create_engine(
         DATABASE_URL,
         poolclass=QueuePool,
-        pool_size=5,            # 🔧 REDUZIDO: De 10 para 5 (Railway tem limite de threads/conexões)
-        max_overflow=10,        # 🔧 REDUZIDO: De 20 para 10 (total máx: 15 conexões)
-        pool_timeout=20,        # 🔧 REDUZIDO: De 30 para 20s (fail-fast em vez de travar)
-        pool_recycle=180,       # 🔧 REDUZIDO: De 300 para 180s (Railway dropa conexões idle rápido)
-        pool_pre_ping=True      # 🔧 CRÍTICO: Testa conexão antes de usar (evita "connection closed")
+        pool_size=5,            # 🔧 Railway: 5 conexões base
+        max_overflow=10,        # 🔧 Total máx: 15 conexões
+        pool_timeout=20,        # 🔧 Fail-fast em vez de travar
+        pool_recycle=120,       # 🔧 REDUZIDO: De 180 para 120s (Railway dropa conexões idle rápido)
+        pool_pre_ping=True,     # 🔧 CRÍTICO: Testa conexão antes de usar (evita "connection closed")
+        pool_reset_on_return='rollback'  # 🔧 NOVO: Garante reset limpo ao devolver conexão ao pool
     )
 else:
     engine = create_engine("sqlite:///./sql_app.db")

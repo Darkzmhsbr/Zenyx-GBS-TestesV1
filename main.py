@@ -2375,76 +2375,11 @@ logger.info("✅ [SCHEDULER] Job de mensagens alternantes agendado (Verificaçã
 
 
 # =========================================================
-# 🏥 HEALTH CHECK ENDPOINT
+# 🏥 HEALTH CHECK ENDPOINT (V1 - Early declaration)
 # =========================================================
-@app.get("/api/health")
-async def health_check():
-    """
-    Health check endpoint para monitoramento externo.
-    Retorna status detalhado do sistema.
-    """
-    try:
-        # Verificar conexão com banco de dados
-        db_status = "ok"
-        try:
-            db = SessionLocal()
-            db.execute(text("SELECT 1"))
-            db.close()
-        except Exception as e:
-            db_status = f"error: {str(e)}"
-        
-        # Verificar scheduler
-        scheduler_status = "running" if scheduler.running else "stopped"
-        
-        # Verificar webhooks pendentes
-        webhook_stats = {"pending": 0, "failed": 0}
-        try:
-            db = SessionLocal()
-            pending = db.query(WebhookRetry).filter(
-                WebhookRetry.status == 'pending'
-            ).count()
-            failed = db.query(WebhookRetry).filter(
-                WebhookRetry.status == 'failed'
-            ).count()
-            webhook_stats = {"pending": pending, "failed": failed}
-            db.close()
-        except:
-            pass  # Tabela pode não existir ainda
-        
-        # Determinar status geral
-        overall_status = "healthy"
-        status_code = 200
-        
-        if db_status != "ok":
-            overall_status = "unhealthy"
-            status_code = 503
-        elif scheduler_status != "running":
-            overall_status = "degraded"
-            status_code = 200
-        
-        health_status = {
-            "status": overall_status,
-            "timestamp": now_brazil().isoformat(),
-            "checks": {
-                "database": {"status": db_status},
-                "scheduler": {"status": scheduler_status},
-                "webhook_retry": webhook_stats
-            },
-            "version": "5.0"
-        }
-        
-        return JSONResponse(content=health_status, status_code=status_code)
-    
-    except Exception as e:
-        logger.error(f"❌ [HEALTH] Erro no health check: {str(e)}")
-        return JSONResponse(
-            content={
-                "status": "unhealthy",
-                "error": str(e),
-                "timestamp": now_brazil().isoformat()
-            },
-            status_code=503
-        )
+# NOTA: A versão definitiva do health check está mais abaixo no arquivo (linha ~6853).
+# Esta versão é sobrescrita pelo FastAPI (última definição vence).
+# Removida para evitar duplicação e leak de conexões.
 
 
 # 🔥 FORÇA A CRIAÇÃO DAS COLUNAS AO INICIAR
@@ -15669,7 +15604,7 @@ def advanced_statistics(
                 if tid:
                     if tid not in tracking_count:
                         tlink = db.query(TrackingLink).filter(TrackingLink.id == tid).first()
-                        tracking_count[tid] = {"name": tlink.slug if tlink else f"Link #{tid}", "count": 0, "revenue": 0}
+                        tracking_count[tid] = {"name": tlink.codigo if tlink else f"Link #{tid}", "count": 0, "revenue": 0}
                     tracking_count[tid]["count"] += 1
                     if is_super_split and not bot_id:
                         tracking_count[tid]["revenue"] += taxa_centavos
@@ -18203,6 +18138,7 @@ class SystemConfigSchema(BaseModel):
     # 👆 ================================== 👆
     
     maintenance_mode: bool = False
+    ranking_publico: bool = True  # 🆕 Toggle: ranking visível para usuários comuns
 
 class BroadcastSchema(BaseModel):
     title: str
@@ -18235,7 +18171,8 @@ def get_global_config(
         "master_omegapay_client_secret": config_map.get("master_omegapay_client_secret", ""),
         # 👆 ================================== 👆
         
-        "maintenance_mode": config_map.get("maintenance_mode", "false") == "true"
+        "maintenance_mode": config_map.get("maintenance_mode", "false") == "true",
+        "ranking_publico": config_map.get("ranking_publico", "true") == "true"
     }
 
 
@@ -18270,6 +18207,7 @@ def update_global_config(
         # 👆 ================================== 👆
         
         upsert("maintenance_mode", "true" if config.maintenance_mode else "false")
+        upsert("ranking_publico", "true" if config.ranking_publico else "false")
         db.commit()
         
         logger.info(f"⚙️ Config global atualizada por {current_user.username}")
@@ -18421,15 +18359,48 @@ def get_public_platform_stats(db: Session = Depends(get_db)):
         }
 
 # =========================================================
+# 🏆 RANKING: VERIFICAR VISIBILIDADE (PÚBLICO)
+# =========================================================
+@app.get("/api/ranking/visibilidade")
+def ranking_visibilidade(
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Retorna se o ranking está visível para o usuário atual.
+    Admins sempre veem. Usuários comuns dependem da config.
+    """
+    try:
+        if current_user.is_superuser:
+            return {"visivel": True, "is_admin": True}
+        
+        config_row = db.query(SystemConfig).filter(SystemConfig.key == "ranking_publico").first()
+        ranking_publico = True  # Default: visível
+        if config_row:
+            ranking_publico = config_row.value.lower() in ("true", "1", "sim")
+        
+        return {"visivel": ranking_publico, "is_admin": False}
+    except Exception as e:
+        logger.error(f"Erro ranking visibilidade: {e}")
+        return {"visivel": True, "is_admin": False}
+
+# =========================================================
 # 🏆 NOVA ROTA: RANKING DE TOP VENDEDORES (TOP 10)
 # =========================================================
 @app.get("/api/ranking")
 def obter_ranking(
     mes: int = Query(0, description="Mês numérico (1-12). 0 = todos os tempos"),
     ano: int = Query(0, description="Ano com 4 dígitos. 0 = todos os tempos"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
     try:
+        # 🔒 Verificar visibilidade do ranking para usuários comuns
+        if not current_user.is_superuser:
+            config_row = db.query(SystemConfig).filter(SystemConfig.key == "ranking_publico").first()
+            if config_row and config_row.value.lower() in ("false", "0", "nao"):
+                return {"status": "hidden", "ranking": [], "message": "O ranking está oculto pelo administrador."}
+        
         query = (
             db.query(
                 User.username,
@@ -18516,8 +18487,12 @@ def get_recursos_prime(
         for r in recursos_db:
             rec = dict(r._mapping)
             
+            # 🔥 REGRA: Super Admin SEMPRE tem tudo desbloqueado
+            if current_user.is_superuser:
+                rec["status"] = "desbloqueado" if rec["implementado"] else "em_breve"
+                desbloqueados += 1
             # Regra de Gamificação: Se faturou mais que a meta, desbloqueia!
-            if faturamento_total >= rec["meta_reais"]:
+            elif faturamento_total >= rec["meta_reais"]:
                 rec["status"] = "desbloqueado" if rec["implementado"] else "em_breve"
                 desbloqueados += 1
             else:
@@ -21812,3 +21787,53 @@ async def injetar_novos_recursos(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         return {"status": "error", "message": f"❌ Erro Geral: {str(e)}"}
+
+
+# =========================================================
+# 🚨 MIGRAÇÃO V10: RANKING TOGGLE + FIX CLONADOR PRÉVIAS
+# =========================================================
+@app.get("/migrate-ranking-prime-v10")
+async def migrate_ranking_prime_v10(db: Session = Depends(get_db)):
+    """
+    Migração V10:
+    1. Cria config 'ranking_publico' no SystemConfig (default True)
+    2. Força clonador_previas como implementado=False (re-bloquear)
+    Acesse UMA VEZ após deploy: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-ranking-prime-v10
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        # 1. Criar config ranking_publico se não existir
+        try:
+            existe = db.query(SystemConfig).filter(SystemConfig.key == "ranking_publico").first()
+            if not existe:
+                db.add(SystemConfig(key="ranking_publico", value="true"))
+                db.commit()
+                log_msgs.append("✅ Config 'ranking_publico' criada (default: true)")
+            else:
+                log_msgs.append("ℹ️ Config 'ranking_publico' já existe")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ ranking_publico: {str(e)}")
+        
+        # 2. Forçar clonador_previas como NÃO implementado (bloqueado)
+        try:
+            db.execute(text("""
+                UPDATE recursos_prime 
+                SET implementado = FALSE 
+                WHERE id = 'clonador_previas'
+            """))
+            db.commit()
+            log_msgs.append("✅ clonador_previas forçado como bloqueado (implementado=False)")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ clonador_previas: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "🚨 Migração V10 (Ranking + Prime) concluída!",
+            "details": log_msgs
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"❌ Erro: {str(e)}"}
