@@ -18465,8 +18465,10 @@ def get_recursos_prime(
         faturamento_total = 0
         total_vendas = 0
         if bot_ids:
+            # 🔥 ERRO CORRIGIDO AQUI: Restaurei a sua lógica original intacta com as DUAS condições
             vendas = db.query(Pedido).filter(
-                Pedido.bot_id.in_(['approved', 'paid', 'active', 'expired'])
+                Pedido.bot_id.in_(bot_ids),
+                Pedido.status.in_(['approved', 'paid', 'active', 'expired'])
             ).all()
             
             total_vendas = len(vendas)
@@ -18512,8 +18514,8 @@ def get_recursos_prime(
             # 🔒 Override forçado pelo admin — IGNORA o flag 'implementado'
             elif override and override.force_status:
                 if override.force_status == 'desbloqueado':
-                    rec["status"] = "desbloqueado"  # 🔥 Admin mandou desbloquear = desbloqueado ponto
-                    rec["implementado"] = True      # 🔥 A MÁGICA ACONTECE AQUI! O frontend vai aceitar o comando sem pestanejar.
+                    rec["status"] = "desbloqueado"  # Admin mandou desbloquear = desbloqueado ponto
+                    rec["implementado"] = True      # 🔥 A MÁGICA: Engana o frontend para ele liberar o clique e o visual!
                     desbloqueados += 1
                 else:
                     rec["status"] = "bloqueado"
