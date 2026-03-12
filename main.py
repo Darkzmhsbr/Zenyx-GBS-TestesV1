@@ -17888,11 +17888,23 @@ def import_emoji_pack_from_telegram(
         eid = s.get("custom_emoji_id")
         if eid:
             fallback = s.get("emoji", "⭐")
+            
+            # ✨ O PULO DO GATO: Tenta pegar a miniatura estática (.webp puro) primeiro!
+            # A API do Telegram envia 'thumbnail' nas versões novas, e 'thumb' nas antigas.
+            thumb_id = None
+            if "thumbnail" in s and s["thumbnail"]:
+                thumb_id = s["thumbnail"].get("file_id")
+            elif "thumb" in s and s["thumb"]:
+                thumb_id = s["thumb"].get("file_id")
+                
+            # Se tiver miniatura, baixa ela. Se não tiver (raro), cai pro arquivo principal.
+            real_file_id = thumb_id or s.get("file_id")
+
             custom_emojis.append({
                 "emoji_id": str(eid),
                 "fallback": fallback,
                 "sticker_type": s.get("type", "custom_emoji"),
-                "file_id": s.get("file_id")  # <--- ADICIONE ESTA LINHA (Fundamental para baixar)
+                "file_id": real_file_id  # <--- AGORA SALVAMOS A IMAGEM PERFEITA
             })
     
     logger.info(f"✨ [IMPORT PACK] {len(custom_emojis)} de {len(stickers)} stickers têm custom_emoji_id")
