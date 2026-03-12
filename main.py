@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import func, desc, text, and_, or_, extract
 from fastapi import FastAPI, HTTPException, Depends, Request, BackgroundTasks, Query, File, UploadFile, Form 
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 from pydantic import BaseModel, EmailStr, Field 
 from sqlalchemy.orm import Session
@@ -17454,6 +17454,53 @@ def impersonate_user(
         logger.error(f"❌ Erro impersonation: {e}")
         raise HTTPException(500, str(e))
 
+# =========================================================
+# ✨ DOWNLOADER DE EMOJIS E ROTA DE IMAGENS (.webp)
+# =========================================================
+EMOJI_DIR = "uploads/emojis/thumb"
+os.makedirs(EMOJI_DIR, exist_ok=True)
+
+async def download_emoji_worker(bot_token: str, pack_name: str, emoji_id: str, file_id: str):
+    """Baixa o arquivo físico do emoji do Telegram silenciosamente."""
+    pack_dir = os.path.join(EMOJI_DIR, pack_name)
+    os.makedirs(pack_dir, exist_ok=True)
+    file_path = os.path.join(pack_dir, f"{emoji_id}.webp")
+    
+    if os.path.exists(file_path):
+        return # Já foi baixado anteriormente
+        
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # 1. Pega o caminho temporário do arquivo no Telegram
+            api_url = f"https://api.telegram.org/bot{bot_token}/getFile?file_id={file_id}"
+            resp = await client.get(api_url)
+            data = resp.json()
+            if not data.get("ok"): return
+                
+            tg_file_path = data["result"]["file_path"]
+            dl_url = f"https://api.telegram.org/file/bot{bot_token}/{tg_file_path}"
+            
+            # 2. Faz o download real e salva como .webp
+            r = await client.get(dl_url)
+            if r.status_code == 200:
+                with open(file_path, "wb") as f:
+                    f.write(r.content)
+    except Exception as e:
+        logger.error(f"❌ Erro ao baixar emoji {emoji_id}: {e}")
+
+async def download_pack_emojis_task(bot_token: str, pack_name: str, emojis_data: list):
+    import asyncio
+    tasks = [download_emoji_worker(bot_token, pack_name, e["emoji_id"], e["file_id"]) for e in emojis_data]
+    await asyncio.gather(*tasks)
+    logger.info(f"✨ [DOWNLOADER] Pack '{pack_name}' com {len(emojis_data)} emojis baixado com sucesso!")
+
+@app.get("/api/emojis/thumb/{pack_name}/{filename}")
+def get_emoji_thumb(pack_name: str, filename: str):
+    """A Rota Mestra: Imita a concorrência e serve a imagem na tela do usuário."""
+    file_path = os.path.join(EMOJI_DIR, pack_name, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Imagem não encontrada")
+    return FileResponse(file_path)
 
 # =========================================================
 # ✨ SCHEMAS: EMOJIS PREMIUM
@@ -17765,6 +17812,7 @@ class ImportPackRequest(BaseModel):
 @app.post("/api/superadmin/premium-emojis/import-pack")
 def import_emoji_pack_from_telegram(
     req: ImportPackRequest,
+    background_tasks: BackgroundTasks, # <--- ADICIONE ESTA LINHA AQUI
     db: Session = Depends(get_db),
     current_superuser = Depends(get_current_superuser)
 ):
@@ -17843,7 +17891,8 @@ def import_emoji_pack_from_telegram(
             custom_emojis.append({
                 "emoji_id": str(eid),
                 "fallback": fallback,
-                "sticker_type": s.get("type", "custom_emoji")
+                "sticker_type": s.get("type", "custom_emoji"),
+                "file_id": s.get("file_id")  # <--- ADICIONE ESTA LINHA (Fundamental para baixar)
             })
     
     logger.info(f"✨ [IMPORT PACK] {len(custom_emojis)} de {len(stickers)} stickers têm custom_emoji_id")
@@ -17920,6 +17969,15 @@ def import_emoji_pack_from_telegram(
     invalidate_premium_emoji_cache()
     
     logger.info(f"✨ [IMPORT PACK] Finalizado: {created} criados, {skipped} ignorados de '{pack_title}'")
+
+    # Dispara o download das imagens do Telegram em background!
+    nome_pacote = req.pack_name or pack_title
+    background_tasks.add_task(
+        download_pack_emojis_task, 
+        bot_token=bot_token, 
+        pack_name=nome_pacote, 
+        emojis_data=custom_emojis
+    )
     
     return {
         "status": "success",
@@ -18032,7 +18090,8 @@ def get_premium_emojis_catalog(
                     "name": e.name,
                     "shortcode": e.shortcode,
                     "emoji_type": e.emoji_type,
-                    "thumbnail_url": e.thumbnail_url
+                    "thumbnail_url": e.thumbnail_url,
+                    "file_url": f"/api/emojis/thumb/{pack.name}/{e.emoji_id}.webp"
                 } for e in sorted(active_emojis, key=lambda x: x.sort_order)]
             })
     
@@ -18049,7 +18108,8 @@ def get_premium_emojis_catalog(
                 "name": e.name,
                 "shortcode": e.shortcode,
                 "emoji_type": e.emoji_type,
-                "thumbnail_url": e.thumbnail_url
+                "thumbnail_url": e.thumbnail_url,
+                "file_url": f"/api/emojis/thumb/Outros/{e.emoji_id}.webp"
             } for e in orphan_emojis]
         })
     
@@ -18087,7 +18147,8 @@ def search_premium_emojis(
             "name": e.name,
             "shortcode": e.shortcode,
             "emoji_type": e.emoji_type,
-            "thumbnail_url": e.thumbnail_url
+            "thumbnail_url": e.thumbnail_url,
+            "file_url": f"/api/emojis/thumb/{e.pack.name if e.pack else 'Outros'}/{e.emoji_id}.webp"
         } for e in emojis]
     }
 
