@@ -532,9 +532,30 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Zenyx Gbot SaaS")
 
+# 🔥 MIDDLEWARE ANTI-CACHE: Resolve o "Fantasma do Admin"
+# Impede que o navegador guarde dados de outros perfis
+@app.middleware("http")
+async def add_cache_control_header(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 # 🔥 CONFIGURAÇÃO DE FUSO HORÁRIO - BRASÍLIA/SÃO PAULO
 BRAZIL_TZ = timezone('America/Sao_Paulo')
 
+# ============================================================
+# 🎯 SISTEMA DE SESSÃO DE SIMULAÇÃO DE COPY (IN-MEMORY)
+# Armazena sessões temporárias de simulação interativa.
+# Cada sessão tem TTL de 10 minutos e é limpa automaticamente.
+# ============================================================
+import uuid as _uuid_mod
+import threading as _threading_mod
+
+_simcopy_sessions = {}  # {session_id: {steps: [...], current_step: 0, bot_token: str, admin_id: str, created_at: float, ...}}
+_simcopy_lock = _threading_mod.Lock()
 
 # ============================================================
 # 🔊 HELPER: ENVIO INTELIGENTE DE ÁUDIO OGG
@@ -1134,17 +1155,23 @@ def cancelar_remarketing(chat_id):
 # FUNÇÕES DE JOBS AGENDADOS
 # ============================================================
 
-async def verificar_vencimentos():
+# ============================================================
+# FUNÇÕES DE JOBS AGENDADOS
+# ============================================================
+
+# 🔥 CORREÇÃO MESTRE: Removido o 'async' para rodar em Thread separada.
+# Isso impede que o 'time.sleep()' dentro do TeleBot congele o servidor web inteiro!
+def verificar_vencimentos():
     """
     Job agendado para verificar e processar vencimentos de assinaturas.
-    Executa a cada 12 horas.
+    Executa a cada 5 minutos (configurado no scheduler).
     
     Verifica AMBOS os campos: data_expiracao e custom_expiration.
     Remove do canal VIP principal E dos grupos extras (BotGroup).
     Protege admins contra remoção.
     """
     try:
-        logger.info("🔄 [JOB] Iniciando verificação de vencimentos...")
+        logger.info("🔄 [JOB] Iniciando verificação de vencimentos (Em Thread Segura)...")
         
         db = SessionLocal()
         
@@ -1225,7 +1252,7 @@ async def verificar_vencimentos():
                     if canal_remocao:
                         try:
                             tb.ban_chat_member(canal_remocao, int(pedido.telegram_id))
-                            time.sleep(0.5)
+                            time.sleep(0.5)  # Agora este sleep não trava mais o servidor inteiro!
                             tb.unban_chat_member(canal_remocao, int(pedido.telegram_id))
                             
                             logger.info(f"👋 [JOB] Usuário {pedido.first_name} ({pedido.telegram_id}) removido do canal {canal_remocao} ({canal_source}) (Bot: {bot_data.nome})")
@@ -1442,6 +1469,10 @@ async def shutdown_event():
 # 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
 # ============================================================
 
+# ============================================================
+# 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
+# ============================================================
+
 async def start_alternating_messages_job(token: str, chat_id: int, payment_message_id: int, messages: list, interval_seconds: int, stop_at: datetime, auto_destruct_final: bool, bot_id: int):
     """
     ✅ CORRETO: Envia UMA mensagem e vai EDITANDO o conteúdo dela (alternância visual)
@@ -1449,6 +1480,7 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
     - NO FINAL (se configurado): APAGA a última mensagem
     
     🔥 V2: Tratamento robusto para mensagens deletadas/usuário bloqueado
+    🔥 CORREÇÃO: asyncio.to_thread para não bloquear o Event Loop (Apagão da Tarde)
     """
     try:
         bot_alt = TeleBot(token, threaded=False)
@@ -1479,7 +1511,8 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
             return
         
         try:
-            sent_msg = bot_alt.send_message(chat_id, texto_primeira)
+            # 🔥 CORREÇÃO ASYNC: Enviando para thread separada
+            sent_msg = await asyncio.to_thread(bot_alt.send_message, chat_id, texto_primeira)
             mensagem_id = sent_msg.message_id
         except ApiTelegramException as e:
             if "blocked" in str(e).lower() or "403" in str(e):
@@ -1530,7 +1563,9 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
             
             try:
                 # ✅ EDITAR A MENSAGEM EXISTENTE (não enviar nova)
-                bot_alt.edit_message_text(
+                # 🔥 CORREÇÃO ASYNC
+                await asyncio.to_thread(
+                    bot_alt.edit_message_text,
                     chat_id=chat_id,
                     message_id=mensagem_id,
                     text=texto_atual
@@ -1552,7 +1587,8 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
                 if "message to edit not found" in err_str or "message is not modified" in err_str:
                     logger.warning(f"⚠️ [ALTERNATING] Mensagem {mensagem_id} não existe mais. Tentando reenviar...")
                     try:
-                        sent_msg = bot_alt.send_message(chat_id, texto_atual)
+                        # 🔥 CORREÇÃO ASYNC
+                        sent_msg = await asyncio.to_thread(bot_alt.send_message, chat_id, texto_atual)
                         mensagem_id = sent_msg.message_id
                         falhas_consecutivas = 0
                         logger.info(f"📤 [ALTERNATING] Nova mensagem enviada (ID: {mensagem_id})")
@@ -1617,10 +1653,6 @@ async def start_alternating_messages_job(token: str, chat_id: int, payment_messa
             if chat_id in alternating_tasks:
                 del alternating_tasks[chat_id]
 
-# ============================================================
-# 🔄 JOBS DE DISPARO AUTOMÁTICO (CORE LÓGICO)
-# ============================================================
-
 async def send_remarketing_job(
     bot_token: str,
     chat_id: int,
@@ -1650,21 +1682,7 @@ async def send_remarketing_job(
                 return
 
             # ==============================================================================
-            # 🚨 MODO TESTE ATIVADO: A verificação de "Já enviou hoje" foi desativada abaixo
-            # para permitir múltiplos disparos. Quando for para produção, descomente este bloco.
-            # ==============================================================================
-            
-            # hoje = now_brazil().date()
-            # ja_enviou = db.query(RemarketingLog).filter(
-            #     RemarketingLog.bot_id == bot_id,
-            #     RemarketingLog.user_id == str(chat_id), 
-            #     func.date(RemarketingLog.sent_at) == hoje
-            # ).first()
-
-            # if ja_enviou:
-            #     logger.info(f"⏭️ [REMARKETING] Já enviado hoje para {chat_id}")
-            #     return
-            
+            # 🚨 MODO TESTE ATIVADO
             # ==============================================================================
 
             # 3. Prepara a mensagem
@@ -1718,9 +1736,9 @@ async def send_remarketing_job(
             try:
                 # 🔥 LÓGICA ATUALIZADA COM SUPORTE A ÁUDIO E ASYNCIO
                 if media and mtype == 'photo':
-                    sent_msg = bot.send_photo(chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
+                    sent_msg = await asyncio.to_thread(bot.send_photo, chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
                 elif media and mtype == 'video':
-                    sent_msg = bot.send_video(chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
+                    sent_msg = await asyncio.to_thread(bot.send_video, chat_id, media, caption=msg_text, reply_markup=markup, parse_mode='HTML')
                 elif media and (mtype == 'audio' or is_audio_file(media)):
                     # 🔊 ÁUDIO: Baixa e envia como bytes para garantir voice note nativo
                     try:
@@ -1731,25 +1749,25 @@ async def send_remarketing_job(
                         await _async_sleep_with_action(bot, chat_id, _wait, 'record_voice')
                         
                         if audio_bytes:
-                            voice_msg = bot.send_voice(chat_id, audio_bytes)
+                            voice_msg = await asyncio.to_thread(bot.send_voice, chat_id, audio_bytes)
                         else:
-                            voice_msg = bot.send_voice(chat_id, media)
+                            voice_msg = await asyncio.to_thread(bot.send_voice, chat_id, media)
                         sent_msg = voice_msg
                         
                         # Envia texto e botões separadamente
                         if msg_text or markup:
                             await asyncio.sleep(2)
                             if msg_text and markup:
-                                sent_msg = bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
+                                sent_msg = await asyncio.to_thread(bot.send_message, chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
                             elif msg_text:
-                                sent_msg = bot.send_message(chat_id, msg_text, parse_mode='HTML')
+                                sent_msg = await asyncio.to_thread(bot.send_message, chat_id, msg_text, parse_mode='HTML')
                             elif markup:
-                                sent_msg = bot.send_message(chat_id, "⬇️ Escolha uma opção:", reply_markup=markup)
+                                sent_msg = await asyncio.to_thread(bot.send_message, chat_id, "⬇️ Escolha uma opção:", reply_markup=markup)
                     except Exception as e_audio:
                         logger.error(f"❌ Erro envio áudio remarketing: {e_audio}")
-                        sent_msg = bot.send_message(chat_id, msg_text or "...", reply_markup=markup, parse_mode='HTML')
+                        sent_msg = await asyncio.to_thread(bot.send_message, chat_id, msg_text or "...", reply_markup=markup, parse_mode='HTML')
                 else:
-                    sent_msg = bot.send_message(chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
+                    sent_msg = await asyncio.to_thread(bot.send_message, chat_id, msg_text, reply_markup=markup, parse_mode='HTML')
                 
                 # REGISTRO NO BANCO
                 novo_log = RemarketingLog(
@@ -1768,7 +1786,7 @@ async def send_remarketing_job(
                 logger.info(f"📨 [REMARKETING] Enviado com sucesso para {chat_id}")
                 
                 # ==============================================================================
-                # 6. Auto destruição (LÓGICA CORRIGIDA E UNIFICADA - VERSÃO MESTRE)
+                # 6. Auto destruição
                 # ==============================================================================
                 is_enabled = config_dict.get('auto_destruct_enabled', False)
                 destruct_seconds = config_dict.get('auto_destruct_seconds', 0)
@@ -1779,19 +1797,16 @@ async def send_remarketing_job(
                     
                     if after_click:
                         # --- MODO: DESTRUIR APÓS CLIQUE ---
-                        # Usamos o MESMO dicionário da função síncrona para que o callback funcione igual
                         if not hasattr(enviar_remarketing_automatico, 'pending_destructions'):
                             enviar_remarketing_automatico.pending_destructions = {}
                         
-                        # Armazena usando STR e INT por segurança (conforme corrigimos no callback)
                         dados_destruicao = {
                             'message_id': sent_msg.message_id,
-                            'buttons_message_id': None, # Async envia botões junto, não separado
-                            'bot_instance': bot, # Instância do TeleBot
+                            'buttons_message_id': None,
+                            'bot_instance': bot,
                             'destruct_seconds': destruct_seconds
                         }
                         
-                        # Salva na memória global para o Callback pegar
                         enviar_remarketing_automatico.pending_destructions[chat_id] = dados_destruicao
                         enviar_remarketing_automatico.pending_destructions[str(chat_id)] = dados_destruicao
                         
@@ -1802,13 +1817,12 @@ async def send_remarketing_job(
                         logger.info(f"⏳ [ASYNC] Auto-destruição iniciada: {destruct_seconds}s")
                         await asyncio.sleep(destruct_seconds)
                         try: 
-                            bot.delete_message(chat_id, sent_msg.message_id)
+                            # 🔥 CORREÇÃO ASYNC
+                            await asyncio.to_thread(bot.delete_message, chat_id, sent_msg.message_id)
                             logger.info(f"🗑️ [ASYNC] Mensagem deletada automaticamente para {chat_id}")
                         except Exception as e_del: 
                             logger.warning(f"⚠️ Erro ao auto-deletar (Async): {e_del}")
                 
-                # ==============================================================================
-
             except Exception as e_send:
                 # Registrar falha no banco
                 try:
@@ -1826,7 +1840,6 @@ async def send_remarketing_job(
                 except:
                     pass
                 logger.error(f"❌ [REMARKETING] Erro no envio Telegram: {e_send}")
-                # 🔥 Classifica erros para logs mais limpos
                 err_remarketing = str(e_send).lower()
                 if "blocked" in err_remarketing or "403" in err_remarketing:
                     logger.info(f"🚫 [REMARKETING] Usuário {chat_id} bloqueou o bot. Ignorando.")
@@ -1875,12 +1888,10 @@ async def cleanup_orphan_jobs():
 
 def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_message_id: int, user_info: dict):
     try:
-        # ✅ LOGS DE DEBUG:
         logger.info(f"🔔 [SCHEDULE] Iniciando agendamento - Bot: {bot_id}, Chat: {chat_id}")
         
         db = SessionLocal()
         try:
-            # Busca config
             config = db.query(RemarketingConfig).filter(
                 RemarketingConfig.bot_id == bot_id
             ).first()
@@ -1898,7 +1909,6 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                     promo_values = {}
                 config = DummyConfig()
 
-            # Valida Bot
             bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
             if not bot or not bot.token:
                 logger.error(f"❌ [SCHEDULE] Bot {bot_id} não encontrado ou sem token")
@@ -1915,9 +1925,6 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                 'promo_values': config.promo_values or {}
             }
 
-            # ==================================================================
-            # 1. Agenda Mensagens Alternantes
-            # ==================================================================
             alt_config = db.query(AlternatingMessages).filter(
                 AlternatingMessages.bot_id == bot_id, 
                 AlternatingMessages.is_active == True
@@ -1925,23 +1932,17 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             
             if alt_config and alt_config.messages:
                 logger.info(f"✅ [SCHEDULE] Mensagens alternantes ativadas - {len(alt_config.messages)} mensagens")
-                
-                # ✅ LOG DE DEBUG DOS VALORES SALVOS
                 logger.info(f"🔍 [SCHEDULE-DEBUG] Config salva: {alt_config.log_config_values()}")
                 
                 agora = now_brazil()
                 
-                # 🧠 LÓGICA DE TEMPO CORRIGIDA:
                 if config.is_active:
-                    # Se remarketing ATIVO: Para X segundos antes do disparo
                     delay_base_minutes = config.delay_minutes
                     stop_at = agora + timedelta(minutes=delay_base_minutes) - timedelta(seconds=alt_config.stop_before_remarketing_seconds)
                     logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Ativo. Parar em: {stop_at.strftime('%H:%M:%S')}")
                 else:
-                    # ✅ USAR O CAMPO DIRETO DO MODELO
                     duracao_rotacao = alt_config.max_duration_minutes
                     logger.info(f"🔍 [SCHEDULE-DEBUG-CRITICO] max_duration_minutes do banco: {duracao_rotacao}")
-                    
                     stop_at = agora + timedelta(minutes=duracao_rotacao)
                     logger.info(f"⏰ [SCHEDULE] Modo: Remarketing Inativo. Rotação por {duracao_rotacao} min. Parar em: {stop_at.strftime('%H:%M:%S')}")
                 
@@ -1953,7 +1954,7 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
                     alt_config.messages, 
                     alt_config.rotation_interval_seconds, 
                     stop_at, 
-                    alt_config.last_message_auto_destruct,  # ✅ CAMPO CORRETO
+                    alt_config.last_message_auto_destruct,
                     bot_id
                 ))
                 with remarketing_lock: 
@@ -1963,9 +1964,6 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
             else:
                 logger.info(f"ℹ️ [SCHEDULE] Mensagens alternantes desativadas")
 
-            # ==================================================================
-            # 2. Agenda Remarketing Automático
-            # ==================================================================
             if config.is_active:
                 logger.info(f"⏰ [SCHEDULE] Agendando remarketing para daqui a {config.delay_minutes} minutos")
                 
@@ -1990,9 +1988,93 @@ def schedule_remarketing_and_alternating(bot_id: int, chat_id: int, payment_mess
     except Exception as e: 
         logger.error(f"❌ [SCHEDULE] Erro: {e}", exc_info=True)
 
-# ============================================================
-# CONFIGURAÇÃO DO SCHEDULER (MOVIDO PARA CÁ)
-# ============================================================
+# =========================================================
+# 🔄 SISTEMA DE RETRY DE WEBHOOKS
+# =========================================================
+
+async def processar_webhooks_pendentes():
+    """
+    Job que roda a cada 1 minuto para reprocessar webhooks que falharam.
+    Implementa exponential backoff: 1min, 2min, 4min, 8min, 16min
+    """
+    db = SessionLocal()
+    try:
+        now = now_brazil()
+        
+        # Buscar webhooks pendentes que estão prontos para retry
+        pendentes = db.query(WebhookRetry).filter(
+            WebhookRetry.status == 'pending',
+            WebhookRetry.next_retry <= now,
+            WebhookRetry.attempts < WebhookRetry.max_attempts
+        ).all()
+        
+        if not pendentes:
+            logger.debug("🔄 Nenhum webhook pendente para retry")
+            return
+        
+        logger.info(f"🔄 Processando {len(pendentes)} webhooks pendentes")
+        
+        for retry_item in pendentes:
+            try:
+                logger.info(f"🔄 Tentativa {retry_item.attempts + 1}/{retry_item.max_attempts} para webhook {retry_item.id}")
+                
+                # Deserializar payload
+                payload = json.loads(retry_item.payload)
+                
+                # Reprocessar baseado no tipo
+                if retry_item.webhook_type == 'pushinpay':
+                    # Criar request fake para passar para a função
+                    class FakeRequest:
+                        async def body(self):
+                            return retry_item.payload.encode('utf-8')
+                        
+                        async def json(self):
+                            return payload
+                    
+                    fake_req = FakeRequest()
+                    
+                    # Chamar função de webhook
+                    await webhook_pix(fake_req, db)
+                    
+                    # Se chegou aqui, sucesso!
+                    retry_item.status = 'success'
+                    retry_item.updated_at = now_brazil()
+                    db.commit()
+                    
+                    logger.info(f"✅ Webhook {retry_item.id} reprocessado com sucesso")
+                    
+                else:
+                    logger.warning(f"⚠️ Tipo de webhook desconhecido: {retry_item.webhook_type}")
+                    retry_item.status = 'failed'
+                    retry_item.last_error = "Tipo de webhook não suportado"
+                    db.commit()
+                
+            except Exception as e:
+                # Incrementar tentativas
+                retry_item.attempts += 1
+                retry_item.last_error = str(e)
+                retry_item.updated_at = now_brazil()
+                
+                if retry_item.attempts >= retry_item.max_attempts:
+                    # Esgotou tentativas
+                    retry_item.status = 'failed'
+                    logger.error(f"❌ Webhook {retry_item.id} falhou após {retry_item.attempts} tentativas: {e}")
+                    
+                    # CRÍTICO: Alertar equipe sobre falha definitiva
+                    await alertar_falha_webhook_critica(retry_item, db)
+                else:
+                    # Agendar próximo retry com backoff exponencial
+                    backoff_minutes = 2 ** retry_item.attempts  # 1, 2, 4, 8, 16 minutos
+                    retry_item.next_retry = now + timedelta(minutes=backoff_minutes)
+                    logger.warning(f"⚠️ Webhook {retry_item.id} falhou (tentativa {retry_item.attempts}). Próximo retry em {backoff_minutes}min")
+                
+                db.commit()
+        
+    except Exception as e:
+        logger.error(f"❌ Erro no processador de webhooks pendentes: {e}")
+    finally:
+        db.close()
+
 
 # =========================================================
 # 🔄 SYNC PAY POLLING: VERIFICAR PAGAMENTOS PENDENTES
@@ -3899,94 +3981,6 @@ def verificar_expiracao_massa():
     finally: 
         db.close()
 
-# =========================================================
-# 🔄 SISTEMA DE RETRY DE WEBHOOKS
-# =========================================================
-
-async def processar_webhooks_pendentes():
-    """
-    Job que roda a cada 1 minuto para reprocessar webhooks que falharam.
-    Implementa exponential backoff: 1min, 2min, 4min, 8min, 16min
-    """
-    db = SessionLocal()
-    try:
-        now = now_brazil()
-        
-        # Buscar webhooks pendentes que estão prontos para retry
-        pendentes = db.query(WebhookRetry).filter(
-            WebhookRetry.status == 'pending',
-            WebhookRetry.next_retry <= now,
-            WebhookRetry.attempts < WebhookRetry.max_attempts
-        ).all()
-        
-        if not pendentes:
-            logger.debug("🔄 Nenhum webhook pendente para retry")
-            return
-        
-        logger.info(f"🔄 Processando {len(pendentes)} webhooks pendentes")
-        
-        for retry_item in pendentes:
-            try:
-                logger.info(f"🔄 Tentativa {retry_item.attempts + 1}/{retry_item.max_attempts} para webhook {retry_item.id}")
-                
-                # Deserializar payload
-                payload = json.loads(retry_item.payload)
-                
-                # Reprocessar baseado no tipo
-                if retry_item.webhook_type == 'pushinpay':
-                    # Criar request fake para passar para a função
-                    class FakeRequest:
-                        async def body(self):
-                            return retry_item.payload.encode('utf-8')
-                        
-                        async def json(self):
-                            return payload
-                    
-                    fake_req = FakeRequest()
-                    
-                    # Chamar função de webhook
-                    await webhook_pix(fake_req, db)
-                    
-                    # Se chegou aqui, sucesso!
-                    retry_item.status = 'success'
-                    retry_item.updated_at = now_brazil()
-                    db.commit()
-                    
-                    logger.info(f"✅ Webhook {retry_item.id} reprocessado com sucesso")
-                    
-                else:
-                    logger.warning(f"⚠️ Tipo de webhook desconhecido: {retry_item.webhook_type}")
-                    retry_item.status = 'failed'
-                    retry_item.last_error = "Tipo de webhook não suportado"
-                    db.commit()
-                
-            except Exception as e:
-                # Incrementar tentativas
-                retry_item.attempts += 1
-                retry_item.last_error = str(e)
-                retry_item.updated_at = now_brazil()
-                
-                if retry_item.attempts >= retry_item.max_attempts:
-                    # Esgotou tentativas
-                    retry_item.status = 'failed'
-                    logger.error(f"❌ Webhook {retry_item.id} falhou após {retry_item.attempts} tentativas: {e}")
-                    
-                    # CRÍTICO: Alertar equipe sobre falha definitiva
-                    await alertar_falha_webhook_critica(retry_item, db)
-                else:
-                    # Agendar próximo retry com backoff exponencial
-                    backoff_minutes = 2 ** retry_item.attempts  # 1, 2, 4, 8, 16 minutos
-                    retry_item.next_retry = now + timedelta(minutes=backoff_minutes)
-                    logger.warning(f"⚠️ Webhook {retry_item.id} falhou (tentativa {retry_item.attempts}). Próximo retry em {backoff_minutes}min")
-                
-                db.commit()
-        
-    except Exception as e:
-        logger.error(f"❌ Erro no processador de webhooks pendentes: {e}")
-    finally:
-        db.close()
-
-
 async def alertar_falha_webhook_critica(retry_item: WebhookRetry, db: Session):
     """
     Alerta sobre webhooks que falharam definitivamente.
@@ -4974,6 +4968,9 @@ async def gerar_pix_pushinpay(
 # =========================================================
 # 🔌 INTEGRAÇÃO WIINPAY (DINÂMICA)
 # =========================================================
+# =========================================================
+# 🔌 INTEGRAÇÃO WIINPAY (DINÂMICA)
+# =========================================================
 async def gerar_pix_wiinpay(
     valor_float: float, 
     transaction_id: str, 
@@ -4988,9 +4985,6 @@ async def gerar_pix_wiinpay(
     Gera PIX via WiinPay com Split automático de taxa para a plataforma.
     """
     
-    # ======================================================================
-    # 🔥 ETAPA 1: Buscar o Bot e definir API Key
-    # ======================================================================
     bot = db.query(BotModel).filter(BotModel.id == bot_id).first()
     if not bot:
         logger.error(f"❌ [WIINPAY] Bot {bot_id} não encontrado!")
@@ -5004,23 +4998,16 @@ async def gerar_pix_wiinpay(
     logger.info(f"🔍 [WIINPAY DEBUG] Bot ID: {bot_id}")
     logger.info(f"✅ [WIINPAY DEBUG] USANDO API KEY: {api_key[:15]}...")
     
-    # ======================================================================
-    # 🔥 ETAPA 2: Validação de valor mínimo
-    # ======================================================================
     if valor_float < 3.00:
         logger.error(f"❌ [WIINPAY] Valor R$ {valor_float:.2f} abaixo do mínimo de R$ 3,00!")
         return None
     
-    # ======================================================================
-    # 🔥 ETAPA 3: Configurar requisição
-    # ======================================================================
     url = "https://api-v2.wiinpay.com.br/payment/create"
     
     raw_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "zenyx-gbs-testesv1-production.up.railway.app")
     clean_domain = raw_domain.replace("https://", "").replace("http://", "").strip("/")
     webhook_url = f"https://{clean_domain}/api/webhooks/wiinpay"
     
-    # Monta payload WiinPay
     payload = {
         "api_key": api_key,
         "value": round(valor_float, 2),
@@ -5036,9 +5023,6 @@ async def gerar_pix_wiinpay(
         }
     }
     
-    # ======================================================================
-    # 🔥 ETAPA 4: Lógica de Split (TAXA DA PLATAFORMA)
-    # ======================================================================
     try:
         if bot.owner_id:
             from database import User
@@ -5047,25 +5031,19 @@ async def gerar_pix_wiinpay(
             if owner:
                 from database import SystemConfig
                 
-                # 🎯 SOLUÇÃO DEFINITIVA: Buscando com a chave EXATA do seu banco de dados
                 cfg_wiinpay_id = db.query(SystemConfig).filter(SystemConfig.key == "master_wiinpay_user_id").first()
                 plataforma_wiinpay_id = cfg_wiinpay_id.value if cfg_wiinpay_id else None
                 
-                # Fallback de segurança: Puxando direto do Super Admin na tabela Users
                 if not plataforma_wiinpay_id:
                     master_user = db.query(User).filter(User.id == 1).first()
                     if master_user:
                         plataforma_wiinpay_id = getattr(master_user, 'wiinpay_user_id', None)
                 
                 if plataforma_wiinpay_id:
-                    # ⚠️ PROTEÇÃO: Se o owner do bot TEM wiinpay_user_id e é O MESMO da plataforma,
-                    # significa que a API Key do bot pertence à mesma conta que receberia o split.
-                    # A WiinPay rejeita split para a mesma conta (422).
                     owner_wiinpay_id = getattr(owner, 'wiinpay_user_id', None)
                     if owner_wiinpay_id and owner_wiinpay_id.strip() == plataforma_wiinpay_id.strip():
                         logger.info(f"ℹ️ [WIINPAY] Owner é a própria plataforma. PIX SEM split (mesma conta).")
                     else:
-                        # Define a taxa
                         taxa_centavos = owner.taxa_venda
                         if not taxa_centavos:
                             try:
@@ -5074,12 +5052,7 @@ async def gerar_pix_wiinpay(
                             except:
                                 taxa_centavos = 60
                         
-                        # Converte taxa de centavos para reais (WiinPay usa reais)
                         taxa_reais = taxa_centavos / 100.0
-                        
-                        logger.info(f"🔍 [WIINPAY DEBUG] Checando split:")
-                        logger.info(f"  Valor total: R$ {valor_float:.2f}")
-                        logger.info(f"  Taxa desejada: R$ {taxa_reais:.2f}")
                         
                         if taxa_reais >= (valor_float * 0.5):
                             logger.warning(f"⚠️ [WIINPAY] Taxa muito alta! Split NÃO aplicado.")
@@ -5089,8 +5062,6 @@ async def gerar_pix_wiinpay(
                                 "user_id": plataforma_wiinpay_id
                             }
                             logger.info(f"✅ [WIINPAY DEBUG] SPLIT CONFIGURADO!")
-                            logger.info(f"  Split value: R$ {taxa_reais:.2f}")
-                            logger.info(f"  User ID: {plataforma_wiinpay_id}")
                 else:
                     logger.warning("⚠️ [WIINPAY] WiinPay User ID da plataforma não configurado. PIX SEM split.")
             else:
@@ -5101,9 +5072,6 @@ async def gerar_pix_wiinpay(
     except Exception as e:
         logger.error(f"❌ [WIINPAY] Erro ao configurar split: {e}. PIX SEM split.")
     
-    # ======================================================================
-    # 🔥 ETAPA 5: Envia requisição para WiinPay COM RETRY
-    # ======================================================================
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json"
@@ -5117,38 +5085,25 @@ async def gerar_pix_wiinpay(
         try:
             if retry_count > 0:
                 logger.warning(f"🔄 [WIINPAY] Tentativa {retry_count + 1}/{max_retries}...")
-            else:
-                logger.info(f"📤 [WIINPAY DEBUG] Enviando para WiinPay:")
-                logger.info(f"  URL: {url}")
-                logger.info(f"  Valor: R$ {valor_float:.2f}")
-                logger.info(f"  Split: {payload.get('split', {})}")
             
             response = await http_client.post(url, json=payload, headers=headers, timeout=30)
             
             if response.status_code in [200, 201]:
                 try:
                     raw_response = response.json()
-                    
                     if not raw_response:
                         raise ValueError("Resposta vazia da API WiinPay")
                     
-                    # 🔍 SOLUÇÃO MESTRE AQUI: "Abre" a caixa 'data' se ela existir na resposta.
                     pix_data = raw_response.get('data', raw_response)
-                    
-                    # Procura o ID na chave que a WiinPay usa (paymentId em camelCase)
                     pix_id = pix_data.get('paymentId') or pix_data.get('payment_id') or pix_data.get('id') or pix_data.get('txid')
                     
                     if not pix_id:
                         raise ValueError(f"Resposta sem ID do PIX: {raw_response}")
                     
-                    # 🛠️ TRUQUE NINJA: Criamos a chave 'id' manualmente para o restante do seu sistema achar fácil
                     pix_data['id'] = pix_id
                     
-                    logger.info(f"✅ [WIINPAY DEBUG] Resposta WiinPay ({response.status_code}):")
-                    logger.info(f"  PIX ID: {pix_id}")
-                    logger.info(f"✅ [WIINPAY] PIX gerado com sucesso! ID: {pix_id}")
+                    logger.info(f"✅ [WIINPAY DEBUG] Resposta WiinPay ({response.status_code}) - PIX gerado com sucesso! ID: {pix_id}")
                     
-                    # Agenda remarketing se solicitado
                     if agendar_remarketing and user_telegram_id:
                         try:
                             chat_id_int = int(user_telegram_id) if str(user_telegram_id).isdigit() else None
@@ -5164,16 +5119,13 @@ async def gerar_pix_wiinpay(
                                         'valor': valor_float
                                     }
                                 )
-                                logger.info(f"📧 [WIINPAY REMARKETING] Ciclo iniciado para {user_first_name}")
                         except Exception as e:
                             logger.error(f"❌ [WIINPAY] Erro ao agendar remarketing: {e}")
                     
-                    # Retornamos o pix_data puro (já contendo o 'id' e 'qr_code' desembrulhados)
                     return pix_data
                     
                 except (ValueError, KeyError, json.JSONDecodeError) as validation_error:
                     logger.error(f"❌ [WIINPAY] Resposta inválida: {validation_error}")
-                    logger.error(f"   Resposta: {response.text[:500]}")
                     return None
                     
             elif response.status_code == 429:
@@ -5185,19 +5137,17 @@ async def gerar_pix_wiinpay(
                 
             elif response.status_code in [401, 403]:
                 logger.error(f"❌ [WIINPAY] Erro de autenticação ({response.status_code}): API Key inválida")
-                logger.error(f"   Resposta: {response.text}")
                 return None
                 
             elif response.status_code == 422:
-                # 🔥 CORREÇÃO DA WIINPAY AQUI: Escudo ativado para o erro de "próprio recebedor"
-                resp_text = response.text or ""
-                if ("mesma conta" in resp_text.lower() or "próprio recebedor" in resp_text.lower()) and "split" in payload:
-                    logger.warning(f"⚠️ [WIINPAY] Split rejeitado (mesma conta/próprio recebedor). Retentando SEM split...")
+                # 🔥 LÓGICA DE CONTORNO INTELIGENTE (RESOLVE O BUG DO DONO TESTANDO O BOT)
+                if "split" in payload:
+                    logger.warning(f"⚠️ [WIINPAY] Erro 422 detectado ao usar SPLIT. Provavelmente é o dono testando com a mesma conta da Plataforma. Retentando SEM split para salvar a venda!")
                     del payload["split"]
-                    retry_count = max_retries - 1  # Vai forçar a próxima requisição a ser a última para evitar looping infinito
+                    retry_count = max_retries - 1  # Força para não ficar em loop
                     continue
                 else:
-                    logger.error(f"❌ [WIINPAY] Erro 422: {resp_text}")
+                    logger.error(f"❌ [WIINPAY] Erro 422 fatal (Sem split ativo): {response.text}")
                     return None
                 
             else:
@@ -5212,7 +5162,6 @@ async def gerar_pix_wiinpay(
                     
         except httpx.TimeoutException as timeout_err:
             last_error = timeout_err
-            logger.error(f"⏱️ [WIINPAY] Timeout (tentativa {retry_count + 1}/{max_retries})")
             if retry_count < max_retries - 1:
                 await asyncio.sleep(2 ** retry_count)
                 retry_count += 1
@@ -5222,7 +5171,6 @@ async def gerar_pix_wiinpay(
                 
         except Exception as e:
             last_error = e
-            logger.error(f"❌ [WIINPAY] Erro inesperado: {type(e).__name__} - {str(e)}")
             if retry_count < max_retries - 1:
                 await asyncio.sleep(2 ** retry_count)
                 retry_count += 1
@@ -5230,7 +5178,6 @@ async def gerar_pix_wiinpay(
             else:
                 return None
     
-    logger.error(f"❌ [WIINPAY] Falha definitiva após {max_retries} tentativas")
     return None
 
 # =========================================================
