@@ -19462,7 +19462,398 @@ def jornada_cliente_mapa(
         import traceback
         logger.error(traceback.format_exc())
         raise HTTPException(500, f"Erro: {str(e)}")
+# =========================================================
+# 🗺️ JORNADA DO CLIENTE — RECURSO PRIME
+# =========================================================
 
+@app.get("/api/admin/recursos-prime/jornada-cliente")
+def jornada_cliente_lista(
+    bot_id: Optional[int] = None,
+    status: str = "todos",
+    page: int = 1,
+    per_page: int = 50,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Lista contatos com dados enriquecidos para a Jornada do Cliente.
+    Retorna tabela paginada com abas: todos, pagantes, pendentes, expirados, leads.
+    """
+    try:
+        user_bots = db.query(BotModel).filter(BotModel.owner_id == current_user.id).all()
+        user_bot_ids = [b.id for b in user_bots]
+        
+        if not user_bot_ids:
+            return {"data": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0, "bots": []}
+        
+        bots_alvo = [bot_id] if (bot_id and bot_id in user_bot_ids) else user_bot_ids
+        
+        def clean_date(dt):
+            if not dt: return None
+            try:
+                return dt.replace(tzinfo=None).isoformat()
+            except:
+                return str(dt) if dt else None
+        
+        pedidos_q = db.query(Pedido).filter(Pedido.bot_id.in_(bots_alvo)).order_by(Pedido.created_at.asc()).all()
+        leads_q = db.query(Lead).filter(Lead.bot_id.in_(bots_alvo)).all()
+        
+        contatos = {}
+        
+        for l in leads_q:
+            tid = str(l.user_id).strip()
+            key = f"{l.bot_id}_{tid}"
+            contatos[key] = {
+                "telegram_id": tid,
+                "bot_id": l.bot_id,
+                "first_name": l.nome or "Sem nome",
+                "username": l.username,
+                "status": "lead",
+                "primeiro_contato": clean_date(l.primeiro_contato or l.created_at),
+                "origem_entrada": getattr(l, 'origem_entrada', 'bot_direto') or 'bot_direto',
+                "plano_principal": None,
+                "valor_principal": 0,
+                "tem_order_bump": False,
+                "tem_upsell": False,
+                "tem_downsell": False,
+                "total_gasto": 0,
+                "pedidos_count": 0,
+                "ultimo_status": "lead",
+            }
+        
+        for p in pedidos_q:
+            tid = str(p.telegram_id).strip()
+            key = f"{p.bot_id}_{tid}"
+            nome_lower = str(p.plano_nome or "").lower()
+            is_upsell = "upsell:" in nome_lower
+            is_downsell = "downsell:" in nome_lower
+            
+            if key not in contatos:
+                contatos[key] = {
+                    "telegram_id": tid,
+                    "bot_id": p.bot_id,
+                    "first_name": p.first_name or "Sem nome",
+                    "username": p.username,
+                    "status": p.status,
+                    "primeiro_contato": clean_date(p.primeiro_contato or p.created_at),
+                    "origem_entrada": "bot_direto",
+                    "plano_principal": None,
+                    "valor_principal": 0,
+                    "tem_order_bump": False,
+                    "tem_upsell": False,
+                    "tem_downsell": False,
+                    "total_gasto": 0,
+                    "pedidos_count": 0,
+                    "ultimo_status": p.status,
+                }
+            
+            c = contatos[key]
+            if p.first_name and p.first_name != "Sem nome":
+                c["first_name"] = p.first_name
+            if p.username:
+                c["username"] = p.username
+            
+            is_paid = p.status in ['approved', 'paid', 'active', 'expired']
+            
+            if is_upsell:
+                if is_paid: c["tem_upsell"] = True
+            elif is_downsell:
+                if is_paid: c["tem_downsell"] = True
+            else:
+                if not c["plano_principal"] and is_paid:
+                    c["plano_principal"] = p.plano_nome
+                    c["valor_principal"] = float(p.valor or 0)
+            
+            if p.tem_order_bump:
+                c["tem_order_bump"] = True
+            
+            if is_paid:
+                c["total_gasto"] += float(p.valor or 0)
+                # 🔥 CORREÇÃO 3: Contabiliza o Order Bump como um pedido extra se existir
+                c["pedidos_count"] += (2 if p.tem_order_bump else 1)
+            
+            if p.status in ['approved', 'paid', 'active']:
+                c["ultimo_status"] = "pagante"
+            elif p.status == 'expired' and c["ultimo_status"] not in ['pagante']:
+                c["ultimo_status"] = "expirado"
+            elif p.status == 'pending' and c["ultimo_status"] == 'lead':
+                c["ultimo_status"] = "pendente"
+            
+            c["status"] = c["ultimo_status"]
+        
+        lista = list(contatos.values())
+        
+        # 🔥 CORREÇÃO 2: Adicionado o filtro "leads"
+        if status == "pagantes":
+            lista = [c for c in lista if c["ultimo_status"] == "pagante"]
+        elif status == "pendentes":
+            lista = [c for c in lista if c["ultimo_status"] == "pendente"]
+        elif status == "expirados":
+            lista = [c for c in lista if c["ultimo_status"] == "expirado"]
+        elif status == "leads":
+            lista = [c for c in lista if c["ultimo_status"] == "lead"]
+        
+        if search:
+            search_lower = search.lower()
+            lista = [c for c in lista if 
+                search_lower in (c.get("first_name") or "").lower() or
+                search_lower in (c.get("username") or "").lower() or
+                search_lower in (c.get("telegram_id") or "")
+            ]
+        
+        # 🔥 CORREÇÃO 1: Ordenando decrescente (mais recentes primeiro)
+        lista.sort(key=lambda x: str(x.get("primeiro_contato") or ""), reverse=True)
+        
+        total = len(lista)
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        paginated = lista[(page - 1) * per_page : page * per_page]
+        
+        bots_list = [{"id": b.id, "nome": b.nome} for b in user_bots]
+        
+        return {
+            "data": paginated,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+            "bots": bots_list
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Erro jornada cliente lista: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(500, f"Erro: {str(e)}")
+
+
+@app.get("/api/admin/recursos-prime/jornada-cliente/{telegram_id}")
+def jornada_cliente_mapa(
+    telegram_id: str,
+    bot_id: int = Query(..., description="ID do bot"),
+    db: Session = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Retorna o mapa completo da jornada de um lead/cliente específico num bot.
+    Timeline: start → escolheu plano → order bump → gerou PIX → pagou → upsell → downsell → remarketing
+    """
+    try:
+        bot = db.query(BotModel).filter(BotModel.id == bot_id, BotModel.owner_id == current_user.id).first()
+        if not bot:
+            raise HTTPException(404, "Bot não encontrado")
+        
+        def clean_date(dt):
+            if not dt: return None
+            try:
+                return dt.replace(tzinfo=None).isoformat()
+            except:
+                return str(dt) if dt else None
+        
+        lead = db.query(Lead).filter(Lead.bot_id == bot_id, Lead.user_id == str(telegram_id)).first()
+        pedidos = db.query(Pedido).filter(
+            Pedido.bot_id == bot_id, Pedido.telegram_id == str(telegram_id)
+        ).order_by(Pedido.created_at.asc()).all()
+        
+        remarketing_logs = []
+        try:
+            rlogs = db.query(RemarketingLog).filter(
+                RemarketingLog.bot_id == bot_id, RemarketingLog.user_id == str(telegram_id)
+            ).order_by(RemarketingLog.sent_at.asc()).all()
+            remarketing_logs = [{
+                "sent_at": clean_date(r.sent_at),
+                "status": r.status,
+                "converted": r.converted,
+                "converted_at": clean_date(r.converted_at) if r.converted else None
+            } for r in rlogs]
+        except:
+            pass
+        
+        ob_config = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_id).first()
+        up_config = db.query(UpsellConfig).filter(UpsellConfig.bot_id == bot_id).first()
+        ds_config = db.query(DownsellConfig).filter(DownsellConfig.bot_id == bot_id).first()
+        
+        timeline = []
+        
+        # 1. Lead startou
+        if lead:
+            timeline.append({
+                "etapa": "lead_start", "titulo": "Lead Startou",
+                "descricao": f"Entrou pelo {getattr(lead, 'origem_entrada', 'bot_direto') or 'bot direto'}",
+                "data": clean_date(lead.primeiro_contato or lead.created_at),
+                "status": "completo", "cor": "#3b82f6"
+            })
+        elif pedidos:
+            p0 = pedidos[0]
+            timeline.append({
+                "etapa": "lead_start", "titulo": "Lead Startou",
+                "descricao": "Entrou pelo bot",
+                "data": clean_date(p0.primeiro_contato or p0.created_at),
+                "status": "completo", "cor": "#3b82f6"
+            })
+        
+        pedido_principal = None
+        pedido_upsell = None
+        pedido_downsell = None
+        
+        for p in pedidos:
+            nome_lower = str(p.plano_nome or "").lower()
+            is_paid = p.status in ['approved', 'paid', 'active', 'expired']
+            if "upsell:" in nome_lower:
+                pedido_upsell = p
+            elif "downsell:" in nome_lower:
+                pedido_downsell = p
+            else:
+                if not pedido_principal or is_paid:
+                    pedido_principal = p
+        
+        # 🔥 CORREÇÃO 4: ORDEM EXATA DA TIMELINE (O MAPA DO PERCURSO)
+        if pedido_principal:
+            val_p = float(pedido_principal.valor or 0)
+            tem_ob = pedido_principal.tem_order_bump
+            is_paid_p = pedido_principal.status in ['approved', 'paid', 'active', 'expired']
+            
+            # 2. Escolheu plano principal
+            timeline.append({
+                "etapa": "escolheu_plano", "titulo": "Escolheu plano principal",
+                "descricao": f"Plano: {pedido_principal.plano_nome or 'N/A'}",
+                "data": clean_date(pedido_principal.created_at),
+                "status": "completo", "cor": "#8b5cf6"
+            })
+
+            # 3. Order Bump (Oferecido antes do PIX)
+            if ob_config and ob_config.ativo:
+                timeline.append({
+                    "etapa": "order_bump",
+                    "titulo": "Order Bump aceito ✅" if tem_ob else "Order Bump recusado ❌",
+                    "descricao": f"{ob_config.nome_produto or 'Produto extra'} — R$ {float(ob_config.preco or 0):.2f}" if tem_ob else "Não adicionou o produto",
+                    "data": clean_date(pedido_principal.created_at),
+                    "status": "completo" if tem_ob else "recusado",
+                    "cor": "#10b981" if tem_ob else "#6b7280"
+                })
+
+            # 4. Gerou PIX
+            timeline.append({
+                "etapa": "gerou_pix", "titulo": "Gerou PIX",
+                "descricao": f"Valor total do PIX: R$ {val_p:.2f}",
+                "data": clean_date(pedido_principal.gerou_pix_em or pedido_principal.created_at),
+                "status": "completo", "cor": "#f59e0b"
+            })
+            
+            # 5. Pagou plano principal + Order bump
+            txt_pago = "Pagou plano principal + Order bump" if tem_ob else "Pagou plano principal"
+            timeline.append({
+                "etapa": "pagou_principal",
+                "titulo": txt_pago if is_paid_p else ("Pix Pendente/Expirado" if pedido_principal.status in ['pending', 'expired'] else "Não Pagou"),
+                "descricao": f"Pagamento de R$ {val_p:.2f} confirmado" if is_paid_p else "Aguardando pagamento",
+                "data": clean_date(pedido_principal.pagou_em or pedido_principal.data_aprovacao) if is_paid_p else clean_date(pedido_principal.created_at),
+                "status": "completo" if is_paid_p else "falhou",
+                "cor": "#10b981" if is_paid_p else "#ef4444"
+            })
+            
+            # 6. Upsell (Apenas se pagou o principal)
+            if up_config and up_config.ativo and is_paid_p:
+                timeline.append({
+                    "etapa": "upsell_enviado", "titulo": "Upsell enviado",
+                    "descricao": f"Oferta: {up_config.nome_produto or 'Upsell'} — R$ {float(up_config.preco or 0):.2f}",
+                    "data": clean_date(pedido_principal.pagou_em or pedido_principal.data_aprovacao),
+                    "status": "completo", "cor": "#3b82f6"
+                })
+                
+                if pedido_upsell:
+                    # 7. Gerou PIX Upsell
+                    timeline.append({
+                        "etapa": "gerou_pix_upsell", "titulo": "Gerou PIX",
+                        "descricao": f"Valor Upsell: R$ {float(pedido_upsell.valor or 0):.2f}",
+                        "data": clean_date(pedido_upsell.gerou_pix_em or pedido_upsell.created_at),
+                        "status": "completo", "cor": "#f59e0b"
+                    })
+                    
+                    # 8. Upsell Pagou
+                    is_paid_up = pedido_upsell.status in ['approved', 'paid', 'active', 'expired']
+                    timeline.append({
+                        "etapa": "upsell",
+                        "titulo": "Upsell pagou ✅" if is_paid_up else "Upsell pendente",
+                        "descricao": f"Pagamento de R$ {float(pedido_upsell.valor or 0):.2f} confirmado" if is_paid_up else "Gerou PIX mas não pagou",
+                        "data": clean_date(pedido_upsell.data_aprovacao or pedido_upsell.created_at),
+                        "status": "completo" if is_paid_up else "pendente",
+                        "cor": "#10b981" if is_paid_up else "#f59e0b"
+                    })
+            
+            # 9. Downsell (Apenas se o Upsell foi ignorado ou não pago)
+            if ds_config and ds_config.ativo and is_paid_p and (not pedido_upsell or pedido_upsell.status not in ['approved', 'paid', 'active', 'expired']):
+                timeline.append({
+                    "etapa": "downsell_enviado", "titulo": "Downsell enviado",
+                    "descricao": f"Oferta: {ds_config.nome_produto or 'Downsell'} — R$ {float(ds_config.preco or 0):.2f}",
+                    "data": clean_date(pedido_principal.pagou_em or pedido_principal.data_aprovacao),
+                    "status": "completo", "cor": "#3b82f6"
+                })
+                
+                if pedido_downsell:
+                    timeline.append({
+                        "etapa": "gerou_pix_downsell", "titulo": "Gerou PIX",
+                        "descricao": f"Valor Downsell: R$ {float(pedido_downsell.valor or 0):.2f}",
+                        "data": clean_date(pedido_downsell.gerou_pix_em or pedido_downsell.created_at),
+                        "status": "completo", "cor": "#f59e0b"
+                    })
+                    
+                    is_paid_ds = pedido_downsell.status in ['approved', 'paid', 'active', 'expired']
+                    timeline.append({
+                        "etapa": "downsell",
+                        "titulo": "Downsell pagou ✅" if is_paid_ds else "Downsell pendente",
+                        "descricao": f"Pagamento de R$ {float(pedido_downsell.valor or 0):.2f} confirmado" if is_paid_ds else "Gerou PIX mas não pagou",
+                        "data": clean_date(pedido_downsell.data_aprovacao or pedido_downsell.created_at),
+                        "status": "completo" if is_paid_ds else "pendente",
+                        "cor": "#10b981" if is_paid_ds else "#f59e0b"
+                    })
+        
+        # 10. Remarketing
+        for i, rl in enumerate(remarketing_logs[:5]):
+            timeline.append({
+                "etapa": f"remarketing_{i+1}",
+                "titulo": f"Remarketing #{i+1}" + (" — Converteu ✅" if rl["converted"] else ""),
+                "descricao": f"Enviado em {rl['sent_at'] or 'N/A'}",
+                "data": rl["sent_at"],
+                "status": "completo" if rl["converted"] else "enviado",
+                "cor": "#8b5cf6"
+            })
+        
+        total_gasto = sum(float(p.valor or 0) for p in pedidos if p.status in ['approved', 'paid', 'active', 'expired'])
+        
+        # 🔥 CORREÇÃO 3: Contabiliza o Order Bump como um pedido extra se existir (no Header do modal)
+        total_pedidos = sum(
+            (2 if getattr(p, 'tem_order_bump', False) else 1) 
+            for p in pedidos if p.status in ['approved', 'paid', 'active', 'expired']
+        )
+        
+        return {
+            "status": "success",
+            "telegram_id": telegram_id,
+            "bot_id": bot_id,
+            "bot_nome": bot.nome,
+            "info": {
+                "first_name": lead.nome if lead else (pedidos[0].first_name if pedidos else "Desconhecido"),
+                "username": lead.username if lead else (pedidos[0].username if pedidos else None),
+                "total_gasto": round(total_gasto, 2),
+                "total_pedidos": total_pedidos,
+                "primeiro_contato": clean_date(lead.primeiro_contato or lead.created_at) if lead else (clean_date(pedidos[0].created_at) if pedidos else None),
+            },
+            "timeline": timeline,
+            "remarketing_logs": remarketing_logs,
+            "config_ativa": {
+                "order_bump": bool(ob_config and ob_config.ativo),
+                "upsell": bool(up_config and up_config.ativo),
+                "downsell": bool(ds_config and ds_config.ativo),
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Erro jornada cliente mapa: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(500, f"Erro: {str(e)}")
 
 # =========================================================
 # 📁 ROTA DE UPLOAD DE MÍDIA (BACKBLAZE B2)
