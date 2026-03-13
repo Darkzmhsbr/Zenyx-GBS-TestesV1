@@ -13597,18 +13597,32 @@ def del_step(bot_id: int, sid: int, db: Session = Depends(get_db)):
         db.commit()
     return {"status": "deleted"}
 # =========================================================
-# 🔄 FUNÇÃO DE BACKGROUND (LÓGICA BLINDADA V3: SETS PUROS)
+# 🔄 FUNÇÃO DE BACKGROUND (LÓGICA BLINDADA V4: ALTA PERFORMANCE DB)
 # =========================================================
 def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: RemarketingRequest):
     """
     Executa o envio em background.
-    CORREÇÃO APLICADA: 
-    1. Botão agora aponta para 'promo_{uuid}' (evita automação indesejada).
-    2. Salva 'promo_price' na coluna do banco (corrige o valor do PIX).
-    3. Mantém lógica robusta de seleção de público.
+    CORREÇÕES APLICADAS: 
+    1. Botão aponta para 'promo_{uuid}' (evita automação indesejada).
+    2. Salva 'promo_price' e 'custom_price' normalizado.
+    3. 🔥 DB PERFORMANCE: Sessão do banco é liberada durante o loop do Telegram!
     """
-    # 🔥 CRIA NOVA SESSÃO DEDICADA
+    # ==========================================
+    # FASE 1: COLETA RÁPIDA DE DADOS (USANDO DB)
+    # ==========================================
     db = SessionLocal() 
+    
+    # Variáveis nativas extraídas para uso fora do banco de dados
+    bot_token = ""
+    bot_nome = ""
+    _protect_rmkt = False
+    uuid_campanha = ""
+    
+    plano_db_id = None
+    plano_nome_exibicao = ""
+    preco_final = 0.0
+    data_expiracao = None
+    lista_final_ids = []
     
     try:
         # --- A. RECUPERAÇÃO DE DADOS BÁSICOS ---
@@ -13617,14 +13631,15 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         
         if not campanha or not bot_db: return
 
-        logger.info(f"🚀 INICIANDO DISPARO | Bot: {bot_db.nome} | Target: {payload.target}")
+        # 🔥 EXTRAI AS INFORMAÇÕES DA RAM ANTES DE FECHAR O BANCO
+        bot_token = bot_db.token
+        bot_nome = bot_db.nome
+        _protect_rmkt = getattr(bot_db, 'protect_content', False) or False
+        uuid_campanha = campanha.campaign_id
+
+        logger.info(f"🚀 INICIANDO DISPARO | Bot: {bot_nome} | Target: {payload.target}")
 
         # --- B. PREPARAÇÃO DA OFERTA (PREÇO CUSTOMIZADO) ---
-        uuid_campanha = campanha.campaign_id
-        plano_db = None
-        preco_final = 0.0
-        data_expiracao = None
-
         if payload.incluir_oferta and payload.plano_oferta_id:
             # Busca Flexível (String ou Int)
             plano_db = db.query(PlanoConfig).filter(
@@ -13633,6 +13648,9 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
             ).first()
 
             if plano_db:
+                plano_db_id = plano_db.id
+                plano_nome_exibicao = plano_db.nome_exibicao
+                
                 # Lógica: Se for Customizado E valor > 0, usa custom. Senão, usa original.
                 if payload.price_mode == 'custom' and payload.custom_price is not None:
                      try:
@@ -13655,9 +13673,7 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
                     elif payload.expiration_mode == "days": data_expiracao = agora + timedelta(days=val)
 
         # --- C. SELEÇÃO DE PÚBLICO ---
-        bot_sender = telebot.TeleBot(bot_db.token, threaded=False)
         target = str(payload.target).lower().strip()
-        lista_final_ids = []
 
         if payload.is_test:
             # Modo Teste: Apenas 1 ID
@@ -13696,21 +13712,13 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
 
             # 3. Cruzamento
             if target == 'topo': 
-                # TOPO = Leads Totais - Leads com Pedido (Nunca tentaram comprar)
                 lista_final_ids = list(ids_todos_leads - ids_com_pedido)
-                
             elif target == 'meio':
-                # MEIO = Pedidos Pendentes - Pedidos Pagos (Tentou mas não pagou)
                 lista_final_ids = list(ids_pendentes - ids_pagantes)
-                
             elif target == 'fundo' or target == 'clientes':
-                # FUNDO = Pagantes
                 lista_final_ids = list(ids_pagantes)
-                
             elif target == 'todos': 
-                # TODOS
                 lista_final_ids = list(ids_todos_leads.union(ids_com_pedido))
-                
             else: # Fallback (Expirados)
                  q_exp = db.query(Pedido.telegram_id).filter(Pedido.bot_id == bot_id, Pedido.status == 'expired').all()
                  ids_exp = {str(x.telegram_id).strip() for x in q_exp if x.telegram_id}
@@ -13724,93 +13732,117 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         })
         db.commit()
 
-        # --- D. MONTAGEM DA MENSAGEM (CORREÇÃO DO BOTÃO) ---
-        markup = None
-        if plano_db:
-            markup = types.InlineKeyboardMarkup()
-            preco_txt = f"{preco_final:.2f}".replace('.', ',')
-            btn_text = f"🔥 {plano_db.nome_exibicao} - R$ {preco_txt}"
-            
-            # 🔥 CORREÇÃO 1: Aponta para 'promo_', que usa o preço customizado e NÃO ativa remarketing
-            cb_data = f"promo_{uuid_campanha}" 
-            markup.add(types.InlineKeyboardButton(btn_text, callback_data=cb_data))
+    except Exception as e:
+        logger.error(f"❌ Erro thread remarketing (Fase 1): {e}", exc_info=True)
+        try:
+            db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update({"status": "erro"})
+            db.commit()
+        except: pass
+        return # Interrompe a função
+    finally:
+        # 🔥🔥🔥 O SEGREDO DO SUCESSO! FECHAMOS O BANCO ANTES DO LOOP DO TELEGRAM!
+        db.close()
 
-        # --- E. ENVIO COM ATUALIZAÇÃO EM TEMPO REAL ---
-        sent_count = 0
-        blocked_count = 0
-        batch_size = 10  # Atualiza DB a cada 10 envios
 
-        # 🔒 Carrega flag de proteção para o bot
-        _protect_rmkt = getattr(bot_db, 'protect_content', False) or False
+    # ==========================================
+    # FASE 2: DISPARO (SEM PRENDER O BANCO DE DADOS!)
+    # ==========================================
+    bot_sender = telebot.TeleBot(bot_token, threaded=False)
 
-        # 🔊 PRÉ-DOWNLOAD: Se é áudio, baixa UMA vez antes do loop
-        _bulk_audio_bytes = None
-        _bulk_audio_dur = 0
-        if payload.media_url and payload.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
+    # --- D. MONTAGEM DA MENSAGEM (CORREÇÃO DO BOTÃO) ---
+    markup = None
+    if plano_db_id:
+        markup = types.InlineKeyboardMarkup()
+        preco_txt = f"{preco_final:.2f}".replace('.', ',')
+        btn_text = f"🔥 {plano_nome_exibicao} - R$ {preco_txt}"
+        
+        # 🔥 CORREÇÃO 1: Aponta para 'promo_', que usa o preço customizado
+        cb_data = f"promo_{uuid_campanha}" 
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=cb_data))
+
+    sent_count = 0
+    blocked_count = 0
+    batch_size = 10  # Atualiza DB a cada 10 envios
+
+    # 🔊 PRÉ-DOWNLOAD: Se é áudio, baixa UMA vez antes do loop
+    _bulk_audio_bytes = None
+    _bulk_audio_dur = 0
+    if payload.media_url and payload.media_url.lower().endswith(('.ogg', '.mp3', '.wav')):
+        try:
             _bulk_audio_bytes, _, _bulk_audio_dur = _download_audio_bytes(payload.media_url)
             if _bulk_audio_bytes:
                 logger.info(f"🎙️ Áudio pré-baixado para envio em massa ({len(_bulk_audio_bytes)} bytes)")
+        except Exception as e:
+            logger.warning(f"Erro ao baixar áudio: {e}")
 
-        for idx, uid in enumerate(lista_final_ids):
-            if not uid or len(uid) < 5: continue
-            try:
-                midia_ok = False
-                texto_envio = payload.mensagem.replace("{nome}", "Cliente")
-                
-                # ✨ CONVERTE EMOJIS PREMIUM (shortcodes → tg-emoji HTML tags)
-                texto_envio = convert_premium_emojis(texto_envio)
-
-                if payload.media_url and len(payload.media_url) > 5:
-                    try:
-                        ext = payload.media_url.lower()
-                        if ext.endswith(('.mp4', '.mov', '.avi')):
-                            bot_sender.send_video(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
-                        elif ext.endswith(('.ogg', '.mp3', '.wav')):
-                            # 🔊 ÁUDIO: Envia bytes pré-baixados como voice note nativo
-                            
-                            # 🔥 USA O HELPER SINCRONO AQUI
-                            _wait_bulk = min(max(_bulk_audio_dur, 2), 60) if _bulk_audio_dur and _bulk_audio_dur > 0 else 3
-                            _sleep_with_action(bot_sender, uid, _wait_bulk, 'record_voice')
-                            
-                            if _bulk_audio_bytes:
-                                bot_sender.send_voice(uid, _bulk_audio_bytes, protect_content=_protect_rmkt)
-                            else:
-                                bot_sender.send_voice(uid, payload.media_url, protect_content=_protect_rmkt)
-                            
-                            if texto_envio or markup:
-                                time.sleep(1)
-                                bot_sender.send_message(uid, texto_envio or "⬇️ Escolha:", reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
-                        else:
-                            bot_sender.send_photo(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
-                        midia_ok = True
-                    except: pass
-                
-                if not midia_ok:
-                    bot_sender.send_message(uid, texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
-                
-                sent_count += 1
-                time.sleep(0.04)
-                
-            except Exception as e:
-                err = str(e).lower()
-                if "blocked" in err or "kicked" in err or "deactivated" in err or "not found" in err:
-                    blocked_count += 1
+    for idx, uid in enumerate(lista_final_ids):
+        if not uid or len(uid) < 5: continue
+        try:
+            midia_ok = False
+            texto_envio = payload.mensagem.replace("{nome}", "Cliente")
             
-            # 🔥 NOVO: Atualiza progresso no banco a cada batch_size envios
-            if (idx + 1) % batch_size == 0 or (idx + 1) == len(lista_final_ids):
-                try:
-                    db.query(RemarketingCampaign).filter(
-                        RemarketingCampaign.id == campaign_db_id
-                    ).update({
-                        "sent_success": sent_count,
-                        "blocked_count": blocked_count
-                    })
-                    db.commit()
-                except Exception as e:
-                    logger.warning(f"⚠️ Erro ao atualizar progresso: {e}")
+            # ✨ CONVERTE EMOJIS PREMIUM
+            try:
+                texto_envio = convert_premium_emojis(texto_envio)
+            except: pass
 
-        # 🔥 CORRIGIDO: Mantém mesma estrutura que o config_data inicial
-        # 🔥 CORREÇÃO: Salva custom_price com round(2) para evitar "9,9" ao reutilizar
+            if payload.media_url and len(payload.media_url) > 5:
+                try:
+                    ext = payload.media_url.lower()
+                    if ext.endswith(('.mp4', '.mov', '.avi')):
+                        bot_sender.send_video(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
+                    elif ext.endswith(('.ogg', '.mp3', '.wav')):
+                        # 🔊 ÁUDIO
+                        _wait_bulk = min(max(_bulk_audio_dur, 2), 60) if _bulk_audio_dur and _bulk_audio_dur > 0 else 3
+                        try:
+                            _sleep_with_action(bot_sender, uid, _wait_bulk, 'record_voice')
+                        except: pass
+                        
+                        if _bulk_audio_bytes:
+                            bot_sender.send_voice(uid, _bulk_audio_bytes, protect_content=_protect_rmkt)
+                        else:
+                            bot_sender.send_voice(uid, payload.media_url, protect_content=_protect_rmkt)
+                        
+                        if texto_envio or markup:
+                            time.sleep(1)
+                            bot_sender.send_message(uid, texto_envio or "⬇️ Escolha:", reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
+                    else:
+                        bot_sender.send_photo(uid, payload.media_url, caption=texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
+                    midia_ok = True
+                except: pass
+            
+            if not midia_ok:
+                bot_sender.send_message(uid, texto_envio, reply_markup=markup, parse_mode="HTML", protect_content=_protect_rmkt)
+            
+            sent_count += 1
+            time.sleep(0.04)
+            
+        except Exception as e:
+            err = str(e).lower()
+            if "blocked" in err or "kicked" in err or "deactivated" in err or "not found" in err:
+                blocked_count += 1
+        
+        # 🔥 ATUALIZAÇÃO EM BATCH: Abre o banco rapidamente só pra avisar do progresso!
+        if (idx + 1) % batch_size == 0 and (idx + 1) < len(lista_final_ids):
+            db_batch = SessionLocal()
+            try:
+                db_batch.query(RemarketingCampaign).filter(
+                    RemarketingCampaign.id == campaign_db_id
+                ).update({
+                    "sent_success": sent_count,
+                    "blocked_count": blocked_count
+                })
+                db_batch.commit()
+            except Exception as e:
+                logger.warning(f"⚠️ Erro ao atualizar progresso batch: {e}")
+            finally:
+                db_batch.close()
+
+    # ==========================================
+    # FASE 3: FINALIZAÇÃO RÁPIDA (USANDO DB NOVAMENTE)
+    # ==========================================
+    db_final = SessionLocal()
+    try:
         config_completa = {
             "mensagem": payload.mensagem,
             "media_url": payload.media_url,
@@ -13823,31 +13855,27 @@ def processar_envio_remarketing(campaign_db_id: int, bot_id: int, payload: Remar
         }
         
         update_data = {
-            "status": "concluido",  # 🔥 Marca como concluído
+            "status": "concluido", 
             "sent_success": sent_count,
             "blocked_count": blocked_count, 
             "config": json.dumps(config_completa),
             "expiration_at": data_expiracao
         }
         
-        if plano_db:
-            update_data["plano_id"] = plano_db.id
-            # 🔥 CORREÇÃO 2: Salva o preço na coluna 'promo_price' para o handler usar (com round)
+        if plano_db_id:
+            update_data["plano_id"] = plano_db_id
             update_data["promo_price"] = round(preco_final, 2) if preco_final > 0 else None
         
-        db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update(update_data)
-        db.commit()
+        db_final.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update(update_data)
+        db_final.commit()
 
         logger.info(f"✅ Disparo concluído. Sucesso: {sent_count} | Bloqueados: {blocked_count}")
 
     except Exception as e:
-        logger.error(f"❌ Erro thread remarketing: {e}", exc_info=True)
-        try:
-            db.query(RemarketingCampaign).filter(RemarketingCampaign.id == campaign_db_id).update({"status": "erro"})
-            db.commit()
-        except: pass
+        logger.error(f"❌ Erro ao finalizar thread de remarketing: {e}")
     finally:
-        db.close()
+        db_final.close()
+
 
 @app.post("/api/admin/remarketing/send")
 async def enviar_remarketing(
@@ -13886,7 +13914,7 @@ async def enviar_remarketing(
                     raise HTTPException(400, "Nenhum usuário encontrado para teste.")
         
         # =========================================================
-        # 2. CRIAR REGISTRO DA CAMPANHA (ATUALIZADO PARA INCLUIR PREÇO CUSTOM)
+        # 2. CRIAR REGISTRO DA CAMPANHA (INCLUINDO PREÇO CUSTOM)
         # =========================================================
         uuid_campanha = str(uuid.uuid4())
         
@@ -14016,9 +14044,7 @@ async def enviar_remarketing(
                 if not bot_data:
                     raise HTTPException(404, "Bot não encontrado")
                 
-                # Para teste simples, usamos a função de background mesmo, 
-                # mas com o ID específico já setado no payload.
-                # Isso garante que a lógica de botão e preço seja testada também!
+                # Para teste simples, usamos a função de background mesmo.
                 background_tasks.add_task(
                     processar_envio_remarketing, # Chamando a mesma função para garantir consistência
                     nova_campanha.id,
@@ -14042,7 +14068,7 @@ async def enviar_remarketing(
         # 4. SE FOR MASSIVO, AGENDAR BACKGROUND TASK
         # =========================================================
         background_tasks.add_task(
-            processar_envio_remarketing,  # <--- ✅ NOME CORRETO DA FUNÇÃO QUE VOCÊ QUER
+            processar_envio_remarketing,  # <--- ✅ NOME CORRETO DA FUNÇÃO
             nova_campanha.id,
             payload.bot_id,
             payload # <--- ✅ PASSANDO O OBJETO INTEIRO (RemarketingRequest)
@@ -14064,7 +14090,7 @@ async def enviar_remarketing(
     except Exception as e:
         logger.error(f"❌ Erro ao criar campanha: {e}")
         raise HTTPException(500, detail=str(e))
-
+        
 # --- ROTA DE REENVIO INDIVIDUAL (CORRIGIDA PARA HTML) ---
 @app.post("/api/admin/remarketing/send-individual")
 def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Session = Depends(get_db)):
