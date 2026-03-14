@@ -11326,76 +11326,99 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     db.commit()
                 except: pass
 
-                # Envio Menu
-                flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
-                modo = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
-                msg_txt = flow.msg_boas_vindas if flow else "Olá!"
-                media = flow.media_url if flow else None
+                # ===============================================================
+                # 🚀 NOVO: DEFINIÇÃO INTELIGENTE DO MENU (LANÇAMENTO VS PADRÃO)
+                # ===============================================================
                 
-                # ✨ CONVERTE SHORTCODES DE EMOJIS PREMIUM → TAGS HTML DO TELEGRAM
-                msg_txt = convert_premium_emojis(msg_txt, db)
-                
+                # Verifica se a Estratégia de Lançamento está ATIVADA para este bot
+                launch_cfg = db.query(LaunchStrategyConfig).filter(
+                    LaunchStrategyConfig.bot_id == bot_db.id,
+                    LaunchStrategyConfig.ativo == True
+                ).first()
+
                 mk = types.InlineKeyboardMarkup()
+                msg_txt = ""
+                media = None
+
+                if launch_cfg:
+                    # 🚀 MODO: ESTRATÉGIA DE LANÇAMENTO (ISCA)
+                    logger.info(f"🚀 [LANÇAMENTO] Bot {bot_db.username} disparando Isca VIP para {first_name}")
+                    msg_txt = launch_cfg.msg_boas_vindas or "Bem-vindo!"
+                    media = launch_cfg.media_url
+                    btn_text_launch = launch_cfg.btn_text or "🔓 RESGATAR CONVITE VIP"
+                    
+                    msg_txt = convert_premium_emojis(msg_txt, db)
+                    mk.add(types.InlineKeyboardButton(text=btn_text_launch, callback_data="launch_invite"))
                 
-                # SE FOR MINI APP
-                if modo == "miniapp" and flow and flow.miniapp_url:
-                    url = flow.miniapp_url.replace("http://", "https://")
-                    mk.add(types.InlineKeyboardButton(text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️", web_app=types.WebAppInfo(url=url)))
-                
-                # SE FOR PADRÃO
                 else:
-                    # 🔥 VERIFICA O MODO DE BOTÃO DA MENSAGEM 1
-                    button_mode = getattr(flow, 'button_mode', 'next_step') if flow else 'next_step'
+                    # 📦 MODO: PADRÃO OU MINIAPP (FLOW CHAT)
+                    flow = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
+                    modo = getattr(flow, 'start_mode', 'padrao') if flow else 'padrao'
+                    msg_txt = flow.msg_boas_vindas if flow else "Olá!"
+                    media = flow.media_url if flow else None
                     
-                    if button_mode == "custom" and flow and flow.buttons_config and len(flow.buttons_config) > 0:
-                        # 🔥 MODO: BOTÕES PERSONALIZADOS (NOVA LÓGICA CORRIGIDA)
-                        for btn in flow.buttons_config:
-                            btn_type = btn.get('type')
-                            
-                            if btn_type == 'plan':
-                                # 🔥 BOTÃO DE PLANO - Busca nome e preço do banco
-                                plan_id = btn.get('plan_id')
-                                plano = db.query(PlanoConfig).filter(
-                                    PlanoConfig.id == plan_id,
-                                    PlanoConfig.bot_id == bot_db.id
-                                ).first()
-                                
-                                if plano:
-                                    # 🔥 FORMATO CORRETO: "NOME DO PLANO - por R$XX,XX"
-                                    preco_formatado = f"R${plano.preco_atual:.2f}".replace(".", ",")
-                                    texto_botao = f"{plano.nome_exibicao} - por {preco_formatado}"
-                                    
-                                    mk.add(types.InlineKeyboardButton(
-                                        texto_botao, 
-                                        callback_data=f"checkout_{plano.id}"
-                                    ))
-                            
-                            elif btn_type == 'link':
-                                # 🔥 BOTÃO DE LINK - Usa texto personalizado do usuário
-                                texto_link = btn.get('text', 'Link')
-                                url_link = btn.get('url', '')
-                                
-                                if url_link:
-                                    mk.add(types.InlineKeyboardButton(
-                                        texto_link, 
-                                        url=url_link
-                                    ))
+                    # ✨ CONVERTE SHORTCODES DE EMOJIS PREMIUM → TAGS HTML DO TELEGRAM
+                    msg_txt = convert_premium_emojis(msg_txt, db)
                     
+                    # SE FOR MINI APP
+                    if modo == "miniapp" and flow and flow.miniapp_url:
+                        url = flow.miniapp_url.replace("http://", "https://")
+                        mk.add(types.InlineKeyboardButton(text=flow.miniapp_btn_text or "ABRIR LOJA 🛍️", web_app=types.WebAppInfo(url=url)))
+                    
+                    # SE FOR PADRÃO
                     else:
-                        # 🔥 MODO: BOTÃO "PRÓXIMO PASSO" (LÓGICA TRADICIONAL)
-                        if flow and flow.mostrar_planos_1:
-                            # Mostra planos já na primeira mensagem
-                            planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
-                            for pl in planos: 
-                                preco_formatado = f"R${pl.preco_atual:.2f}".replace(".", ",")
-                                texto_botao = f"{pl.nome_exibicao} - por {preco_formatado}"
-                                mk.add(types.InlineKeyboardButton(texto_botao, callback_data=f"checkout_{pl.id}"))
+                        # 🔥 VERIFICA O MODO DE BOTÃO DA MENSAGEM 1
+                        button_mode = getattr(flow, 'button_mode', 'next_step') if flow else 'next_step'
+                        
+                        if button_mode == "custom" and flow and flow.buttons_config and len(flow.buttons_config) > 0:
+                            # 🔥 MODO: BOTÕES PERSONALIZADOS (NOVA LÓGICA CORRIGIDA)
+                            for btn in flow.buttons_config:
+                                btn_type = btn.get('type')
+                                
+                                if btn_type == 'plan':
+                                    # 🔥 BOTÃO DE PLANO - Busca nome e preço do banco
+                                    plan_id = btn.get('plan_id')
+                                    plano = db.query(PlanoConfig).filter(
+                                        PlanoConfig.id == plan_id,
+                                        PlanoConfig.bot_id == bot_db.id
+                                    ).first()
+                                    
+                                    if plano:
+                                        # 🔥 FORMATO CORRETO: "NOME DO PLANO - por R$XX,XX"
+                                        preco_formatado = f"R${plano.preco_atual:.2f}".replace(".", ",")
+                                        texto_botao = f"{plano.nome_exibicao} - por {preco_formatado}"
+                                        
+                                        mk.add(types.InlineKeyboardButton(
+                                            texto_botao, 
+                                            callback_data=f"checkout_{plano.id}"
+                                        ))
+                                
+                                elif btn_type == 'link':
+                                    # 🔥 BOTÃO DE LINK - Usa texto personalizado do usuário
+                                    texto_link = btn.get('text', 'Link')
+                                    url_link = btn.get('url', '')
+                                    
+                                    if url_link:
+                                        mk.add(types.InlineKeyboardButton(
+                                            texto_link, 
+                                            url=url_link
+                                        ))
+                        
                         else:
-                            # Mostra apenas botão de próximo passo
-                            mk.add(types.InlineKeyboardButton(
-                                flow.btn_text_1 if flow else "Ver Conteúdo", 
-                                callback_data="step_1"
-                            ))
+                            # 🔥 MODO: BOTÃO "PRÓXIMO PASSO" (LÓGICA TRADICIONAL)
+                            if flow and flow.mostrar_planos_1:
+                                # Mostra planos já na primeira mensagem
+                                planos = db.query(PlanoConfig).filter(PlanoConfig.bot_id == bot_db.id).all()
+                                for pl in planos: 
+                                    preco_formatado = f"R${pl.preco_atual:.2f}".replace(".", ",")
+                                    texto_botao = f"{pl.nome_exibicao} - por {preco_formatado}"
+                                    mk.add(types.InlineKeyboardButton(texto_botao, callback_data=f"checkout_{pl.id}"))
+                            else:
+                                # Mostra apenas botão de próximo passo
+                                mk.add(types.InlineKeyboardButton(
+                                    flow.btn_text_1 if flow else "Ver Conteúdo", 
+                                    callback_data="step_1"
+                                ))
 
                 # 🔥 BLOCO DE ENVIO COM LOG E ÁUDIO
                 try:
