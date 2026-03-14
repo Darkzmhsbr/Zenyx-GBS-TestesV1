@@ -193,6 +193,9 @@ class Bot(Base):
     
     bot_groups = relationship("BotGroup", back_populates="bot", cascade="all, delete-orphan")
 
+    # 🔥 NOVO: Relação para a tabela de Estratégia de Lançamento
+    launch_strategy = relationship("LaunchStrategyConfig", uselist=False, back_populates="bot", cascade="all, delete-orphan")
+
 class BotAdmin(Base):
     __tablename__ = "bot_admins"
     id = Column(Integer, primary_key=True, index=True)
@@ -201,6 +204,45 @@ class BotAdmin(Base):
     nome = Column(String, nullable=True)
     created_at = Column(DateTime, default=now_brazil)
     bot = relationship("Bot", back_populates="admins")
+
+# =========================================================
+# 🚀 NOVO: CONFIGURAÇÃO DE ESTRATÉGIA DE LANÇAMENTO
+# =========================================================
+class LaunchStrategyConfig(Base):
+    """
+    Configuração do Módulo de Lançamento (Degustação VIP / Sneak Peek).
+    Permite liberar entrada no VIP, e expulsar automaticamente após N minutos,
+    mandando imediatamente a oferta escassa na DM do usuário.
+    """
+    __tablename__ = "launch_strategy_config"
+    id = Column(Integer, primary_key=True, index=True)
+    bot_id = Column(Integer, ForeignKey("bots.id", ondelete="CASCADE"), unique=True)
+    
+    ativo = Column(Boolean, default=False)
+    
+    # 1. Primeira Mensagem do Bot (Funil Inicial)
+    msg_boas_vindas = Column(Text, default="Bem-vindo! Resgate seu acesso VIP temporário abaixo:")
+    media_url = Column(String, nullable=True)
+    btn_text = Column(String, default="🔓 RESGATAR CONVITE VIP")
+    
+    # 2. Configuração do Cronômetro
+    tempo_vip_minutos = Column(Integer, default=1)  # Tempo de degustação no canal (Ex: 1 min, 60 min, etc)
+    
+    # 3. A Oferta (Mensagem enviada após a expulsão)
+    msg_expulsao = Column(Text, default="⚠️ SEU ACESSO VIP GRATUITO EXPIROU!! 😈\n\nGaranta sua vaga permanente agora:")
+    media_oferta_url = Column(String, nullable=True)
+    
+    # 4. Plano oferecido
+    plano_id = Column(Integer, nullable=True) # ID do PlanoConfig que será oferecido no botão de compra
+    
+    created_at = Column(DateTime, default=now_brazil)
+    updated_at = Column(DateTime, default=now_brazil, onupdate=now_brazil)
+
+    bot = relationship("Bot", back_populates="launch_strategy")
+
+    def __repr__(self):
+        return f"<LaunchStrategyConfig(bot_id={self.bot_id}, ativo={self.ativo}, tempo={self.tempo_vip_minutos}min)>"
+
 
 # =========================================================
 # 🛒 ORDER BUMP (OFERTA EXTRA NO CHECKOUT)

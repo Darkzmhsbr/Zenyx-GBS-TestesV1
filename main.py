@@ -92,7 +92,9 @@ from database import (
     # ✅ NOVO IMPORT PARA OVERRIDES DE RECURSOS PRIME
     UserPrimeOverride,
     # ✅ NOVO IMPORT PARA CÓDIGOS DE CONVITE
-    InviteCode
+    InviteCode,
+    # 🚀 NOVO IMPORT PARA ESTRATÉGIA DE LANÇAMENTO
+    LaunchStrategyConfig
 )
 
 import update_db 
@@ -304,6 +306,71 @@ def aprovar_entrada_canal_free(bot_token: str, canal_id: str, user_id: int):
                 time.sleep(2)  # Espera 2s antes de tentar novamente
             else:
                 logger.error(f"❌ [CANAL FREE] Todas as {max_retries} tentativas falharam para {user_id}: {e}")
+
+# =========================================================
+# 🚀 FUNÇÃO: EXPULSAR E ENVIAR OFERTA (ESTRATÉGIA LANÇAMENTO)
+# =========================================================
+def expulsar_usuario_lancamento(bot_token: str, chat_id: str, user_id: int, bot_db_id: int):
+    """
+    Remove o usuário do VIP após o tempo de degustação e envia a oferta escassa na DM.
+    Executado automaticamente pelo scheduler.
+    """
+    db = SessionLocal()
+    try:
+        bot = telebot.TeleBot(bot_token, threaded=False)
+        
+        # 1. Busca configurações da estratégia
+        config = db.query(LaunchStrategyConfig).filter(LaunchStrategyConfig.bot_id == bot_db_id).first()
+        if not config or not config.ativo:
+            return
+
+        # 2. Executa a expulsão (Kick e Unban para permitir que ele volte comprando)
+        try:
+            bot.ban_chat_member(chat_id, user_id)
+            bot.unban_chat_member(chat_id, user_id)
+            logger.info(f"🚀 [LANÇAMENTO] Usuário {user_id} removido do VIP {chat_id} (Tempo esgotado)")
+        except Exception as e:
+            logger.warning(f"⚠️ Erro ao remover usuário {user_id} no lançamento: {e}")
+            return # Se falhou ao remover, não manda a oferta para não dar acesso grátis
+        
+        # 3. Prepara a mensagem de oferta
+        msg_oferta = config.msg_expulsao or "⚠️ SEU ACESSO VIP EXPIROU!\n\nGaranta sua vaga agora:"
+        media_url = config.media_oferta_url
+        plano_id = config.plano_id
+        
+        markup = None
+        if plano_id:
+            plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
+            if plano:
+                markup = types.InlineKeyboardMarkup()
+                preco_fmt = f"R$ {plano.preco_atual:.2f}".replace('.', ',')
+                btn_txt = f"💎 {plano.nome_exibicao} - {preco_fmt}"
+                markup.add(types.InlineKeyboardButton(btn_txt, callback_data=f"checkout_{plano.id}"))
+        
+        # ✨ Converte Emojis Premium
+        try:
+            msg_oferta = convert_premium_emojis(msg_oferta)
+        except:
+            pass
+        
+        # 4. Envia a oferta na DM do usuário
+        try:
+            if media_url:
+                media_low = media_url.lower()
+                if media_low.endswith(('.mp4', '.mov', '.avi')):
+                    bot.send_video(user_id, media_url, caption=msg_oferta, reply_markup=markup, parse_mode="HTML")
+                else:
+                    bot.send_photo(user_id, media_url, caption=msg_oferta, reply_markup=markup, parse_mode="HTML")
+            else:
+                bot.send_message(user_id, msg_oferta, reply_markup=markup, parse_mode="HTML")
+            logger.info(f"🚀 [LANÇAMENTO] Oferta enviada para {user_id} com sucesso!")
+        except Exception as e_send:
+            logger.error(f"❌ [LANÇAMENTO] Erro ao enviar oferta para {user_id}: {e_send}")
+
+    except Exception as e:
+        logger.error(f"❌ Erro geral na expulsão de lançamento: {e}")
+    finally:
+        db.close()
 
 # Configuração de Log
 logging.basicConfig(level=logging.INFO)
@@ -5418,6 +5485,19 @@ def notificar_admin_principal(bot_db: BotModel, mensagem: str):
 # Modelo para receber o JSON do frontend (PushinPay e WiinPay)
 class IntegrationUpdate(BaseModel):
     token: str
+
+# =========================================================
+# 🚀 MODELO: ESTRATÉGIA DE LANÇAMENTO (SNEAK PEEK)
+# =========================================================
+class LaunchStrategyUpdate(BaseModel):
+    ativo: bool
+    msg_boas_vindas: Optional[str] = None
+    media_url: Optional[str] = None
+    btn_text: Optional[str] = "🔓 RESGATAR CONVITE VIP"
+    tempo_vip_minutos: int
+    msg_expulsao: Optional[str] = None
+    media_oferta_url: Optional[str] = None
+    plano_id: Optional[int] = None
 
 # 🆕 NOVO: Modelo para receber os dados duplos da Sync Pay do frontend
 class SyncPayIntegrationUpdate(BaseModel):
@@ -11062,12 +11142,37 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 if pedido.created_at and now_brazil() < (pedido.created_at + timedelta(days=d)): allowed = True
                     
                     if not allowed:
-                        try:
-                            bot_temp.ban_chat_member(chat_id, member.id)
-                            bot_temp.unban_chat_member(chat_id, member.id)
-                            try: bot_temp.send_message(member.id, "🚫 <b>Acesso Negado.</b>\nPor favor, realize o pagamento.", parse_mode="HTML")
+                        # 🚀 NOVA LÓGICA: VERIFICA SE É ESTRATÉGIA DE LANÇAMENTO (DEGUSTAÇÃO)
+                        launch_cfg = db.query(LaunchStrategyConfig).filter(
+                            LaunchStrategyConfig.bot_id == bot_db.id,
+                            LaunchStrategyConfig.ativo == True
+                        ).first()
+
+                        if launch_cfg and launch_cfg.tempo_vip_minutos > 0:
+                            # MODO DEGUSTAÇÃO: Agenda a expulsão em X minutos
+                            try:
+                                run_date = now_brazil() + timedelta(minutes=launch_cfg.tempo_vip_minutos)
+                                job_id = f"kick_launch_{canal_vip_id}_{member.id}"
+                                
+                                scheduler.add_job(
+                                    expulsar_usuario_lancamento,
+                                    'date',
+                                    run_date=run_date,
+                                    args=[token, canal_vip_id, member.id, bot_db.id],
+                                    id=job_id,
+                                    replace_existing=True
+                                )
+                                logger.info(f"🚀 [LANÇAMENTO] Usuário {member.id} entrou na degustação. Expulsão agendada para {launch_cfg.tempo_vip_minutos} min.")
+                            except Exception as e_sched:
+                                logger.error(f"❌ Erro ao agendar expulsão do lançamento: {e_sched}")
+                        else:
+                            # LÓGICA PADRÃO: Expulsa na hora
+                            try:
+                                bot_temp.ban_chat_member(chat_id, member.id)
+                                bot_temp.unban_chat_member(chat_id, member.id)
+                                try: bot_temp.send_message(member.id, "🚫 <b>Acesso Negado.</b>\nPor favor, realize o pagamento.", parse_mode="HTML")
+                                except: pass
                             except: pass
-                        except: pass
             return {"status": "checked"}
 
         # ----------------------------------------
@@ -11350,6 +11455,32 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             data = update.callback_query.data
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
+
+            # --- 🚀 RESGATAR CONVITE VIP (ESTRATÉGIA DE LANÇAMENTO) ---
+            if data == "launch_invite" or data.startswith("launch_invite_"):
+                try:
+                    canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
+                    
+                    # Tenta desbanir caso ele já tenha sido chutado antes, para permitir que ele use o link
+                    try: bot_temp.unban_chat_member(canal_vip_id, chat_id)
+                    except: pass
+                    
+                    # Gera link de 1 uso exclusivo para o usuário
+                    convite = bot_temp.create_chat_invite_link(
+                        chat_id=canal_vip_id, 
+                        member_limit=1, 
+                        name=f"VIP {first_name}"
+                    )
+                    
+                    msg_link = f"🎉 <b>SEU CONVITE ESTÁ PRONTO!</b>\n\nEste link é de uso único e exclusivo para você. Clique abaixo para entrar agora!\n\n👉 {convite.invite_link}"
+                    bot_temp.send_message(chat_id, msg_link, parse_mode="HTML")
+                    logger.info(f"🚀 [LANÇAMENTO] Link gerado para {first_name} ({chat_id})")
+                except Exception as e:
+                    logger.error(f"❌ Erro ao gerar link de lançamento: {e}")
+                    try: bot_temp.send_message(chat_id, "❌ Erro ao gerar seu convite. O canal VIP está configurado corretamente?")
+                    except: pass
+                
+                return {"status": "ok"}
 
             # ==============================================================================
             # 🛡️ MOTOR DO ESCUDO ANTI-CURIOSOS (RECURSO PRIME)
@@ -14090,7 +14221,7 @@ async def enviar_remarketing(
     except Exception as e:
         logger.error(f"❌ Erro ao criar campanha: {e}")
         raise HTTPException(500, detail=str(e))
-        
+
 # --- ROTA DE REENVIO INDIVIDUAL (CORRIGIDA PARA HTML) ---
 @app.post("/api/admin/remarketing/send-individual")
 def enviar_remarketing_individual(payload: IndividualRemarketingRequest, db: Session = Depends(get_db)):
@@ -22786,3 +22917,94 @@ async def migrate_invites_v11(db: Session = Depends(get_db)):
         }
     except Exception as e:
         return {"status": "error", "message": f"❌ Erro: {str(e)}"}
+
+# =========================================================
+# 🚀 API: ESTRATÉGIA DE LANÇAMENTO (SNEAK PEEK)
+# =========================================================
+@app.get("/api/admin/launch-strategy/{bot_id}")
+async def get_launch_strategy(bot_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    bot = db.query(BotModel).filter(BotModel.id == bot_id, BotModel.owner_id == current_user.id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
+    config = db.query(LaunchStrategyConfig).filter(LaunchStrategyConfig.bot_id == bot_id).first()
+    if not config:
+        # Retorna o padrão caso o usuário nunca tenha configurado
+        return {
+            "ativo": False,
+            "msg_boas_vindas": "Olá! 👋\nSeja bem-vindo à Área de Acesso Exclusiva.\n\nAqui você poderá desbloquear acesso ao conteúdo completo e privado.\n\nPara continuar, clique no botão abaixo.",
+            "media_url": "",
+            "btn_text": "🔓 RESGATAR CONVITE VIP",
+            "tempo_vip_minutos": 1,
+            "msg_expulsao": "⚠️ SEU ACESSO VIP GRATUITO EXPIROU!! 😈\n\nMas não fique triste!! Temos uma condição especial e única para você garantir seu acesso VIP pra SEMPRE!!\n\n⏳ As vagas estão acabando. Garanta o acesso antes que feche de vez! ⬇️",
+            "media_oferta_url": "",
+            "plano_id": None
+        }
+    return config
+
+@app.post("/api/admin/launch-strategy/{bot_id}")
+async def save_launch_strategy(bot_id: int, payload: LaunchStrategyUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    bot = db.query(BotModel).filter(BotModel.id == bot_id, BotModel.owner_id == current_user.id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot não encontrado")
+    
+    config = db.query(LaunchStrategyConfig).filter(LaunchStrategyConfig.bot_id == bot_id).first()
+    if not config:
+        config = LaunchStrategyConfig(bot_id=bot_id)
+        db.add(config)
+    
+    config.ativo = payload.ativo
+    config.msg_boas_vindas = payload.msg_boas_vindas
+    config.media_url = payload.media_url
+    config.btn_text = payload.btn_text
+    config.tempo_vip_minutos = payload.tempo_vip_minutos
+    config.msg_expulsao = payload.msg_expulsao
+    config.media_oferta_url = payload.media_oferta_url
+    config.plano_id = payload.plano_id
+    
+    db.commit()
+    return {"status": "success", "message": "Configuração de lançamento salva com sucesso!"}
+
+# =========================================================
+# 🚨 MIGRAÇÃO V12: ESTRATÉGIA DE LANÇAMENTO (SNEAK PEEK)
+# =========================================================
+@app.get("/migrate-launch-strategy-v12")
+async def migrate_launch_strategy_v12(db: Session = Depends(get_db)):
+    """
+    Migração V12: Cria a tabela launch_strategy_config para o novo módulo de Lançamentos.
+    Acesse UMA VEZ após deploy: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-launch-strategy-v12
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        try:
+            db.execute(text("""
+                CREATE TABLE IF NOT EXISTS launch_strategy_config (
+                    id SERIAL PRIMARY KEY,
+                    bot_id INTEGER UNIQUE REFERENCES bots(id) ON DELETE CASCADE,
+                    ativo BOOLEAN DEFAULT FALSE,
+                    msg_boas_vindas TEXT DEFAULT 'Bem-vindo! Resgate seu acesso VIP temporário abaixo:',
+                    media_url VARCHAR,
+                    btn_text VARCHAR DEFAULT '🔓 RESGATAR CONVITE VIP',
+                    tempo_vip_minutos INTEGER DEFAULT 1,
+                    msg_expulsao TEXT DEFAULT '⚠️ SEU ACESSO VIP GRATUITO EXPIROU!! 😈\n\nGaranta sua vaga permanente agora:',
+                    media_oferta_url VARCHAR,
+                    plano_id INTEGER,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            db.commit()
+            log_msgs.append("✅ Tabela 'launch_strategy_config' criada/verificada com sucesso")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"⚠️ Erro ao criar launch_strategy_config: {str(e)}")
+        
+        return {
+            "status": "success",
+            "message": "🚀 Migração V12 (Estratégia de Lançamento) concluída!",
+            "details": log_msgs
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"❌ Erro na migração: {str(e)}"}
