@@ -308,6 +308,88 @@ def aprovar_entrada_canal_free(bot_token: str, canal_id: str, user_id: int):
                 logger.error(f"❌ [CANAL FREE] Todas as {max_retries} tentativas falharam para {user_id}: {e}")
 
 # =========================================================
+# 🚀 FUNÇÃO: APROVAR, DAR BOAS VINDAS E AGENDAR KICK (LANÇAMENTO)
+# =========================================================
+def processar_aprovacao_lancamento(bot_token: str, canal_id: str, user_id: int, bot_db_id: int, link_usado: str, user_name: str, username: str):
+    """
+    Função em background (Agendável) que aprova o usuário, queima o link, 
+    envia a msg de boas-vindas VIP e logo em seguida já arma a bomba relógio (expulsão).
+    """
+    db = SessionLocal()
+    try:
+        bot = telebot.TeleBot(bot_token, threaded=False)
+        config = db.query(LaunchStrategyConfig).filter(LaunchStrategyConfig.bot_id == bot_db_id).first()
+        if not config or not config.ativo:
+            return
+
+        # 1. Aprova o usuário no Canal VIP
+        try:
+            bot.approve_chat_join_request(int(canal_id), user_id)
+            logger.info(f"🚀 [LANÇAMENTO] Usuário {user_id} APROVADO na degustação!")
+        except Exception as e:
+            logger.error(f"❌ [LANÇAMENTO] Erro ao aprovar usuário: {e}")
+            return # Se falhou ao aprovar, não segue para não quebrar a lógica
+
+        # 2. Queima o link exclusivo (Se existir)
+        if link_usado:
+            try:
+                bot.revoke_chat_invite_link(canal_id, link_usado)
+                logger.info(f"🔥 [LANÇAMENTO] Link QUEIMADO com sucesso!")
+            except: pass
+
+        # 3. Envia a Mensagem Instantânea de Boas-Vindas
+        try:
+            msg_aprovacao = config.msg_aprovacao_texto or f"PARABÉNS {user_name} VOCÊ FOI APROVADO EM NOSSO VIP 🎉"
+            msg_aprovacao = msg_aprovacao.replace("{first_name}", user_name)
+            str_user = f"@{username}" if username else ""
+            msg_aprovacao = msg_aprovacao.replace("{username}", str_user)
+            msg_aprovacao = convert_premium_emojis(msg_aprovacao, db)
+
+            markup_aprov = None
+            btn_text = config.msg_aprovacao_btn or "🔥 ENTRAR NO VIP"
+            if btn_text.strip():
+                markup_aprov = types.InlineKeyboardMarkup()
+                # Botão de teletransporte direto para o App do Telegram
+                link_para_canal = f"https://t.me/c/{str(canal_id).replace('-100', '')}/1" 
+                markup_aprov.add(types.InlineKeyboardButton(text=btn_text, url=link_para_canal))
+
+            if config.msg_aprovacao_media:
+                media_low = config.msg_aprovacao_media.lower()
+                if media_low.endswith(('.mp4', '.mov', '.avi')):
+                    bot.send_video(user_id, config.msg_aprovacao_media, caption=msg_aprovacao, reply_markup=markup_aprov, parse_mode="HTML")
+                else:
+                    bot.send_photo(user_id, config.msg_aprovacao_media, caption=msg_aprovacao, reply_markup=markup_aprov, parse_mode="HTML")
+            else:
+                bot.send_message(user_id, msg_aprovacao, reply_markup=markup_aprov, parse_mode="HTML")
+        except Exception as e_msg:
+            logger.error(f"❌ [LANÇAMENTO] Erro ao enviar msg de boas vindas: {e_msg}")
+
+        # 4. Agenda a Expulsão
+        if config.tempo_vip_minutos > 0:
+            try:
+                run_date = now_brazil() + timedelta(minutes=config.tempo_vip_minutos)
+                job_id = f"kick_launch_{canal_id}_{user_id}"
+                
+                # Importa o scheduler global do main (segurança contra circular import em functions delayadas)
+                from main import scheduler 
+                scheduler.add_job(
+                    expulsar_usuario_lancamento,
+                    'date',
+                    run_date=run_date,
+                    args=[bot_token, canal_id, user_id, bot_db_id],
+                    id=job_id,
+                    replace_existing=True
+                )
+                logger.info(f"⏰ [LANÇAMENTO] Expulsão armada para daqui a {config.tempo_vip_minutos} min. ({user_name})")
+            except Exception as e_sched:
+                logger.error(f"❌ Erro ao agendar expulsão: {e_sched}")
+
+    except Exception as e_geral:
+        logger.error(f"❌ Erro geral no processar_aprovacao_lancamento: {e_geral}")
+    finally:
+        db.close()
+
+# =========================================================
 # 🚀 FUNÇÃO: EXPULSAR E ENVIAR OFERTA (ESTRATÉGIA LANÇAMENTO)
 # =========================================================
 def expulsar_usuario_lancamento(bot_token: str, chat_id: str, user_id: int, bot_db_id: int):
@@ -5494,6 +5576,12 @@ class LaunchStrategyUpdate(BaseModel):
     msg_boas_vindas: Optional[str] = None
     media_url: Optional[str] = None
     btn_text: Optional[str] = "🔓 RESGATAR CONVITE VIP"
+    
+    delay_aprovacao_segundos: int = 0  # 🔥 NOVO!
+    msg_aprovacao_texto: Optional[str] = None
+    msg_aprovacao_media: Optional[str] = None
+    msg_aprovacao_btn: Optional[str] = "🔥 ENTRAR NO VIP"
+    
     tempo_vip_minutos: int
     msg_expulsao: Optional[str] = None
     media_oferta_url: Optional[str] = None
@@ -10930,38 +11018,89 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     if launch_cfg:
                         logger.info(f"🚀 [LANÇAMENTO] Pedido de entrada detectado de {user_name} ({user_id})")
                         
-                        # Aprova a pessoa instantaneamente e QUEIMA O LINK!
-                        try:
-                            # 1. Aprova o usuário
-                            bot_temp.approve_chat_join_request(int(canal_id), user_id)
-                            logger.info(f"🚀 [LANÇAMENTO] Usuário {user_id} APROVADO para a degustação no canal {canal_id}!")
+                        # Extrai o link usado pelo lead
+                        link_usado = None
+                        if join_request.invite_link and join_request.invite_link.invite_link:
+                            link_usado = join_request.invite_link.invite_link
                             
-                            # 2. 🔥 QUEIMA O LINK (Revoga para nunca mais ser usado)
-                            if join_request.invite_link and join_request.invite_link.invite_link:
-                                link_usado = join_request.invite_link.invite_link
-                                bot_temp.revoke_chat_invite_link(canal_id, link_usado)
-                                logger.info(f"🔥 [LANÇAMENTO] Link QUEIMADO com sucesso! ({link_usado})")
-                                
-                        except Exception as e_app:
-                            logger.error(f"❌ [LANÇAMENTO] Erro ao aprovar/queimar link: {e_app}")
+                        # Pega o delay configurado no painel
+                        delay_segundos = getattr(launch_cfg, 'delay_aprovacao_segundos', 0)
                         
-                        # Agenda a expulsão e o envio da oferta no privado
-                        if launch_cfg.tempo_vip_minutos > 0:
+                        if delay_segundos > 0:
+                            # ⏳ TEM DELAY: Agenda a aprovação para daqui a X segundos
                             try:
-                                run_date = now_brazil() + timedelta(minutes=launch_cfg.tempo_vip_minutos)
-                                job_id = f"kick_launch_{canal_vip_id}_{user_id}"
-                                
+                                run_date = now_brazil() + timedelta(seconds=delay_segundos)
+                                job_id = f"approve_launch_{canal_vip_id}_{user_id}"
                                 scheduler.add_job(
-                                    expulsar_usuario_lancamento,
+                                    processar_aprovacao_lancamento,
                                     'date',
                                     run_date=run_date,
-                                    args=[token, canal_vip_id, user_id, bot_db.id],
+                                    args=[token, canal_vip_id, user_id, bot_db.id, link_usado, user_name, username],
                                     id=job_id,
                                     replace_existing=True
                                 )
-                                logger.info(f"⏰ [LANÇAMENTO] Expulsão agendada para daqui a {launch_cfg.tempo_vip_minutos} min. ({user_name})")
+                                logger.info(f"⏰ [LANÇAMENTO] Aprovação de {user_name} agendada para daqui a {delay_segundos}s.")
                             except Exception as e_sched:
-                                logger.error(f"❌ Erro ao agendar expulsão do lançamento: {e_sched}")
+                                logger.error(f"❌ Erro ao agendar aprovação com delay: {e_sched}")
+                        else:
+                            # ⚡ SEM DELAY: Executa instantaneamente e QUEIMA O LINK!
+                            try:
+                                # 1. Aprova o usuário
+                                bot_temp.approve_chat_join_request(int(canal_id), user_id)
+                                logger.info(f"🚀 [LANÇAMENTO] Usuário {user_id} APROVADO para a degustação no canal {canal_id}!")
+                                
+                                # 2. 🔥 QUEIMA O LINK (Revoga para nunca mais ser usado)
+                                if link_usado:
+                                    bot_temp.revoke_chat_invite_link(canal_id, link_usado)
+                                    logger.info(f"🔥 [LANÇAMENTO] Link QUEIMADO com sucesso! ({link_usado})")
+                                    
+                                # 3. 🚀 ENVIA MENSAGEM DE BOAS-VINDAS IMEDIATA NA DM!
+                                msg_aprovacao = launch_cfg.msg_aprovacao_texto or f"PARABÉNS {user_name} VOCÊ FOI APROVADO EM NOSSO VIP 🎉\n\nCLIQUE ABAIXO PARA ACESSAR O NOSSO GRUPINHO SECRETO 👇🏼\n\nENTRE AGORA!! SE SAIR NÃO TEM VOLTA!!"
+                                msg_aprovacao = msg_aprovacao.replace("{first_name}", user_name)
+                                str_user = f"@{username}" if username else ""
+                                msg_aprovacao = msg_aprovacao.replace("{username}", str_user)
+                                msg_aprovacao = convert_premium_emojis(msg_aprovacao, db)
+    
+                                markup_aprov = None
+                                btn_text = launch_cfg.msg_aprovacao_btn or "🔥 ENTRAR NO VIP"
+                                if btn_text.strip():
+                                    markup_aprov = types.InlineKeyboardMarkup()
+                                    # 🔥 Usamos um Deep Link direto para o canal (Teletransporte)
+                                    # O usuário já foi aprovado, então clicar nisso só abre a janela do Canal no app dele.
+                                    link_para_canal = f"https://t.me/c/{canal_id.replace('-100', '')}/1" 
+                                    markup_aprov.add(types.InlineKeyboardButton(text=btn_text, url=link_para_canal))
+    
+                                if launch_cfg.msg_aprovacao_media:
+                                    media_low = launch_cfg.msg_aprovacao_media.lower()
+                                    if media_low.endswith(('.mp4', '.mov', '.avi')):
+                                        bot_temp.send_video(user_id, launch_cfg.msg_aprovacao_media, caption=msg_aprovacao, reply_markup=markup_aprov, parse_mode="HTML")
+                                    else:
+                                        bot_temp.send_photo(user_id, launch_cfg.msg_aprovacao_media, caption=msg_aprovacao, reply_markup=markup_aprov, parse_mode="HTML")
+                                else:
+                                    bot_temp.send_message(user_id, msg_aprovacao, reply_markup=markup_aprov, parse_mode="HTML")
+                                
+                                logger.info(f"🚀 [LANÇAMENTO] Boas-vindas enviada para {user_name}!")
+    
+                            except Exception as e_app:
+                                logger.error(f"❌ [LANÇAMENTO] Erro ao processar aprovação VIP: {e_app}")
+                            
+                            # Agenda a expulsão e o envio da oferta no privado
+                            if launch_cfg.tempo_vip_minutos > 0:
+                                try:
+                                    run_date = now_brazil() + timedelta(minutes=launch_cfg.tempo_vip_minutos)
+                                    job_id = f"kick_launch_{canal_vip_id}_{user_id}"
+                                    
+                                    scheduler.add_job(
+                                        expulsar_usuario_lancamento,
+                                        'date',
+                                        run_date=run_date,
+                                        args=[token, canal_vip_id, user_id, bot_db.id],
+                                        id=job_id,
+                                        replace_existing=True
+                                    )
+                                    logger.info(f"⏰ [LANÇAMENTO] Expulsão agendada para daqui a {launch_cfg.tempo_vip_minutos} min. ({user_name})")
+                                except Exception as e_sched:
+                                    logger.error(f"❌ Erro ao agendar expulsão do lançamento: {e_sched}")
                         
                         return {"status": "ok", "message": "Lançamento processado"}
 
@@ -23002,12 +23141,16 @@ async def get_launch_strategy(bot_id: int, db: Session = Depends(get_db), curren
     
     config = db.query(LaunchStrategyConfig).filter(LaunchStrategyConfig.bot_id == bot_id).first()
     if not config:
-        # Retorna o padrão caso o usuário nunca tenha configurado
+        # Retorna o padrão
         return {
             "ativo": False,
             "msg_boas_vindas": "Olá! 👋\nSeja bem-vindo à Área de Acesso Exclusiva.\n\nAqui você poderá desbloquear acesso ao conteúdo completo e privado.\n\nPara continuar, clique no botão abaixo.",
             "media_url": "",
             "btn_text": "🔓 RESGATAR CONVITE VIP",
+            "delay_aprovacao_segundos": 0,
+            "msg_aprovacao_texto": "PARABÉNS {first_name} VOCÊ FOI APROVADO EM NOSSO VIP 🎉\n\nCLIQUE ABAIXO PARA ACESSAR O NOSSO GRUPINHO SECRETO 👇🏼\n\nENTRE AGORA!! SE SAIR NÃO TEM VOLTA!!",
+            "msg_aprovacao_media": "",
+            "msg_aprovacao_btn": "🔥 ENTRAR NO VIP",
             "tempo_vip_minutos": 1,
             "msg_expulsao": "⚠️ SEU ACESSO VIP GRATUITO EXPIROU!! 😈\n\nMas não fique triste!! Temos uma condição especial e única para você garantir seu acesso VIP pra SEMPRE!!\n\n⏳ As vagas estão acabando. Garanta o acesso antes que feche de vez! ⬇️",
             "media_oferta_url": "",
@@ -23030,6 +23173,12 @@ async def save_launch_strategy(bot_id: int, payload: LaunchStrategyUpdate, db: S
     config.msg_boas_vindas = payload.msg_boas_vindas
     config.media_url = payload.media_url
     config.btn_text = payload.btn_text
+    
+    config.delay_aprovacao_segundos = payload.delay_aprovacao_segundos
+    config.msg_aprovacao_texto = payload.msg_aprovacao_texto
+    config.msg_aprovacao_media = payload.msg_aprovacao_media
+    config.msg_aprovacao_btn = payload.msg_aprovacao_btn
+    
     config.tempo_vip_minutos = payload.tempo_vip_minutos
     config.msg_expulsao = payload.msg_expulsao
     config.media_oferta_url = payload.media_oferta_url
@@ -23044,8 +23193,7 @@ async def save_launch_strategy(bot_id: int, payload: LaunchStrategyUpdate, db: S
 @app.get("/migrate-launch-strategy-v12")
 async def migrate_launch_strategy_v12(db: Session = Depends(get_db)):
     """
-    Migração V12: Cria a tabela launch_strategy_config para o novo módulo de Lançamentos.
-    Acesse UMA VEZ após deploy: https://zenyx-gbs-testesv1-production.up.railway.app/migrate-launch-strategy-v12
+    Migração V12: Cria a tabela launch_strategy_config e adiciona colunas de delay/aprovação.
     """
     try:
         from sqlalchemy import text
@@ -23073,10 +23221,27 @@ async def migrate_launch_strategy_v12(db: Session = Depends(get_db)):
         except Exception as e:
             db.rollback()
             log_msgs.append(f"⚠️ Erro ao criar launch_strategy_config: {str(e)}")
-        
+
+        # 2. Adiciona as Novas Colunas
+        novas_colunas = [
+            ("delay_aprovacao_segundos", "INTEGER DEFAULT 0"),
+            ("msg_aprovacao_texto", "TEXT DEFAULT 'PARABÉNS VOCÊ FOI APROVADO EM NOSSO VIP 🎉\n\nCLIQUE ABAIXO PARA ACESSAR O NOSSO GRUPINHO SECRETO 👇🏼\n\nENTRE AGORA!! SE SAIR NÃO TEM VOLTA!!'"),
+            ("msg_aprovacao_media", "VARCHAR"),
+            ("msg_aprovacao_btn", "VARCHAR DEFAULT '🔥 ENTRAR NO VIP'")
+        ]
+
+        for col_name, col_type in novas_colunas:
+            try:
+                db.execute(text(f"ALTER TABLE launch_strategy_config ADD COLUMN {col_name} {col_type}"))
+                db.commit()
+                log_msgs.append(f"✅ Coluna {col_name} adicionada com sucesso.")
+            except Exception as e:
+                db.rollback()
+                log_msgs.append(f"ℹ️ Coluna {col_name} já existe ou falhou: {str(e)}")
+
         return {
             "status": "success",
-            "message": "🚀 Migração V12 (Estratégia de Lançamento) concluída!",
+            "message": "🚀 Migração V12 concluída com sucesso!",
             "details": log_msgs
         }
     except Exception as e:

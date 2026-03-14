@@ -225,6 +225,12 @@ class LaunchStrategyConfig(Base):
     media_url = Column(String, nullable=True)
     btn_text = Column(String, default="🔓 RESGATAR CONVITE VIP")
     
+    # 🚀 NOVO PASSO (Aprovação VIP Imediata)
+    delay_aprovacao_segundos = Column(Integer, default=0) # 🔥 NOVO: Tempo de espera para aprovar (em segundos)
+    msg_aprovacao_texto = Column(Text, default="PARABÉNS {first_name} VOCÊ FOI APROVADO EM NOSSO VIP 🎉\n\nCLIQUE ABAIXO PARA ACESSAR O NOSSO GRUPINHO SECRETO 👇🏼\n\nENTRE AGORA!! SE SAIR NÃO TEM VOLTA!!")
+    msg_aprovacao_media = Column(String, nullable=True)
+    msg_aprovacao_btn = Column(String, default="🔥 ENTRAR NO VIP")
+    
     # 2. Configuração do Cronômetro
     tempo_vip_minutos = Column(Integer, default=1)  # Tempo de degustação no canal (Ex: 1 min, 60 min, etc)
     
