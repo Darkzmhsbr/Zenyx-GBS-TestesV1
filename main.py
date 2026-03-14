@@ -10907,7 +10907,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         message = update.message if update.message else None
         
         # ========================================
-        # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE
+        # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE / LANÇAMENTO
         # ========================================
         if update.chat_join_request:
             try:
@@ -10917,6 +10917,47 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 user_name = join_request.from_user.first_name if join_request.from_user.first_name else ""
                 username = join_request.from_user.username
                 
+                # --- 🚀 MUDANÇA: É O CANAL VIP? SE SIM, É LANÇAMENTO! ---
+                canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
+                
+                if canal_id == canal_vip_id:
+                    # Verifica se o lançamento está ativo
+                    launch_cfg = db.query(LaunchStrategyConfig).filter(
+                        LaunchStrategyConfig.bot_id == bot_db.id,
+                        LaunchStrategyConfig.ativo == True
+                    ).first()
+                    
+                    if launch_cfg:
+                        logger.info(f"🚀 [LANÇAMENTO] Pedido de entrada detectado de {user_name} ({user_id})")
+                        
+                        # Aprova na hora!
+                        try:
+                            bot_temp.approve_chat_join_request(int(canal_id), user_id)
+                            logger.info(f"🚀 [LANÇAMENTO] Usuário {user_id} APROVADO para a degustação no canal {canal_id}!")
+                        except Exception as e_app:
+                            logger.error(f"❌ [LANÇAMENTO] Erro ao aprovar usuário: {e_app}")
+                        
+                        # Agenda a expulsão e o envio da oferta no privado
+                        if launch_cfg.tempo_vip_minutos > 0:
+                            try:
+                                run_date = now_brazil() + timedelta(minutes=launch_cfg.tempo_vip_minutos)
+                                job_id = f"kick_launch_{canal_vip_id}_{user_id}"
+                                
+                                scheduler.add_job(
+                                    expulsar_usuario_lancamento,
+                                    'date',
+                                    run_date=run_date,
+                                    args=[token, canal_vip_id, user_id, bot_db.id],
+                                    id=job_id,
+                                    replace_existing=True
+                                )
+                                logger.info(f"⏰ [LANÇAMENTO] Expulsão agendada para daqui a {launch_cfg.tempo_vip_minutos} min. ({user_name})")
+                            except Exception as e_sched:
+                                logger.error(f"❌ Erro ao agendar expulsão do lançamento: {e_sched}")
+                        
+                        return {"status": "ok", "message": "Lançamento processado"}
+
+                # --- 🆓 SE NÃO FOR O VIP, CAI NA LÓGICA DO CANAL FREE NORMAL ---
                 logger.info(f"🆓 [CANAL FREE] Solicitação de entrada - User: {user_name} ({user_id}), Canal: {canal_id}")
                 
                 # 🔥 FIX: DEDUPLICAÇÃO - Se já existe um job agendado para este usuário/canal, ignora
@@ -11109,90 +11150,70 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 return {"status": "error", "message": str(e_free)}
         
         # ----------------------------------------
-        # 🚪 1. O PORTEIRO (GATEKEEPER)
+        # 🚪 1. O PORTEIRO (GATEKEEPER CLÁSSICO)
         # ----------------------------------------
-        
-        # 1.1 - Captura de Evento de Entrada
-        novo_membro_id = None
-        chat_id_entrada = None
-        
-        # A) Se for um GRUPO (o Telegram manda message.new_chat_members)
         if message and message.new_chat_members:
-            chat_id_entrada = str(message.chat.id)
-            for member in message.new_chat_members:
-                if not member.is_bot:
-                    novo_membro_id = member.id
-                    break # Pega o primeiro humano
-        
-        # B) Se for um CANAL (o Telegram manda update.chat_member)
-        elif update.chat_member:
-            new_status = update.chat_member.new_chat_member.status
-            old_status = update.chat_member.old_chat_member.status
-            
-            if new_status == 'member' and old_status != 'member':
-                chat_id_entrada = str(update.chat_member.chat.id)
-                if not update.chat_member.new_chat_member.user.is_bot:
-                    novo_membro_id = update.chat_member.new_chat_member.user.id
-
-        # 1.2 - Processa a Entrada
-        if novo_membro_id and chat_id_entrada:
+            chat_id = str(message.chat.id)
             canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
             
-            if chat_id_entrada == canal_vip_id:
-                # Verifica pagamento
-                pedido = db.query(Pedido).filter(
-                    Pedido.bot_id == bot_db.id,
-                    Pedido.telegram_id == str(novo_membro_id),
-                    Pedido.status.in_(['paid', 'approved'])
-                ).order_by(desc(Pedido.created_at)).first()
-                
-                allowed = False
-                if pedido:
-                    if pedido.data_expiracao:
-                        if now_brazil() < pedido.data_expiracao: allowed = True
-                    elif pedido.plano_nome:
-                        nm = pedido.plano_nome.lower()
-                        if "vital" in nm or "mega" in nm or "eterno" in nm: allowed = True
-                        else:
-                            d = 30
-                            if "diario" in nm or "24" in nm: d = 1
-                            elif "semanal" in nm: d = 7
-                            elif "trimestral" in nm: d = 90
-                            elif "anual" in nm: d = 365
-                            if pedido.created_at and now_brazil() < (pedido.created_at + timedelta(days=d)): allowed = True
-                
-                if not allowed:
-                    # 🚀 NOVA LÓGICA: VERIFICA SE É ESTRATÉGIA DE LANÇAMENTO (DEGUSTAÇÃO)
-                    launch_cfg = db.query(LaunchStrategyConfig).filter(
-                        LaunchStrategyConfig.bot_id == bot_db.id,
-                        LaunchStrategyConfig.ativo == True
-                    ).first()
+            if chat_id == canal_vip_id:
+                for member in message.new_chat_members:
+                    if member.is_bot: continue
+                    
+                    # Verifica pagamento
+                    pedido = db.query(Pedido).filter(
+                        Pedido.bot_id == bot_db.id,
+                        Pedido.telegram_id == str(member.id),
+                        Pedido.status.in_(['paid', 'approved'])
+                    ).order_by(desc(Pedido.created_at)).first()
+                    
+                    allowed = False
+                    if pedido:
+                        if pedido.data_expiracao:
+                            if now_brazil() < pedido.data_expiracao: allowed = True
+                        elif pedido.plano_nome:
+                            nm = pedido.plano_nome.lower()
+                            if "vital" in nm or "mega" in nm or "eterno" in nm: allowed = True
+                            else:
+                                d = 30
+                                if "diario" in nm or "24" in nm: d = 1
+                                elif "semanal" in nm: d = 7
+                                elif "trimestral" in nm: d = 90
+                                elif "anual" in nm: d = 365
+                                if pedido.created_at and now_brazil() < (pedido.created_at + timedelta(days=d)): allowed = True
+                    
+                    if not allowed:
+                        # 🚀 NOVA LÓGICA: VERIFICA SE É ESTRATÉGIA DE LANÇAMENTO (Grupos e Adição Manual)
+                        launch_cfg = db.query(LaunchStrategyConfig).filter(
+                            LaunchStrategyConfig.bot_id == bot_db.id,
+                            LaunchStrategyConfig.ativo == True
+                        ).first()
 
-                    if launch_cfg and launch_cfg.tempo_vip_minutos > 0:
-                        # MODO DEGUSTAÇÃO: Agenda a expulsão em X minutos
-                        try:
-                            run_date = now_brazil() + timedelta(minutes=launch_cfg.tempo_vip_minutos)
-                            job_id = f"kick_launch_{canal_vip_id}_{novo_membro_id}"
-                            
-                            scheduler.add_job(
-                                expulsar_usuario_lancamento,
-                                'date',
-                                run_date=run_date,
-                                args=[token, canal_vip_id, novo_membro_id, bot_db.id],
-                                id=job_id,
-                                replace_existing=True
-                            )
-                            logger.info(f"🚀 [LANÇAMENTO] Usuário {novo_membro_id} entrou na degustação. Expulsão agendada para {launch_cfg.tempo_vip_minutos} min.")
-                        except Exception as e_sched:
-                            logger.error(f"❌ Erro ao agendar expulsão do lançamento: {e_sched}")
-                    else:
-                        # LÓGICA PADRÃO: Expulsa na hora
-                        try:
-                            bot_temp.ban_chat_member(chat_id_entrada, novo_membro_id)
-                            bot_temp.unban_chat_member(chat_id_entrada, novo_membro_id)
-                            try: bot_temp.send_message(novo_membro_id, "🚫 <b>Acesso Negado.</b>\nPor favor, realize o pagamento.", parse_mode="HTML")
+                        if launch_cfg and launch_cfg.tempo_vip_minutos > 0:
+                            # MODO DEGUSTAÇÃO: Agenda a expulsão em X minutos
+                            try:
+                                run_date = now_brazil() + timedelta(minutes=launch_cfg.tempo_vip_minutos)
+                                job_id = f"kick_launch_{canal_vip_id}_{member.id}"
+                                
+                                scheduler.add_job(
+                                    expulsar_usuario_lancamento,
+                                    'date',
+                                    run_date=run_date,
+                                    args=[token, canal_vip_id, member.id, bot_db.id],
+                                    id=job_id,
+                                    replace_existing=True
+                                )
+                                logger.info(f"🚀 [LANÇAMENTO] Usuário {member.id} entrou na degustação (Via Grupo). Expulsão em {launch_cfg.tempo_vip_minutos} min.")
+                            except Exception as e_sched:
+                                logger.error(f"❌ Erro ao agendar expulsão do lançamento: {e_sched}")
+                        else:
+                            # LÓGICA PADRÃO: Expulsa na hora
+                            try:
+                                bot_temp.ban_chat_member(chat_id, member.id)
+                                bot_temp.unban_chat_member(chat_id, member.id)
+                                try: bot_temp.send_message(member.id, "🚫 <b>Acesso Negado.</b>\nPor favor, realize o pagamento.", parse_mode="HTML")
+                                except: pass
                             except: pass
-                        except: pass
             
             return {"status": "checked"}
 
@@ -11509,19 +11530,20 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     try: bot_temp.unban_chat_member(canal_vip_id, chat_id)
                     except: pass
                     
-                    # Gera link de 1 uso exclusivo para o usuário
+                    # 🔥 MUDANÇA MESTRE: creates_join_request=True 
+                    # Força o Telegram a avisar o bot EXATAMENTE na hora que o usuário tenta entrar!
                     convite = bot_temp.create_chat_invite_link(
                         chat_id=canal_vip_id, 
-                        member_limit=1, 
-                        name=f"VIP {first_name}"
+                        creates_join_request=True,
+                        name=f"VIP Lançamento {first_name}"
                     )
                     
-                    msg_link = f"🎉 <b>SEU CONVITE ESTÁ PRONTO!</b>\n\nEste link é de uso único e exclusivo para você. Clique abaixo para entrar agora!\n\n👉 {convite.invite_link}"
+                    msg_link = f"🎉 <b>SEU CONVITE ESTÁ PRONTO!</b>\n\nEste link é exclusivo para você. Clique abaixo, solicite a entrada e o acesso será liberado instantaneamente pelo sistema!\n\n👉 {convite.invite_link}"
                     bot_temp.send_message(chat_id, msg_link, parse_mode="HTML")
-                    logger.info(f"🚀 [LANÇAMENTO] Link gerado para {first_name} ({chat_id})")
+                    logger.info(f"🚀 [LANÇAMENTO] Link com request gerado para {first_name} ({chat_id})")
                 except Exception as e:
                     logger.error(f"❌ Erro ao gerar link de lançamento: {e}")
-                    try: bot_temp.send_message(chat_id, "❌ Erro ao gerar seu convite. O canal VIP está configurado corretamente?")
+                    try: bot_temp.send_message(chat_id, "❌ Erro ao gerar seu convite. O bot precisa ser Admin do Canal com permissão para Adicionar Usuários via Link.")
                     except: pass
                 
                 return {"status": "ok"}
