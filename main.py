@@ -10930,12 +10930,20 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     if launch_cfg:
                         logger.info(f"🚀 [LANÇAMENTO] Pedido de entrada detectado de {user_name} ({user_id})")
                         
-                        # Aprova na hora!
+                        # Aprova a pessoa instantaneamente e QUEIMA O LINK!
                         try:
+                            # 1. Aprova o usuário
                             bot_temp.approve_chat_join_request(int(canal_id), user_id)
                             logger.info(f"🚀 [LANÇAMENTO] Usuário {user_id} APROVADO para a degustação no canal {canal_id}!")
+                            
+                            # 2. 🔥 QUEIMA O LINK (Revoga para nunca mais ser usado)
+                            if join_request.invite_link and join_request.invite_link.invite_link:
+                                link_usado = join_request.invite_link.invite_link
+                                bot_temp.revoke_chat_invite_link(canal_id, link_usado)
+                                logger.info(f"🔥 [LANÇAMENTO] Link QUEIMADO com sucesso! ({link_usado})")
+                                
                         except Exception as e_app:
-                            logger.error(f"❌ [LANÇAMENTO] Erro ao aprovar usuário: {e_app}")
+                            logger.error(f"❌ [LANÇAMENTO] Erro ao aprovar/queimar link: {e_app}")
                         
                         # Agenda a expulsão e o envio da oferta no privado
                         if launch_cfg.tempo_vip_minutos > 0:
@@ -11214,7 +11222,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 try: bot_temp.send_message(member.id, "🚫 <b>Acesso Negado.</b>\nPor favor, realize o pagamento.", parse_mode="HTML")
                                 except: pass
                             except: pass
-            
             return {"status": "checked"}
 
         # ----------------------------------------
