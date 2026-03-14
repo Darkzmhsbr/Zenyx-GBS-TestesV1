@@ -11111,68 +11111,89 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         # ----------------------------------------
         # 🚪 1. O PORTEIRO (GATEKEEPER)
         # ----------------------------------------
+        
+        # 1.1 - Captura de Evento de Entrada
+        novo_membro_id = None
+        chat_id_entrada = None
+        
+        # A) Se for um GRUPO (o Telegram manda message.new_chat_members)
         if message and message.new_chat_members:
-            chat_id = str(message.chat.id)
+            chat_id_entrada = str(message.chat.id)
+            for member in message.new_chat_members:
+                if not member.is_bot:
+                    novo_membro_id = member.id
+                    break # Pega o primeiro humano
+        
+        # B) Se for um CANAL (o Telegram manda update.chat_member)
+        elif update.chat_member:
+            new_status = update.chat_member.new_chat_member.status
+            old_status = update.chat_member.old_chat_member.status
+            
+            if new_status == 'member' and old_status != 'member':
+                chat_id_entrada = str(update.chat_member.chat.id)
+                if not update.chat_member.new_chat_member.user.is_bot:
+                    novo_membro_id = update.chat_member.new_chat_member.user.id
+
+        # 1.2 - Processa a Entrada
+        if novo_membro_id and chat_id_entrada:
             canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
             
-            if chat_id == canal_vip_id:
-                for member in message.new_chat_members:
-                    if member.is_bot: continue
-                    
-                    # Verifica pagamento
-                    pedido = db.query(Pedido).filter(
-                        Pedido.bot_id == bot_db.id,
-                        Pedido.telegram_id == str(member.id),
-                        Pedido.status.in_(['paid', 'approved'])
-                    ).order_by(desc(Pedido.created_at)).first()
-                    
-                    allowed = False
-                    if pedido:
-                        if pedido.data_expiracao:
-                            if now_brazil() < pedido.data_expiracao: allowed = True
-                        elif pedido.plano_nome:
-                            nm = pedido.plano_nome.lower()
-                            if "vital" in nm or "mega" in nm or "eterno" in nm: allowed = True
-                            else:
-                                d = 30
-                                if "diario" in nm or "24" in nm: d = 1
-                                elif "semanal" in nm: d = 7
-                                elif "trimestral" in nm: d = 90
-                                elif "anual" in nm: d = 365
-                                if pedido.created_at and now_brazil() < (pedido.created_at + timedelta(days=d)): allowed = True
-                    
-                    if not allowed:
-                        # 🚀 NOVA LÓGICA: VERIFICA SE É ESTRATÉGIA DE LANÇAMENTO (DEGUSTAÇÃO)
-                        launch_cfg = db.query(LaunchStrategyConfig).filter(
-                            LaunchStrategyConfig.bot_id == bot_db.id,
-                            LaunchStrategyConfig.ativo == True
-                        ).first()
-
-                        if launch_cfg and launch_cfg.tempo_vip_minutos > 0:
-                            # MODO DEGUSTAÇÃO: Agenda a expulsão em X minutos
-                            try:
-                                run_date = now_brazil() + timedelta(minutes=launch_cfg.tempo_vip_minutos)
-                                job_id = f"kick_launch_{canal_vip_id}_{member.id}"
-                                
-                                scheduler.add_job(
-                                    expulsar_usuario_lancamento,
-                                    'date',
-                                    run_date=run_date,
-                                    args=[token, canal_vip_id, member.id, bot_db.id],
-                                    id=job_id,
-                                    replace_existing=True
-                                )
-                                logger.info(f"🚀 [LANÇAMENTO] Usuário {member.id} entrou na degustação. Expulsão agendada para {launch_cfg.tempo_vip_minutos} min.")
-                            except Exception as e_sched:
-                                logger.error(f"❌ Erro ao agendar expulsão do lançamento: {e_sched}")
+            if chat_id_entrada == canal_vip_id:
+                # Verifica pagamento
+                pedido = db.query(Pedido).filter(
+                    Pedido.bot_id == bot_db.id,
+                    Pedido.telegram_id == str(novo_membro_id),
+                    Pedido.status.in_(['paid', 'approved'])
+                ).order_by(desc(Pedido.created_at)).first()
+                
+                allowed = False
+                if pedido:
+                    if pedido.data_expiracao:
+                        if now_brazil() < pedido.data_expiracao: allowed = True
+                    elif pedido.plano_nome:
+                        nm = pedido.plano_nome.lower()
+                        if "vital" in nm or "mega" in nm or "eterno" in nm: allowed = True
                         else:
-                            # LÓGICA PADRÃO: Expulsa na hora
-                            try:
-                                bot_temp.ban_chat_member(chat_id, member.id)
-                                bot_temp.unban_chat_member(chat_id, member.id)
-                                try: bot_temp.send_message(member.id, "🚫 <b>Acesso Negado.</b>\nPor favor, realize o pagamento.", parse_mode="HTML")
-                                except: pass
+                            d = 30
+                            if "diario" in nm or "24" in nm: d = 1
+                            elif "semanal" in nm: d = 7
+                            elif "trimestral" in nm: d = 90
+                            elif "anual" in nm: d = 365
+                            if pedido.created_at and now_brazil() < (pedido.created_at + timedelta(days=d)): allowed = True
+                
+                if not allowed:
+                    # 🚀 NOVA LÓGICA: VERIFICA SE É ESTRATÉGIA DE LANÇAMENTO (DEGUSTAÇÃO)
+                    launch_cfg = db.query(LaunchStrategyConfig).filter(
+                        LaunchStrategyConfig.bot_id == bot_db.id,
+                        LaunchStrategyConfig.ativo == True
+                    ).first()
+
+                    if launch_cfg and launch_cfg.tempo_vip_minutos > 0:
+                        # MODO DEGUSTAÇÃO: Agenda a expulsão em X minutos
+                        try:
+                            run_date = now_brazil() + timedelta(minutes=launch_cfg.tempo_vip_minutos)
+                            job_id = f"kick_launch_{canal_vip_id}_{novo_membro_id}"
+                            
+                            scheduler.add_job(
+                                expulsar_usuario_lancamento,
+                                'date',
+                                run_date=run_date,
+                                args=[token, canal_vip_id, novo_membro_id, bot_db.id],
+                                id=job_id,
+                                replace_existing=True
+                            )
+                            logger.info(f"🚀 [LANÇAMENTO] Usuário {novo_membro_id} entrou na degustação. Expulsão agendada para {launch_cfg.tempo_vip_minutos} min.")
+                        except Exception as e_sched:
+                            logger.error(f"❌ Erro ao agendar expulsão do lançamento: {e_sched}")
+                    else:
+                        # LÓGICA PADRÃO: Expulsa na hora
+                        try:
+                            bot_temp.ban_chat_member(chat_id_entrada, novo_membro_id)
+                            bot_temp.unban_chat_member(chat_id_entrada, novo_membro_id)
+                            try: bot_temp.send_message(novo_membro_id, "🚫 <b>Acesso Negado.</b>\nPor favor, realize o pagamento.", parse_mode="HTML")
                             except: pass
+                        except: pass
+            
             return {"status": "checked"}
 
         # ----------------------------------------
