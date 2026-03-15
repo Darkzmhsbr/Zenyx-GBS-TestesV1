@@ -11050,11 +11050,9 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 user_name = join_request.from_user.first_name if join_request.from_user.first_name else ""
                 username = join_request.from_user.username
                 
-                # --- 🚀 MUDANÇA: É O CANAL VIP? SE SIM, É LANÇAMENTO! ---
                 canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
                 
                 if canal_id == canal_vip_id:
-                    # Verifica se o lançamento está ativo
                     launch_cfg = db.query(LaunchStrategyConfig).filter(
                         LaunchStrategyConfig.bot_id == bot_db.id,
                         LaunchStrategyConfig.ativo == True
@@ -11063,7 +11061,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     if launch_cfg:
                         logger.info(f"🚀 [LANÇAMENTO] Pedido de entrada detectado de {user_name} ({user_id})")
                         
-                        # 🔥 TRAVA DE SEGURANÇA DUPLA NA PORTA DO CANAL
+                        # 🔥 TRAVA DE SEGURANÇA DUPLA NA PORTA DO CANAL (Bloqueia repetição de Degustação)
                         ja_degustou = db.query(Pedido).filter(
                             Pedido.bot_id == bot_db.id,
                             Pedido.telegram_id == str(user_id),
@@ -11078,7 +11076,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             except: pass
                             return {"status": "ok", "message": "Já degustou"}
 
-                        # 👉 REGISTRA QUE O USUÁRIO ENTROU NA DEGUSTAÇÃO (Para não entrar de novo)
+                        # 👉 REGISTRA QUE O USUÁRIO ENTROU NA DEGUSTAÇÃO
                         try:
                             import time
                             registro_degustacao = Pedido(
@@ -11092,21 +11090,19 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             db.rollback()
                             logger.error(f"Erro ao registrar degustação: {e_reg}")
 
-                        # Aprova a pessoa instantaneamente e QUEIMA O LINK!
                         try:
                             # 1. Aprova o usuário
                             bot_temp.approve_chat_join_request(int(canal_id), user_id)
                             logger.info(f"🚀 [LANÇAMENTO] Usuário {user_id} APROVADO para a degustação no canal {canal_id}!")
                             
-                            # 2. 🔥 QUEIMA O LINK (Revoga para nunca mais ser usado)
+                            # 2. 🔥 QUEIMA O LINK
                             if join_request.invite_link and join_request.invite_link.invite_link:
                                 link_usado = join_request.invite_link.invite_link
                                 try:
                                     bot_temp.revoke_chat_invite_link(canal_id, link_usado)
-                                    logger.info(f"🔥 [LANÇAMENTO] Link QUEIMADO com sucesso! ({link_usado})")
                                 except: pass
                                 
-                            # 3. 🚀 ENVIA MENSAGEM DE BOAS-VINDAS IMEDIATA
+                            # 3. ENVIA MENSAGEM DE BOAS-VINDAS IMEDIATA
                             msg_aprovacao = launch_cfg.msg_aprovacao_texto or f"PARABÉNS {user_name} VOCÊ FOI APROVADO EM NOSSO VIP 🎉\n\nCLIQUE ABAIXO PARA ACESSAR O NOSSO GRUPINHO SECRETO 👇🏼\n\nENTRE AGORA!! SE SAIR NÃO TEM VOLTA!!"
                             msg_aprovacao = msg_aprovacao.replace("{first_name}", user_name)
                             str_user = f"@{username}" if username else ""
@@ -11152,12 +11148,14 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 try:
                                     run_date = now_brazil() + timedelta(seconds=tempo_segundos)
                                     job_id = f"kick_launch_{canal_vip_id}_{user_id}"
-                                    from main import scheduler
-                                    scheduler.add_job(
-                                        expulsar_usuario_lancamento, 'date', run_date=run_date,
-                                        args=[token, canal_vip_id, user_id, bot_db.id],
-                                        id=job_id, replace_existing=True
-                                    )
+                                    try:
+                                        from main import scheduler
+                                        scheduler.add_job(
+                                            expulsar_usuario_lancamento, 'date', run_date=run_date,
+                                            args=[token, canal_vip_id, user_id, bot_db.id],
+                                            id=job_id, replace_existing=True
+                                        )
+                                    except: pass
                                     logger.info(f"⏰ [LANÇAMENTO] Expulsão agendada para daqui a {tempo_segundos} seg.")
                                 except Exception as e_sched:
                                     logger.error(f"❌ Erro ao agendar expulsão: {e_sched}")
@@ -11273,11 +11271,13 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             
                 try:
                     run_date = now_brazil() + timedelta(seconds=config.delay_seconds)
-                    from main import scheduler
-                    scheduler.add_job(
-                        aprovar_entrada_canal_free, 'date', run_date=run_date,
-                        args=[token, canal_id, user_id], id=f"approve_free_{canal_id}_{user_id}", replace_existing=True
-                    )
+                    try:
+                        from main import scheduler
+                        scheduler.add_job(
+                            aprovar_entrada_canal_free, 'date', run_date=run_date,
+                            args=[token, canal_id, user_id], id=f"approve_free_{canal_id}_{user_id}", replace_existing=True
+                        )
+                    except: pass
                 except Exception as e_schedule:
                     logger.error(f"❌ [CANAL FREE] Erro ao agendar aprovação: {e_schedule}")
             
@@ -11330,11 +11330,13 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             try:
                                 run_date = now_brazil() + timedelta(seconds=tempo_seg)
                                 job_id = f"kick_launch_{canal_vip_id}_{member.id}"
-                                from main import scheduler
-                                scheduler.add_job(
-                                    expulsar_usuario_lancamento, 'date', run_date=run_date,
-                                    args=[token, canal_vip_id, member.id, bot_db.id], id=job_id, replace_existing=True
-                                )
+                                try:
+                                    from main import scheduler
+                                    scheduler.add_job(
+                                        expulsar_usuario_lancamento, 'date', run_date=run_date,
+                                        args=[token, canal_vip_id, member.id, bot_db.id], id=job_id, replace_existing=True
+                                    )
+                                except: pass
                             except Exception as e_sched:
                                 logger.error(f"❌ Erro ao agendar expulsão do lançamento: {e_sched}")
                         else:
@@ -11541,7 +11543,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
 
-            # --- 🚀 RESGATAR CONVITE VIP (ESTRATÉGIA DE LANÇAMENTO) ---
             if data == "launch_invite" or data.startswith("launch_invite_"):
                 try:
                     canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
@@ -11557,27 +11558,15 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         try: bot_temp.send_message(chat_id, "❌ <b>ACESSO NEGADO!</b>\n\nVocê já utilizou o seu tempo de degustação VIP gratuito.\nPara ter acesso, adquira um plano definitivo no menu.", parse_mode="HTML")
                         except: pass
                         return {"status": "ok"}
-                    
-                    # Tenta desbanir caso ele já tenha sido chutado antes, para permitir que ele use o link
+
                     try: bot_temp.unban_chat_member(canal_vip_id, chat_id)
                     except: pass
                     
-                    # 🔥 MUDANÇA MESTRE: creates_join_request=True 
-                    # Força o Telegram a avisar o bot EXATAMENTE na hora que o usuário tenta entrar!
-                    convite = bot_temp.create_chat_invite_link(
-                        chat_id=canal_vip_id, 
-                        creates_join_request=True,
-                        name=f"VIP Lançamento {first_name}"
-                    )
-                    
-                    msg_link = f"🎉 <b>SEU CONVITE ESTÁ PRONTO!</b>\n\nEste link é exclusivo para você. Clique abaixo, solicite a entrada e o acesso será liberado instantaneamente pelo sistema!\n\n👉 {convite.invite_link}"
-                    bot_temp.send_message(chat_id, msg_link, parse_mode="HTML")
-                    logger.info(f"🚀 [LANÇAMENTO] Link com request gerado para {first_name} ({chat_id})")
+                    convite = bot_temp.create_chat_invite_link(chat_id=canal_vip_id, creates_join_request=True, name=f"VIP {first_name}")
+                    bot_temp.send_message(chat_id, f"🎉 <b>SEU CONVITE ESTÁ PRONTO!</b>\n\nEste link é exclusivo para você. Clique abaixo, solicite a entrada e o acesso será liberado instantaneamente pelo sistema!\n\n👉 {convite.invite_link}", parse_mode="HTML")
                 except Exception as e:
-                    logger.error(f"❌ Erro ao gerar link de lançamento: {e}")
-                    try: bot_temp.send_message(chat_id, "❌ Erro ao gerar seu convite. O bot precisa ser Admin do Canal com permissão para Adicionar Usuários via Link.")
+                    try: bot_temp.send_message(chat_id, "❌ Erro ao gerar seu convite. O bot precisa ser Admin do Canal.")
                     except: pass
-                
                 return {"status": "ok"}
 
             payment_prefixes = ("checkout_", "checkout_promo_", "remarketing_plano_", "bump_yes_", "bump_no_", "upsell_accept_", "downsell_accept_")
@@ -11923,8 +11912,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         else:
                             msg_pix = f"🔥 <b>OFERTA ESPECIAL!</b>\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n{oferta_block}\n\n🔐 Pix Copia e Cola:\n<pre>{qr}</pre>\n\n⚡ Acesso automático!"
                         
-                        alternar_mensagens_pagamento(bot_temp, chat_id, bot_db.id)
-                        agendar_remarketing_automatico(bot_temp, chat_id, bot_db.id)
+                        try:
+                            alternar_mensagens_pagamento(bot_temp, chat_id, bot_db.id)
+                            agendar_remarketing_automatico(bot_temp, chat_id, bot_db.id)
+                        except: pass
                         
                         msg_pix = convert_premium_emojis(msg_pix)
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
