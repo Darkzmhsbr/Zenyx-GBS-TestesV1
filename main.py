@@ -11569,124 +11569,275 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     except: pass
                 return {"status": "ok"}
 
+            # ==============================================================================
+            # 🛡️ MOTOR DO ESCUDO ANTI-CURIOSOS (RECURSO PRIME)
+            # ==============================================================================
+            # Intercepta qualquer clique que vá gerar um novo PIX
             payment_prefixes = ("checkout_", "checkout_promo_", "remarketing_plano_", "bump_yes_", "bump_no_", "upsell_accept_", "downsell_accept_")
+            
             if any(data.startswith(p) for p in payment_prefixes):
                 if getattr(bot_db, 'escudo_ativo', False):
                     limite_pix = getattr(bot_db, 'escudo_limite_pix', 5)
-                    pendentes_count = db.query(Pedido).filter(Pedido.bot_id == bot_db.id, Pedido.telegram_id == str(chat_id), Pedido.status == 'pending').count()
+                    
+                    # Conta quantos PIX pendentes esse usuário já tem neste bot
+                    pendentes_count = db.query(Pedido).filter(
+                        Pedido.bot_id == bot_db.id,
+                        Pedido.telegram_id == str(chat_id),
+                        Pedido.status == 'pending'
+                    ).count()
+                    
                     if pendentes_count >= limite_pix:
+                        logger.warning(f"🛡️ [ESCUDO ATIVADO] Usuário {chat_id} bloqueado. Tentativas pendentes: {pendentes_count}/{limite_pix}")
                         try:
                             bot_temp.answer_callback_query(update.callback_query.id, "⚠️ Limite de PIX atingido!", show_alert=True)
-                            bot_temp.send_message(chat_id, f"🛡️ <b>AÇÃO BLOQUEADA</b>\n\nVocê já gerou <b>{pendentes_count} pedidos de PIX</b> e não realizou o pagamento.\n\nPor favor, pague um dos seus PIX anteriores.", parse_mode="HTML")
+                            bot_temp.send_message(
+                                chat_id, 
+                                f"🛡️ <b>AÇÃO BLOQUEADA</b>\n\nVocê já gerou <b>{pendentes_count} pedidos de PIX</b> recentemente e não realizou o pagamento.\n\nPara evitar fraudes e custos para a loja, o sistema bloqueou novas tentativas.\n\n👉 <i>Por favor, pague um dos seus PIX anteriores ou aguarde algumas horas para tentar novamente.</i>", 
+                                parse_mode="HTML"
+                            )
                         except: pass
                         return {"status": "blocked_by_shield"}
 
+            # --- 🔄 VERIFICAR PAGAMENTO (check_payment_) ---
             if data.startswith("check_payment_"):
                 try:
                     txid = data.replace("check_payment_", "").strip()
-                    if not txid: return {"status": "ok"}
                     
-                    pedido = db.query(Pedido).filter((Pedido.transaction_id == txid) | (Pedido.txid == txid)).first()
+                    if not txid:
+                        try:
+                            bot_temp.answer_callback_query(
+                                update.callback_query.id,
+                                text="❌ Código de transação inválido.",
+                                show_alert=True
+                            )
+                        except Exception as e_net:
+                            logger.warning(f"⚠️ Aviso de rede ignorado: {e_net}")
+                        return {"status": "ok"}
+                    
+                    # Busca o pedido no banco
+                    pedido = db.query(Pedido).filter(
+                        (Pedido.transaction_id == txid) | (Pedido.txid == txid)
+                    ).first()
+                    
                     if not pedido:
-                        try: bot_temp.answer_callback_query(update.callback_query.id, text="❌ Transação não encontrada.", show_alert=True)
-                        except: pass
+                        try:
+                            bot_temp.answer_callback_query(
+                                update.callback_query.id,
+                                text="❌ Transação não encontrada. Tente novamente mais tarde.",
+                                show_alert=True
+                            )
+                        except Exception as e_net:
+                            logger.warning(f"⚠️ Aviso de rede ignorado: {e_net}")
                         return {"status": "ok"}
                     
                     status = str(pedido.status).lower() if pedido.status else "pending"
                     
                     if status in ['paid', 'active', 'approved', 'completed', 'succeeded']:
-                        try: bot_temp.answer_callback_query(update.callback_query.id, text="✅ Pagamento CONFIRMADO! Acesso liberado.", show_alert=True)
-                        except: pass
+                        # ✅ Pagamento confirmado
+                        try:
+                            bot_temp.answer_callback_query(
+                                update.callback_query.id,
+                                text="✅ Pagamento CONFIRMADO! Seu acesso está sendo liberado.",
+                                show_alert=True
+                            )
+                        except Exception as e_net:
+                            logger.warning(f"⚠️ Aviso de rede ignorado: {e_net}")
                     elif status == 'expired':
-                        try: bot_temp.answer_callback_query(update.callback_query.id, text="⏰ PIX expirado! Gere um novo.", show_alert=True)
-                        except: pass
+                        # ⏰ PIX expirado
+                        try:
+                            bot_temp.answer_callback_query(
+                                update.callback_query.id,
+                                text="⏰ Este PIX expirou! Por favor, gere um novo pagamento.",
+                                show_alert=True
+                            )
+                        except Exception as e_net:
+                            logger.warning(f"⚠️ Aviso de rede ignorado: {e_net}")
                     else:
-                        try: bot_temp.answer_callback_query(update.callback_query.id, text="⏳ Pagamento NÃO identificado. Aguarde...", show_alert=True)
-                        except: pass
+                        # ⏳ Ainda pendente
+                        try:
+                            bot_temp.answer_callback_query(
+                                update.callback_query.id,
+                                text="⏳ Pagamento ainda NÃO identificado.\n\nSe você já pagou, aguarde alguns instantes e tente novamente. O sistema verifica automaticamente.",
+                                show_alert=True
+                            )
+                        except Exception as e_net:
+                            logger.warning(f"⚠️ Aviso de rede ignorado: {e_net}")
+                    
                 except Exception as e:
-                    try: bot_temp.answer_callback_query(update.callback_query.id, text="❌ Erro ao verificar pagamento.", show_alert=True)
+                    logger.error(f"❌ Erro no handler check_payment_: {e}", exc_info=True)
+                    try:
+                        bot_temp.answer_callback_query(
+                            update.callback_query.id,
+                            text="❌ Erro ao verificar pagamento. Tente novamente.",
+                            show_alert=True
+                        )
                     except: pass
+                
                 return {"status": "ok"}
 
+            # --- A) NAVEGAÇÃO (step_) COM AUTO-DESTRUIÇÃO INTELIGENTE ---
+
+            # --- 🎯 SIMULAÇÃO DE COPY INTERATIVA (simcopy_) ---
             elif data.startswith("simcopy_"):
                 try:
                     parts = data.split("_")
+                    
+                    # Format: simcopy_{session_id}_plan_{plan_id} (seleção de plano)
                     if len(parts) >= 4 and parts[2] == "plan":
                         session_id = parts[1]
                         plan_id = int(parts[3])
-                        with _simcopy_lock: session = _simcopy_sessions.get(session_id)
+                        
+                        with _simcopy_lock:
+                            session = _simcopy_sessions.get(session_id)
+                        
                         if session:
                             try:
+                                # Busca o plano no banco
                                 _db = SessionLocal()
                                 plano = _db.query(PlanoConfig).filter(PlanoConfig.id == plan_id).first()
                                 _db.close()
+                                
                                 if plano:
                                     bot_s = TeleBot(session['bot_token'], threaded=False)
+                                    admin = session['admin_id']
+                                    protect = session.get('protect', False)
+                                    
+                                    # Gera PIX FAKE (código fictício, sem cobrança real)
                                     import random, string
                                     fake_pix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=60))
+                                    fake_txid = f"SIM{random.randint(100000, 999999)}"
                                     valor_fmt = f"{plano.preco_atual:.2f}".replace('.', ',')
+                                    
+                                    # Usa a mensagem PIX personalizada da sessão ou padrão
                                     msg_pix_template = session.get('msg_pix_custom', '')
+                                    
                                     oferta_block = f"💰 Valor: <b>R$ {valor_fmt}</b>"
                                     
                                     if msg_pix_template:
-                                        msg_pix = msg_pix_template.replace("{nome}", "Usuário Teste").replace("{plano}", plano.nome_exibicao).replace("{valor}", valor_fmt).replace("{oferta}", oferta_block)
-                                        if "{qrcode}" in msg_pix: msg_pix = msg_pix.replace("{qrcode}", f"<pre>{fake_pix}</pre>")
-                                        else: msg_pix += f"\n\n👇 Copie:\n<pre>{fake_pix}</pre>"
+                                        msg_pix = msg_pix_template                                            .replace("{nome}", "Usuário Teste")                                            .replace("{first_name}", "Usuário Teste")                                            .replace("{plano}", plano.nome_exibicao)                                            .replace("{valor}", valor_fmt)                                            .replace("{oferta}", oferta_block)
+                                        
+                                        if "{qrcode}" in msg_pix:
+                                            msg_pix = msg_pix.replace("{qrcode}", f"<pre>{fake_pix}</pre>")
+                                        else:
+                                            msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{fake_pix}</pre>"
                                     else:
-                                        msg_pix = f"⭐️ <b>Pagamento gerado:</b>\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n{oferta_block}\n\n<pre>{fake_pix}</pre>"
+                                        msg_pix = f"⭐️ <b>Seu pagamento foi gerado:</b>\n\n"
+                                        msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                                        msg_pix += f"{oferta_block}\n\n"
+                                        msg_pix += f"⬇️ Toque para copiar\n\n"
+                                        msg_pix += f"<pre>{fake_pix}</pre>\n\n"
+                                        msg_pix += f"🔐 Pix Copia e Cola:\n"
+                                        msg_pix += f"⚡️ Acesso automático!"
                                     
                                     msg_pix = convert_premium_emojis(msg_pix)
+                                    
+                                    # Botão de verificar pagamento (fake, apenas visual)
                                     markup_pix = types.InlineKeyboardMarkup()
-                                    markup_pix.add(types.InlineKeyboardButton("✅ Verificar (Simulação)", callback_data=f"simcopy_{session_id}_pix_done"))
-                                    bot_s.send_message(session['admin_id'], msg_pix, parse_mode="HTML", reply_markup=markup_pix, protect_content=session.get('protect', False))
-                            except Exception as e: pass
+                                    markup_pix.add(types.InlineKeyboardButton(
+                                        "✅ Verificar Pagamento (Simulação)",
+                                        callback_data=f"simcopy_{session_id}_pix_done"
+                                    ))
+                                    
+                                    bot_s.send_message(admin, msg_pix, parse_mode="HTML", reply_markup=markup_pix, protect_content=protect)
+                            except Exception as e:
+                                logger.error(f"❌ [SIMCOPY] Erro ao gerar PIX fake: {e}")
+                    
+                    # Format: simcopy_{session_id}_pix_done (verificar pagamento fake)
                     elif len(parts) >= 4 and parts[2] == "pix" and parts[3] == "done":
                         session_id = parts[1]
-                        with _simcopy_lock: session = _simcopy_sessions.get(session_id)
+                        with _simcopy_lock:
+                            session = _simcopy_sessions.get(session_id)
                         if session:
                             try:
                                 bot_s = TeleBot(session['bot_token'], threaded=False)
-                                bot_s.send_message(session['admin_id'], "✅ <b>Pagamento SIMULADO!</b>\nCopy testada com sucesso!", parse_mode="HTML")
+                                admin = session['admin_id']
+                                
+                                bot_s.send_message(
+                                    admin,
+                                    "✅ <b>Pagamento SIMULADO confirmado!</b>\n\n"
+                                    "🎉 Na vida real, o cliente receberia o acesso ao grupo VIP automaticamente neste momento.\n\n"
+                                    f"{'─' * 30}\n\n"
+                                    "✅ <b>Simulação interativa concluída!</b>\n"
+                                    "🎨 Copy personalizada testada com sucesso!",
+                                    parse_mode="HTML"
+                                )
+                                
+                                # Limpa sessão
                                 with _simcopy_lock:
-                                    if session_id in _simcopy_sessions: del _simcopy_sessions[session_id]
-                            except Exception as e: pass
+                                    if session_id in _simcopy_sessions:
+                                        del _simcopy_sessions[session_id]
+                            except Exception as e:
+                                logger.error(f"❌ [SIMCOPY] Erro no pix_done: {e}")
+                    
+                    # Format: simcopy_{session_id}_{step_index} (avançar step normal)
                     elif len(parts) >= 3:
                         session_id = parts[1]
                         next_step = int(parts[2])
+                        
+                        # Autodestruir mensagem anterior se configurado
                         with _simcopy_lock:
                             session = _simcopy_sessions.get(session_id)
                             if session:
                                 for sm in session.get('sent_message_ids', []):
                                     if sm.get('autodestruir'):
-                                        try: bot_temp.delete_message(sm['chat_id'], sm['msg_id'])
+                                        try:
+                                            bot_temp.delete_message(sm['chat_id'], sm['msg_id'])
                                         except: pass
+                                # Limpa as mensagens enviadas até agora
                                 session['sent_message_ids'] = []
+                        
+                        # Envia próximo passo em thread separada para não bloquear
                         from concurrent.futures import ThreadPoolExecutor
                         executor = ThreadPoolExecutor(max_workers=1)
                         executor.submit(_simcopy_send_step, session_id, next_step)
                         executor.shutdown(wait=False)
-                except Exception as e: pass
+                    else:
+                        logger.warning(f"⚠️ [SIMCOPY] Callback mal formatado: {data}")
+                except Exception as e:
+                    logger.error(f"❌ [SIMCOPY] Erro no callback: {e}")
 
             elif data.startswith("step_"):
                 try: current_step = int(data.split("_")[1])
                 except: current_step = 1
                 
+                # Carrega todos os passos
                 steps = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_db.id).order_by(BotFlowStep.step_order).all()
                 target_step = None
                 is_last = False
                 
+                # ==============================================================================
+                # 🗑️ GUILHOTINA: LÓGICA DE LIMPEZA IMEDIATA AO CLICAR
+                # ==============================================================================
                 msg_anterior_id = update.callback_query.message.message_id
                 
+                # CASO 1: O usuário clicou no botão da MENSAGEM DE BOAS VINDAS (indo para o passo 1)
                 if current_step == 1:
-                    try: bot_temp.delete_message(chat_id, msg_anterior_id)
-                    except: pass
-                elif current_step > 1:
-                    prev_index = current_step - 2
-                    if prev_index >= 0 and prev_index < len(steps):
-                        if steps[prev_index].autodestruir:
-                            try: bot_temp.delete_message(chat_id, msg_anterior_id)
-                            except: pass
+                    # A mensagem de boas-vindas agora SÓ é deletada quando o usuário clica (sem timer paralelo)
+                    # Isso resolve o bug onde a mensagem sumia antes do usuário clicar, parando o fluxo
+                    try: 
+                        bot_temp.delete_message(chat_id, msg_anterior_id)
+                        logger.info(f"🗑️ Mensagem de Boas-Vindas deletada IMEDIATAMENTE após clique.")
+                    except Exception as e: 
+                        # Falha silenciosa caso a mensagem já tenha sido deletada manualmente
+                        pass
 
+                # CASO 2: O usuário clicou em um PASSO DO FLUXO (indo para 2, 3...)
+                elif current_step > 1:
+                    # Verifica se o passo ANTERIOR (que o usuário acabou de ler) tinha autodestruir ligado
+                    # Matematica: Se vou pro passo 2 (index 1), o anterior foi o passo 1 (index 0).
+                    # Index do anterior = current_step - 2
+                    prev_index = current_step - 2
+                    
+                    if prev_index >= 0 and prev_index < len(steps):
+                        passo_anterior = steps[prev_index]
+                        if passo_anterior.autodestruir:
+                            try:
+                                bot_temp.delete_message(chat_id, msg_anterior_id)
+                                logger.info(f"🗑️ Passo {passo_anterior.step_order} deletado IMEDIATAMENTE após clique.")
+                            except: pass
+                # ==============================================================================
+
+                # Define qual é o PRÓXIMO passo a ser enviado
                 if current_step <= len(steps): target_step = steps[current_step - 1]
                 else: is_last = True
 
@@ -11695,153 +11846,276 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     if target_step.mostrar_botao:
                         mk.add(types.InlineKeyboardButton(target_step.btn_texto or "Próximo ▶️", callback_data=f"step_{current_step + 1}"))
                     
+                    # ✨ CONVERTE EMOJIS PREMIUM no texto do step
                     _step_txt = convert_premium_emojis(target_step.msg_texto) if target_step.msg_texto else target_step.msg_texto
                     
+                    sent_msg = None
                     try:
                         if target_step.msg_media:
-                            if target_step.msg_media.lower().endswith(('.mp4', '.mov', '.avi')):
-                                bot_temp.send_video(chat_id, target_step.msg_media, caption=_step_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
+                            media_step_low = target_step.msg_media.lower()
+                            if media_step_low.endswith(('.mp4', '.mov', '.avi')):
+                                sent_msg = bot_temp.send_video(chat_id, target_step.msg_media, caption=_step_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                             elif is_audio_file(target_step.msg_media):
-                                enviar_audio_inteligente(bot_temp, chat_id, target_step.msg_media, texto=_step_txt, markup=mk if target_step.mostrar_botao else None, protect_content=_protect, delay_pos_audio=2)
+                                # 🔊 ÁUDIO: Envia sozinho sem caption/markup
+                                audio_msgs = enviar_audio_inteligente(
+                                    bot_temp, chat_id, target_step.msg_media,
+                                    texto=_step_txt if _step_txt and _step_txt.strip() else None,
+                                    markup=mk if target_step.mostrar_botao else None,
+                                    protect_content=_protect,
+                                    delay_pos_audio=2
+                                )
+                                sent_msg = audio_msgs[-1] if audio_msgs else None
                             else:
-                                bot_temp.send_photo(chat_id, target_step.msg_media, caption=_step_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
+                                sent_msg = bot_temp.send_photo(chat_id, target_step.msg_media, caption=_step_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                         else:
-                            bot_temp.send_message(chat_id, _step_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
+                            sent_msg = bot_temp.send_message(chat_id, _step_txt, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                     except:
-                        bot_temp.send_message(chat_id, strip_premium_emoji_tags(_step_txt) or "...", reply_markup=mk, protect_content=_protect)
+                        # Fallback caso falhe HTML ou Mídia
+                        sent_msg = bot_temp.send_message(chat_id, strip_premium_emoji_tags(_step_txt) or "...", reply_markup=mk, protect_content=_protect)
 
+                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão
+                    # if sent_msg and target_step.autodestruir:
+                    #     tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 20
+                    #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
+
+                    # Lógica de Navegação Automática (Recursividade para passos SEM botão)
                     if not target_step.mostrar_botao:
+                        # Se não tem botão, usamos o delay para ditar o ritmo
                         delay = target_step.delay_seconds if target_step.delay_seconds > 0 else 0
                         if delay > 0: time.sleep(delay)
+                        
+                        # Chama o próximo
                         prox = db.query(BotFlowStep).filter(BotFlowStep.bot_id == bot_db.id, BotFlowStep.step_order == target_step.step_order + 1).first()
                         if prox: enviar_passo_automatico(bot_temp, chat_id, prox, bot_db, db)
                         else: enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
                 else:
                     enviar_oferta_final(bot_temp, chat_id, bot_db.fluxo, bot_db.id, db)
 
+            # 🔥 CORREÇÃO: CHECKOUT PROMO VEM ANTES DO CHECKOUT NORMAL!
+            # --- B1) CHECKOUT PROMOCIONAL (REMARKETING & DISPAROS) ---
             elif data.startswith("checkout_promo_"):
+                # 🔥 FIX CRÍTICO: Cancela timers antigos de remarketing
                 try: cancelar_remarketing(int(chat_id))
                 except: pass
 
+                # ==============================================================================
+                # 💣 CORREÇÃO MESTRE: AUTO-DESTRUIÇÃO AO CLICAR (Agora no handler correto!)
+                # ==============================================================================
                 try:
+                    # Verifica se existe o dicionário de destruições pendentes
                     if hasattr(enviar_remarketing_automatico, 'pending_destructions'):
                         dict_pendente = enviar_remarketing_automatico.pending_destructions
+                        
+                        # Procura o agendamento (Tenta chave INT e STR para garantir)
                         dados_destruicao = dict_pendente.get(chat_id) or dict_pendente.get(str(chat_id))
+                        
                         if dados_destruicao:
+                            logger.info(f"💣 [CHECKOUT] Encontrado agendamento de destruição para {chat_id}")
+                            
                             msg_id_to_del = dados_destruicao.get('message_id')
                             btns_id_to_del = dados_destruicao.get('buttons_message_id')
+                            # Tempo de segurança para o usuário ver que clicou (ex: 2s) ou o configurado
                             tempo_para_explodir = dados_destruicao.get('destruct_seconds', 3)
                             
                             def auto_delete_task():
                                 time.sleep(tempo_para_explodir)
                                 try:
                                     bot_temp.delete_message(chat_id, msg_id_to_del)
-                                    if btns_id_to_del: bot_temp.delete_message(chat_id, btns_id_to_del)
-                                except Exception: pass
+                                    if btns_id_to_del:
+                                        bot_temp.delete_message(chat_id, btns_id_to_del)
+                                    logger.info(f"🗑️ Mensagem destruída APÓS clique no Checkout ({chat_id})")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Falha ao deletar msg (já deletada?): {e}")
 
-                            try: thread_pool.submit(auto_delete_task)
-                            except RuntimeError: pass
+                            # Inicia via pool (evita can't start new thread)
+                            try:
+                                thread_pool.submit(auto_delete_task)
+                            except RuntimeError:
+                                pass
                             
+                            # Limpa do dicionário para não tentar deletar de novo
                             if chat_id in dict_pendente: del dict_pendente[chat_id]
                             if str(chat_id) in dict_pendente: del dict_pendente[str(chat_id)]
-                except Exception: pass
+                except Exception as e_destruct:
+                    logger.error(f"⚠️ Erro não fatal na lógica de destruição: {e_destruct}")
+                # ==============================================================================
 
                 try:
                     parts = data.split("_")
+                    # Formato: checkout_promo_{plano_id}_{preco_centavos}
                     if len(parts) < 4:
                         bot_temp.send_message(chat_id, "❌ Link de oferta inválido.")
                         return {"status": "error"}
 
                     plano_id = int(parts[2])
-                    preco_promo = int(parts[3]) / 100.0
+                    preco_centavos = int(parts[3])
+                    preco_promo = preco_centavos / 100.0
                     
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
                     if not plano:
                         bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
                         return {"status": "error"}
                     
+                    lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
+                    # 🔥 FIX: Busca tracking do remarketing automático (não do link original do lead)
                     track_id_pedido = None
                     try:
-                        _rmkt_track = db.query(TrackingLink).filter(TrackingLink.bot_id == bot_db.id, TrackingLink.origem == 'remarketing').order_by(TrackingLink.created_at.desc()).first()
-                        if _rmkt_track: track_id_pedido = _rmkt_track.id
-                    except: pass
+                        _rmkt_track = db.query(TrackingLink).filter(
+                            TrackingLink.bot_id == bot_db.id,
+                            TrackingLink.origem == 'remarketing'
+                        ).order_by(TrackingLink.created_at.desc()).first()
+                        if _rmkt_track:
+                            track_id_pedido = _rmkt_track.id
+                            logger.info(f"📊 [CHECKOUT-PROMO] Tracking #{_rmkt_track.id} vinculado ao pedido de {chat_id}")
+                    except Exception as e_track:
+                        logger.warning(f"⚠️ Erro ao buscar tracking checkout promo: {e_track}")
                     
+                    # Calcula desconto visual
                     desconto_percentual = 0
                     if plano.preco_atual > preco_promo:
                         desconto_percentual = int(((plano.preco_atual - preco_promo) / plano.preco_atual) * 100)
                     
-                    msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
+                    msg_wait = bot_temp.send_message(
+                        chat_id, 
+                        f"⏳ Gerando <b>OFERTA ESPECIAL</b>{f' com {desconto_percentual}% OFF' if desconto_percentual > 0 else ''}...", 
+                        parse_mode="HTML"
+                    )
                     mytx = str(uuid.uuid4())
                     
-                    try:
-                        pix, _gw_usada = await gerar_pix_gateway(
-                            valor_float=preco_promo, transaction_id=mytx, bot_id=bot_db.id, db=db,
-                            user_telegram_id=str(chat_id), user_first_name=first_name, plano_nome=f"{plano.nome_exibicao} (OFERTA)", agendar_remarketing=False 
-                        )
-                    except Exception:
-                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                        except: pass
-                        bot_temp.send_message(chat_id, "❌ Erro ao conectar com o banco.")
-                        return {"status": "error"}
-
+                    # Passamos agendar_remarketing=False para NÃO reiniciar o ciclo de mensagens
+                    pix, _gw_usada = await gerar_pix_gateway(
+                        valor_float=preco_promo,
+                        transaction_id=mytx,
+                        bot_id=bot_db.id,
+                        db=db,
+                        user_telegram_id=str(chat_id),
+                        user_first_name=first_name,
+                        plano_nome=f"{plano.nome_exibicao} (OFERTA)",
+                        agendar_remarketing=False  # <--- BLOQUEIA O RESTART DO CICLO
+                    )
+                    
                     if pix:
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
                         txid = str(pix.get('id') or mytx).lower()
                         
+                        # Salva pedido
                         novo_pedido = Pedido(
-                            bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
-                            plano_nome=f"{plano.nome_exibicao} (PROMO)", plano_id=plano.id, valor=preco_promo,
-                            transaction_id=txid, txid=txid, qr_code=qr, status="pending", tem_order_bump=False,
-                            created_at=now_brazil(), tracking_id=track_id_pedido, gateway_usada=_gw_usada,
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=f"{plano.nome_exibicao} (PROMO {desconto_percentual}% OFF)",
+                            plano_id=plano.id,
+                            valor=preco_promo,
+                            transaction_id=txid,
+                            txid=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=now_brazil(),
+                            tracking_id=track_id_pedido,
+                            gateway_usada=_gw_usada,
                         )
                         db.add(novo_pedido)
                         db.commit()
                         
-                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                        except: pass
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
                         
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
                         
+                        # -----------------------------------------------------------
+                        # 🔥 LÓGICA DE MENSAGEM INTELIGENTE (COM {oferta})
+                        # -----------------------------------------------------------
                         flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
                         custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
                         
-                        oferta_block = f"💰 Valor: <b>R$ {preco_promo:.2f}</b>"
+                        # 1. Constrói o BLOCO DA OFERTA (Bonito)
                         if desconto_percentual > 0:
-                            oferta_block = f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n✨ Por apenas: <b>R$ {preco_promo:.2f}</b>\n📊 Economia: <b>{desconto_percentual}% OFF</b>"
+                            oferta_block = f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                            oferta_block += f"✨ Por apenas: <b>R$ {preco_promo:.2f}</b>\n"
+                            oferta_block += f"📊 Economia: <b>{desconto_percentual}% OFF</b>"
+                        else:
+                            oferta_block = f"💰 Valor: <b>R$ {preco_promo:.2f}</b>"
+
+                        msg_pix = ""
 
                         if custom_msg:
+                            # --- MODO PERSONALIZADO ---
+                            # Se o usuário colocou {oferta}, substitui pelo bloco bonito
+                            # Se não, substitui {valor} pelo preço simples
                             val_fmt = f"{preco_promo:.2f}".replace('.', ',')
-                            msg_pix = custom_msg.replace("{nome}", first_name).replace("{plano}", plano.nome_exibicao).replace("{valor}", val_fmt).replace("{oferta}", oferta_block)
-                            if "{qrcode}" in msg_pix: msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
-                            else: msg_pix += f"\n\n👇 Copie:\n<pre>{qr}</pre>"
+                            
+                            msg_pix = custom_msg.replace("{nome}", first_name)\
+                                                .replace("{plano}", plano.nome_exibicao)\
+                                                .replace("{valor}", val_fmt)\
+                                                .replace("{oferta}", oferta_block) # 🔥 AQUI ESTÁ O SEGREDO
+
+                            if "{qrcode}" in msg_pix:
+                                msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                            else:
+                                msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                         else:
-                            msg_pix = f"🔥 <b>OFERTA ESPECIAL!</b>\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n{oferta_block}\n\n🔐 Pix Copia e Cola:\n<pre>{qr}</pre>\n\n⚡ Acesso automático!"
+                            # --- MODO PADRÃO (HARDCODED) ---
+                            msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
+                            msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                            msg_pix += f"{oferta_block}\n\n" # Usa o bloco bonito
+                            msg_pix += f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                            msg_pix += "👆 Toque na chave PIX para copiar\n"
+                            msg_pix += "⚡ Acesso liberado automaticamente!"
                         
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
                         msg_pix = convert_premium_emojis(msg_pix)
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                        
                     else:
-                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                        except: pass
-                        bot_temp.send_message(chat_id, "❌ Erro ao gerar QRCode.")
-                except Exception:
-                    try: bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
-                    except: pass
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Erro no handler checkout_promo_: {str(e)}", exc_info=True)
+                    bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
 
+            # --- B1.5) HANDLER DE BOTÃO DE REMARKETING AUTOMÁTICO ---
             elif data.startswith("remarketing_plano_"):
                 try:
                     plano_id = int(data.split("_")[2])
                     plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
-                    if not plano: return {"status": "error"}
                     
-                    remarketing_cfg = db.query(RemarketingConfig).filter(RemarketingConfig.bot_id == bot_db.id).first()
+                    if not plano:
+                        bot_temp.send_message(chat_id, "❌ Plano não encontrado.")
+                        return {"status": "error"}
+                    
+                    # Busca config de remarketing
+                    remarketing_cfg = db.query(RemarketingConfig).filter(
+                        RemarketingConfig.bot_id == bot_db.id
+                    ).first()
+                    
                     promo_values = remarketing_cfg.promo_values or {} if remarketing_cfg else {}
+                    # Converte chave para string para garantir compatibilidade com JSON
                     valor_final = promo_values.get(str(plano_id), plano.preco_atual)
                     
-                    if (remarketing_cfg and remarketing_cfg.auto_destruct_enabled and remarketing_cfg.auto_destruct_after_click and hasattr(enviar_remarketing_automatico, 'pending_destructions')):
+                    # ==============================================================================
+                    # 💣 CORREÇÃO MESTRE: AUTO-DESTRUIÇÃO APÓS CLIQUE (Bulletproof)
+                    # ==============================================================================
+                    if (remarketing_cfg and 
+                        remarketing_cfg.auto_destruct_enabled and 
+                        remarketing_cfg.auto_destruct_after_click and
+                        hasattr(enviar_remarketing_automatico, 'pending_destructions')):
+                        
                         dict_pendente = enviar_remarketing_automatico.pending_destructions
+                        
                         dados_destruicao = dict_pendente.get(chat_id) or dict_pendente.get(str(chat_id))
+                        
                         if dados_destruicao:
+                            logger.info(f"💣 [CALLBACK] Encontrado agendamento de destruição para {chat_id}")
+                            
                             msg_id_to_del = dados_destruicao.get('message_id')
                             btns_id_to_del = dados_destruicao.get('buttons_message_id')
                             tempo_para_explodir = dados_destruicao.get('destruct_seconds', 5)
@@ -11850,244 +12124,633 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 time.sleep(tempo_para_explodir)
                                 try:
                                     bot_temp.delete_message(chat_id, msg_id_to_del)
-                                    if btns_id_to_del: bot_temp.delete_message(chat_id, btns_id_to_del)
-                                except Exception: pass
-                            try: thread_pool.submit(auto_delete_after_click)
-                            except RuntimeError: pass
+                                    if btns_id_to_del:
+                                        bot_temp.delete_message(chat_id, btns_id_to_del)
+                                    logger.info(f"🗑️ Mensagem de remarketing auto-destruída APÓS clique ({chat_id})")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Falha ao deletar msg após clique (já deletada?): {e}")
+
+                            try:
+                                thread_pool.submit(auto_delete_after_click)
+                            except RuntimeError:
+                                pass
+                            
                             if chat_id in dict_pendente: del dict_pendente[chat_id]
                             if str(chat_id) in dict_pendente: del dict_pendente[str(chat_id)]
+                        else:
+                            logger.warning(f"⚠️ Clique detectado, mas não achei agendamento para {chat_id} (Restartou o servidor?)")
+
+                    # ==============================================================================
                     
+                    # Gera PIX com valor promocional
+                    lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
+                    # 🔥 FIX: Busca tracking do remarketing automático (não do link original do lead)
+                    # Tenta buscar o TrackingLink vinculado ao remarketing automático desse bot
                     track_id_pedido = None
                     try:
-                        _rmkt_track = db.query(TrackingLink).filter(TrackingLink.bot_id == bot_db.id, TrackingLink.origem == 'remarketing').order_by(TrackingLink.created_at.desc()).first()
-                        if _rmkt_track: track_id_pedido = _rmkt_track.id
-                    except: pass
+                        # Busca o tracking link de remarketing automático mais recente para esse bot
+                        _rmkt_track = db.query(TrackingLink).filter(
+                            TrackingLink.bot_id == bot_db.id,
+                            TrackingLink.origem == 'remarketing'
+                        ).order_by(TrackingLink.created_at.desc()).first()
+                        if _rmkt_track:
+                            track_id_pedido = _rmkt_track.id
+                            logger.info(f"📊 [REMARKETING-AUTO] Tracking #{_rmkt_track.id} vinculado ao pedido de {chat_id}")
+                    except Exception as e_track:
+                        logger.warning(f"⚠️ Erro ao buscar tracking remarketing auto: {e_track}")
                     
-                    msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
+                    desconto_percentual = 0
+                    if plano.preco_atual > valor_final:
+                        desconto_percentual = int(((plano.preco_atual - valor_final) / plano.preco_atual) * 100)
+                    
+                    msg_wait = bot_temp.send_message(
+                        chat_id, 
+                        f"⏳ Gerando <b>OFERTA ESPECIAL</b>{f' com {desconto_percentual}% OFF' if desconto_percentual > 0 else ''}...", 
+                        parse_mode="HTML"
+                    )
+                    
                     mytx = str(uuid.uuid4())
                     
-                    try:
-                        pix, _gw_usada = await gerar_pix_gateway(
-                            valor_float=valor_final, transaction_id=mytx, bot_id=bot_db.id, db=db,
-                            user_telegram_id=str(chat_id), user_first_name=first_name, plano_nome=f"{plano.nome_exibicao} (OFERTA AUTO)", agendar_remarketing=False
-                        )
-                    except Exception:
-                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                        except: pass
-                        bot_temp.send_message(chat_id, "❌ Erro ao conectar com o banco.")
-                        return {"status": "error"}
+                    # 🔥 NÃO REINICIA O CICLO DE REMARKETING
+                    pix, _gw_usada = await gerar_pix_gateway(
+                        valor_float=valor_final,
+                        transaction_id=mytx,
+                        bot_id=bot_db.id,
+                        db=db,
+                        user_telegram_id=str(chat_id),
+                        user_first_name=first_name,
+                        plano_nome=f"{plano.nome_exibicao} (OFERTA AUTOMÁTICA)",
+                        agendar_remarketing=False  # <--- BLOQUEIA O RESTART DO CICLO
+                    )
                     
                     if pix:
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
                         txid = str(pix.get('id') or mytx).lower()
                         
+                        # Salva pedido
                         novo_pedido = Pedido(
-                            bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
-                            plano_nome=f"{plano.nome_exibicao} (PROMO)", plano_id=plano.id, valor=valor_final,
-                            transaction_id=txid, txid=txid, qr_code=qr, status="pending", tem_order_bump=False,
-                            created_at=now_brazil(), tracking_id=track_id_pedido, origem='disparo_auto', gateway_usada=_gw_usada,
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=f"{plano.nome_exibicao} (PROMO {desconto_percentual}% OFF)" if desconto_percentual > 0 else plano.nome_exibicao,
+                            plano_id=plano.id,
+                            valor=valor_final,
+                            transaction_id=txid,
+                            txid=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=now_brazil(),
+                            tracking_id=track_id_pedido,
+                            origem='disparo_auto',
+                            gateway_usada=_gw_usada,
                         )
                         db.add(novo_pedido)
                         db.commit()
                         
-                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                        except: pass
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
                         
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
                         
+                        # -----------------------------------------------------------
+                        # 🔥 LÓGICA DE MENSAGEM INTELIGENTE (COM {oferta})
+                        # -----------------------------------------------------------
                         flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
                         custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
                         
-                        oferta_block = f"💰 Valor: <b>R$ {valor_final:.2f}</b>"
-                        if plano.preco_atual > valor_final:
-                            desc = int(((plano.preco_atual - valor_final) / plano.preco_atual) * 100)
-                            oferta_block = f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n✨ Por apenas: <b>R$ {valor_final:.2f}</b>\n📊 Economia: <b>{desc}% OFF</b>"
+                        if desconto_percentual > 0:
+                            oferta_block = f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                            oferta_block += f"✨ Por apenas: <b>R$ {valor_final:.2f}</b>\n"
+                            oferta_block += f"📊 Economia: <b>{desconto_percentual}% OFF</b>"
+                        else:
+                            oferta_block = f"💰 Valor: <b>R$ {valor_final:.2f}</b>"
 
+                        msg_pix = ""
+                        
                         if custom_msg:
                             val_fmt = f"{valor_final:.2f}".replace('.', ',')
-                            msg_pix = custom_msg.replace("{nome}", first_name).replace("{plano}", plano.nome_exibicao).replace("{valor}", val_fmt).replace("{oferta}", oferta_block)
-                            if "{qrcode}" in msg_pix: msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
-                            else: msg_pix += f"\n\n👇 Copie:\n<pre>{qr}</pre>"
+                            msg_pix = custom_msg.replace("{nome}", first_name)\
+                                                .replace("{plano}", plano.nome_exibicao)\
+                                                .replace("{valor}", val_fmt)\
+                                                .replace("{oferta}", oferta_block)
+                            
+                            if "{qrcode}" in msg_pix:
+                                msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                            else:
+                                msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
                         else:
-                            msg_pix = f"🔥 <b>OFERTA ESPECIAL!</b>\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n{oferta_block}\n\n🔐 Pix Copia e Cola:\n<pre>{qr}</pre>\n\n⚡ Acesso automático!"
+                            msg_pix = f"🔥 <b>OFERTA ESPECIAL GERADA!</b>\n\n"
+                            msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                            msg_pix += f"{oferta_block}\n\n"
+                            msg_pix += f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                            msg_pix += "👆 Toque na chave PIX para copiar\n"
+                            msg_pix += "⚡ Acesso liberado automaticamente!"
                         
-                        try:
-                            alternar_mensagens_pagamento(bot_temp, chat_id, bot_db.id)
-                            agendar_remarketing_automatico(bot_temp, chat_id, bot_db.id)
-                        except: pass
+                        # Inicia mensagens alternantes NOVAMENTE após clicar
+                        alternar_mensagens_pagamento(bot_temp, chat_id, bot_db.id)
                         
+                        # Agenda remarketing novamente (se configurado)
+                        agendar_remarketing_automatico(bot_temp, chat_id, bot_db.id)
+                        
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
                         msg_pix = convert_premium_emojis(msg_pix)
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                        
                     else:
-                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                        except: pass
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
                         bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
-                except Exception:
-                    try: bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
-                    except: pass
+                        
+                except Exception as e:
+                    logger.error(f"❌ Erro no handler remarketing_plano_: {str(e)}", exc_info=True)
+                    bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.", parse_mode="HTML")
 
+            # --- B2) CHECKOUT NORMAL (AGORA COM ESCUDO ANTI-CURIOSOS 🛡️) ---
             elif data.startswith("checkout_"):
+                # ==============================================================================
+                # 🛡️ MOTOR DO ESCUDO ANTI-CURIOSOS (RECURSO PRIME)
+                # ==============================================================================
+                if getattr(bot_db, 'escudo_ativo', False):
+                    limite_pix = getattr(bot_db, 'escudo_limite_pix', 5)
+                    pendentes_count = db.query(Pedido).filter(
+                        Pedido.bot_id == bot_db.id,
+                        Pedido.telegram_id == str(chat_id),
+                        Pedido.status == 'pending'
+                    ).count()
+                    
+                    if pendentes_count >= limite_pix:
+                        logger.warning(f"🛡️ [ESCUDO ATIVADO] Usuário {chat_id} bloqueado. Tentativas pendentes: {pendentes_count}/{limite_pix}")
+                        try:
+                            bot_temp.answer_callback_query(update.callback_query.id, "⚠️ Limite de PIX atingido!", show_alert=True)
+                            bot_temp.send_message(
+                                chat_id, 
+                                f"🛡️ <b>AÇÃO BLOQUEADA</b>\n\nVocê já gerou <b>{pendentes_count} pedidos de PIX</b> recentemente e não realizou o pagamento.\n\nPara evitar fraudes, o sistema bloqueou novas tentativas.\n\n👉 <i>Por favor, pague um dos seus PIX anteriores ou aguarde 24 horas para tentar novamente.</i>", 
+                                parse_mode="HTML"
+                            )
+                        except: pass
+                        return {"status": "blocked_by_shield"}
+                # ==============================================================================
+
                 plano_id = data.split("_")[1]
                 plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
                 if not plano: return {"status": "error"}
 
+                lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
+                track_id_pedido = lead_origem.tracking_id if lead_origem else None
+
                 bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id, OrderBumpConfig.ativo == True).first()
+                
                 if bump:
                     mk = types.InlineKeyboardMarkup()
                     mk.row(
                         types.InlineKeyboardButton(f"{bump.btn_aceitar} (+ R$ {bump.preco:.2f})", callback_data=f"bump_yes_{plano.id}"),
                         types.InlineKeyboardButton(bump.btn_recusar, callback_data=f"bump_no_{plano.id}")
                     )
-                    txt_bump = convert_premium_emojis(bump.msg_texto or f"Levar {bump.nome_produto} junto?")
+                    txt_bump = bump.msg_texto or f"Levar {bump.nome_produto} junto?"
+                    # ✨ CONVERTE EMOJIS PREMIUM
+                    txt_bump = convert_premium_emojis(txt_bump)
                     try:
                         if bump.msg_media:
-                            if bump.msg_media.lower().endswith(('.mp4','.mov')): bot_temp.send_video(chat_id, bump.msg_media, caption=txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
-                            else: bot_temp.send_photo(chat_id, bump.msg_media, caption=txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
-                        else: bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
-                    except: bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
+                            if bump.msg_media.lower().endswith(('.mp4','.mov')):
+                                bot_temp.send_video(chat_id, bump.msg_media, caption=txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
+                            else:
+                                bot_temp.send_photo(chat_id, bump.msg_media, caption=txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
+                        else:
+                            bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
+                    except:
+                        bot_temp.send_message(chat_id, txt_bump, reply_markup=mk, parse_mode="HTML", protect_content=_protect)
                 else:
+                    # PIX DIRETO (SEM ORDER BUMP)
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>PIX</b>...", parse_mode="HTML")
                     mytx = str(uuid.uuid4())
                     
-                    try:
-                        pix, _gw_usada = await gerar_pix_gateway(
-                            valor_float=plano.preco_atual, transaction_id=mytx, bot_id=bot_db.id, db=db,
-                            user_telegram_id=str(chat_id), user_first_name=first_name, plano_nome=plano.nome_exibicao
-                        )
-                        if pix:
-                            qr = pix.get('qr_code_text') or pix.get('qr_code')
-                            txid = str(pix.get('id') or mytx).lower()
-                            
-                            novo_pedido = Pedido(
-                                bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
-                                plano_nome=plano.nome_exibicao, plano_id=plano.id, valor=plano.preco_atual,
-                                transaction_id=txid, txid=txid, qr_code=qr, status="pending", tem_order_bump=False,
-                                created_at=now_brazil(), gateway_usada=_gw_usada,
-                            )
-                            db.add(novo_pedido)
-                            db.commit()
-                            
-                            try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                            except: pass
-                            
-                            markup_pix = types.InlineKeyboardMarkup()
-                            markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
-
-                            flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
-                            custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
-                            
-                            val_fmt = f"{plano.preco_atual:.2f}".replace('.', ',')
-                            if custom_msg:
-                                oferta_simple = f"💰 Valor: <b>R$ {val_fmt}</b>"
-                                msg_pix = custom_msg.replace("{nome}", first_name).replace("{plano}", plano.nome_exibicao).replace("{valor}", val_fmt).replace("{oferta}", oferta_simple)
-                                if "{qrcode}" in msg_pix: msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
-                                else: msg_pix += f"\n\n👇 Copie:\n<pre>{qr}</pre>"
-                            else:
-                                msg_pix = f"🌟 Pagamento gerado:\n🎁 Plano: <b>{plano.nome_exibicao}</b>\n💰 Valor: <b>R$ {val_fmt}</b>\n\n🔐 Pix Copia e Cola:\n<pre>{qr}</pre>\n\n⚡ Acesso liberado automaticamente!"
-                            
-                            msg_pix = convert_premium_emojis(msg_pix)
-                            bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
-                        else:
-                            try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                            except: pass
-                            bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
-                    except Exception as e:
-                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                        except: pass
-                        bot_temp.send_message(chat_id, "❌ Erro.")
-
-            elif data.startswith("bump_yes_") or data.startswith("bump_no_"):
-                try:
-                    aceitou = "yes" in data
-                    pid = data.split("_")[2]
-                    plano = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
-                    bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
-                    
-                    if bump and bump.autodestruir:
-                        try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
-                        except: pass
-                    
-                    valor_final = plano.preco_atual
-                    nome_final = plano.nome_exibicao
-                    if aceitou and bump:
-                        valor_final += bump.preco
-                        nome_final += f" + {bump.nome_produto}"
-                    
-                    msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
-                    mytx = str(uuid.uuid4())
-
+                    # Gera PIX com remarketing integrado
                     pix, _gw_usada = await gerar_pix_gateway(
-                        valor_float=valor_final, transaction_id=mytx, bot_id=bot_db.id, db=db,
-                        user_telegram_id=str(chat_id), user_first_name=first_name, plano_nome=nome_final
+                        valor_float=plano.preco_atual,
+                        transaction_id=mytx,
+                        bot_id=bot_db.id,
+                        db=db,
+                        user_telegram_id=str(chat_id),  # ✅ PASSA TELEGRAM ID
+                        user_first_name=first_name,     # ✅ PASSA NOME
+                        plano_nome=plano.nome_exibicao  # ✅ PASSA PLANO
                     )
-                    
+
                     if pix:
                         qr = pix.get('qr_code_text') or pix.get('qr_code')
                         txid = str(pix.get('id') or mytx).lower()
                         
+                        # Salva pedido
                         novo_pedido = Pedido(
-                            bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
-                            plano_nome=nome_final, plano_id=plano.id, valor=valor_final, transaction_id=txid, txid=txid, qr_code=qr, status="pending", tem_order_bump=aceitou,
-                            created_at=now_brazil(), gateway_usada=_gw_usada,
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=plano.nome_exibicao,
+                            plano_id=plano.id,
+                            valor=plano.preco_atual,
+                            transaction_id=txid,
+                            txid=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=now_brazil(),
+                            tracking_id=track_id_pedido,
+                            gateway_usada=_gw_usada,
                         )
                         db.add(novo_pedido)
+                        db.commit()
+                        
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
+                        
+                        markup_pix = types.InlineKeyboardMarkup()
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
+
+                        # -----------------------------------------------------------
+                        # 🎨 MENSAGEM PIX: PERSONALIZADA vs PADRÃO
+                        # -----------------------------------------------------------
+                        flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
+                        custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
+                        
+                        msg_pix = ""
+                        val_fmt = f"{plano.preco_atual:.2f}".replace('.', ',')
+                        
+                        if custom_msg:
+                            # Aqui {oferta} é igual a {valor} porque não tem desconto
+                            oferta_simple = f"💰 Valor: <b>R$ {val_fmt}</b>"
+                            msg_pix = custom_msg.replace("{nome}", first_name)\
+                                                .replace("{plano}", plano.nome_exibicao)\
+                                                .replace("{valor}", val_fmt)\
+                                                .replace("{oferta}", oferta_simple)
+                            
+                            if "{qrcode}" in msg_pix:
+                                msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                            else:
+                                msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
+                        else:
+                            # --- MODO PADRÃO (ANTIGO) ---
+                            msg_pix = (
+                                f"🌟 Seu pagamento foi gerado:\n"
+                                f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                                f"💰 Valor: <b>R$ {val_fmt}</b>\n"
+                                f"🔐 Pix Copia e Cola:\n\n"
+                                f"<pre>{qr}</pre>\n\n"
+                                f"👆 Toque na chave PIX para copiar\n"
+                                f"⚡ Acesso liberado automaticamente!"
+                            )
+                        
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
+                        msg_pix = convert_premium_emojis(msg_pix)
+                        bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                        
+                    else:
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
+
+            # --- C) BUMP YES/NO ---
+            elif data.startswith("bump_yes_") or data.startswith("bump_no_"):
+                aceitou = "yes" in data
+                pid = data.split("_")[2]
+                plano = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
+                
+                lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
+                track_id_pedido = lead_origem.tracking_id if lead_origem else None
+
+                bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
+                
+                if bump and bump.autodestruir:
+                    try:
+                        bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
+                    except:
+                        pass
+                
+                valor_final = plano.preco_atual
+                nome_final = plano.nome_exibicao
+                if aceitou and bump:
+                    valor_final += bump.preco
+                    nome_final += f" + {bump.nome_produto}"
+                
+                msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
+                mytx = str(uuid.uuid4())
+
+                # Gera PIX com remarketing integrado
+                pix, _gw_usada = await gerar_pix_gateway(
+                    valor_float=valor_final,
+                    transaction_id=mytx,
+                    bot_id=bot_db.id,
+                    db=db,
+                    user_telegram_id=str(chat_id),  # ✅ PASSA TELEGRAM ID
+                    user_first_name=first_name,     # ✅ PASSA NOME
+                    plano_nome=nome_final           # ✅ PASSA PLANO
+                )
+                
+                if pix:
+                    qr = pix.get('qr_code_text') or pix.get('qr_code')
+                    txid = str(pix.get('id') or mytx).lower()
+                    
+                    # Salva pedido
+                    novo_pedido = Pedido(
+                        bot_id=bot_db.id,
+                        telegram_id=str(chat_id),
+                        first_name=first_name,
+                        username=username,
+                        plano_nome=nome_final,
+                        plano_id=plano.id,
+                        valor=valor_final,
+                        transaction_id=txid,
+                        txid=txid,
+                        qr_code=qr,
+                        status="pending",
+                        tem_order_bump=aceitou,
+                        created_at=now_brazil(),
+                        tracking_id=track_id_pedido,
+                        gateway_usada=_gw_usada,
+                    )
+                    db.add(novo_pedido)
+                    db.commit()
+                    
+                    try:
+                        bot_temp.delete_message(chat_id, msg_wait.message_id)
+                    except:
+                        pass
+                    
+                    markup_pix = types.InlineKeyboardMarkup()
+                    markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
+
+                    # -----------------------------------------------------------
+                    # 🎨 MENSAGEM PIX (BUMP): PERSONALIZADA vs PADRÃO
+                    # -----------------------------------------------------------
+                    flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
+                    custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
+                    
+                    msg_pix = ""
+                    val_fmt = f"{valor_final:.2f}".replace('.', ',')
+                    
+                    if custom_msg:
+                        # --- MODO PERSONALIZADO ---
+                        oferta_simple = f"💰 Valor: <b>R$ {val_fmt}</b>"
+                        msg_pix = custom_msg.replace("{nome}", first_name)\
+                                            .replace("{plano}", nome_final)\
+                                            .replace("{valor}", val_fmt)\
+                                            .replace("{oferta}", oferta_simple)
+                        
+                        if "{qrcode}" in msg_pix:
+                            msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                        else:
+                            msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
+                    else:
+                        # --- MODO PADRÃO (ANTIGO) ---
+                        msg_pix = (
+                            f"🌟 Pagamento gerado:\n"
+                            f"🎁 Plano: <b>{nome_final}</b>\n"
+                            f"💰 Valor: <b>R$ {val_fmt}</b>\n"
+                            f"🔐 Pix Copia e Cola:\n\n"
+                            f"<pre>{qr}</pre>\n\n"
+                            f"👆 Toque para copiar\n"
+                            f"⚡ Acesso automático!"
+                        )
+
+                    # 🔥 LÓGICA DE MÍDIA ATUALIZADA NO FINAL (Se houver mídia no PIX/BUMP)
+                    # NOTA: O fluxo original apenas enviava a msg de texto do PIX. 
+                    # Mas se você quiser garantir que se por acaso tiver mídia ele leia:
+                    # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
+                    msg_pix = convert_premium_emojis(msg_pix)
+                    bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                    
+                else:
+                    bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
+
+            # --- D) PROMO (Campanhas Manuais) - LÓGICA BLINDADA ---
+            elif data.startswith("promo_"):
+                try:
+                    try: 
+                        campanha_uuid = data.split("_")[1]
+                    except: 
+                        campanha_uuid = ""
+                    
+                    campanha = db.query(RemarketingCampaign).filter(RemarketingCampaign.campaign_id == campanha_uuid).first()
+                    
+                    if not campanha:
+                        bot_temp.send_message(chat_id, "❌ Oferta não encontrada ou link inválido.")
+                        return {"status": "error"}
+                    
+                    if hasattr(campanha, 'expiration_at') and campanha.expiration_at:
+                        exp_at = campanha.expiration_at if campanha.expiration_at.tzinfo else campanha.expiration_at.replace(tzinfo=BRAZIL_TZ)
+                        if now_brazil() > exp_at:
+                            bot_temp.send_message(chat_id, "🚫 <b>OFERTA ENCERRADA!</b>\n\nO tempo desta oferta acabou.", parse_mode="HTML")
+                            return {"status": "expired"}
+                    
+                    plano = db.query(PlanoConfig).filter(PlanoConfig.id == campanha.plano_id).first()
+                    
+                    if not plano:
+                        bot_temp.send_message(chat_id, "❌ O plano desta oferta não existe mais.")
+                        return {"status": "error"}
+
+                    # Define Preço (Custom ou Original)
+                    preco_final = float(plano.preco_atual)
+                    
+                    # 🔥 CORREÇÃO: Verifica promo_price corretamente (None != 0, float(0) é falsy)
+                    if hasattr(campanha, 'promo_price') and campanha.promo_price is not None:
+                        try:
+                            promo_val = float(campanha.promo_price)
+                            if promo_val > 0:
+                                preco_final = round(promo_val, 2)
+                        except (ValueError, TypeError):
+                            pass  # Mantém preco_final = preco_atual
+                    
+                    # 🔥 CORREÇÃO EXTRA: Se promo_price falhou, tenta buscar do config JSON
+                    if preco_final == float(plano.preco_atual) and campanha.config:
+                        try:
+                            cfg = json.loads(campanha.config) if isinstance(campanha.config, str) else campanha.config
+                            if isinstance(cfg, str): cfg = json.loads(cfg)
+                            cfg_price_mode = cfg.get('price_mode', 'original')
+                            cfg_custom_price = cfg.get('custom_price')
+                            if cfg_price_mode == 'custom' and cfg_custom_price is not None:
+                                val_cfg = float(str(cfg_custom_price).replace(',', '.'))
+                                if val_cfg > 0:
+                                    preco_final = round(val_cfg, 2)
+                                    logger.info(f"💰 [PROMO] Preço recuperado do config JSON: R${preco_final}")
+                        except Exception as e_cfg:
+                            logger.warning(f"⚠️ Erro ao ler config para preço: {e_cfg}")
+                    
+                    desconto_percentual = 0
+                    if plano.preco_atual > preco_final:
+                        try:
+                            desconto_percentual = int(((plano.preco_atual - preco_final) / plano.preco_atual) * 100)
+                        except:
+                            desconto_percentual = 0
+
+                    msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando <b>OFERTA ESPECIAL</b>...", parse_mode="HTML")
+                    
+                    mytx = str(uuid.uuid4())
+                    
+                    try:
+                        # 🔥 NÃO REINICIA O CICLO DE REMARKETING
+                        pix, _gw_usada = await gerar_pix_gateway(
+                            valor_float=preco_final,
+                            transaction_id=mytx,
+                            bot_id=bot_db.id,
+                            db=db,
+                            user_telegram_id=str(chat_id),
+                            user_first_name=first_name,
+                            plano_nome=f"{plano.nome_exibicao} (OFERTA)",
+                            agendar_remarketing=False 
+                        )
+                    except Exception as e_pix:
+                        logger.error(f"❌ Erro CRÍTICO ao gerar PIX: {e_pix}", exc_info=True)
+                        bot_temp.send_message(chat_id, "❌ Erro ao conectar com o banco de pagamentos.")
+                        return {"status": "error"}
+
+                    if pix:
+                        qr = pix.get('qr_code_text') or pix.get('qr_code')
+                        txid = str(pix.get('id') or mytx).lower()
+                        
+                        # 🔥 Extrai tracking_link_id da campanha para metrificar
+                        _track_id_rmkt = None
+                        try:
+                            _cfg = json.loads(campanha.config) if isinstance(campanha.config, str) else (campanha.config or {})
+                            if isinstance(_cfg, str): _cfg = json.loads(_cfg)
+                            _track_id_rmkt = _cfg.get("tracking_link_id")
+                        except: pass
+                        
+                        novo_pedido = Pedido(
+                            bot_id=bot_db.id, 
+                            telegram_id=str(chat_id), 
+                            first_name=first_name, 
+                            username=username, 
+                            plano_nome=f"{plano.nome_exibicao} (OFERTA)", 
+                            plano_id=plano.id, 
+                            valor=preco_final, 
+                            transaction_id=txid, 
+                            txid=txid,
+                            qr_code=qr, 
+                            status="pending", 
+                            tem_order_bump=False, 
+                            created_at=now_brazil(), 
+                            tracking_id=_track_id_rmkt,
+                            origem='remarketing',
+                            gateway_usada=_gw_usada,
+                        )
+                        db.add(novo_pedido)
+                        
+                        try:
+                            if hasattr(campanha, 'clicks'):
+                                if campanha.clicks is None:
+                                    campanha.clicks = 0
+                                campanha.clicks += 1
+                                logger.info(f"📊 Clique contabilizado para campanha {campanha_uuid}")
+                            else:
+                                logger.warning(f"⚠️ Tabela RemarketingCampaign sem coluna 'clicks'. Analytics ignorado para {campanha_uuid}")
+                            
+                            # 🔥 CORREÇÃO: Também contabiliza clique no TrackingLink vinculado
+                            if _track_id_rmkt:
+                                _tl_rmkt = db.query(TrackingLink).filter(TrackingLink.id == _track_id_rmkt).first()
+                                if _tl_rmkt:
+                                    _tl_rmkt.clicks = (_tl_rmkt.clicks or 0) + 1
+                                    logger.info(f"📊 Clique contabilizado no TrackingLink #{_track_id_rmkt}")
+                        except Exception as e_click:
+                            logger.warning(f"⚠️ Erro não fatal ao contar clique: {e_click}")
+                        
                         db.commit()
                         
                         try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                         except: pass
                         
                         markup_pix = types.InlineKeyboardMarkup()
-                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
 
+                        # -----------------------------------------------------------
+                        # 🔥 LÓGICA DE MENSAGEM INTELIGENTE (COM {oferta})
+                        # -----------------------------------------------------------
                         flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
                         custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
-                        val_fmt = f"{valor_final:.2f}".replace('.', ',')
                         
-                        if custom_msg:
-                            oferta_simple = f"💰 Valor: <b>R$ {val_fmt}</b>"
-                            msg_pix = custom_msg.replace("{nome}", first_name).replace("{plano}", nome_final).replace("{valor}", val_fmt).replace("{oferta}", oferta_simple)
-                            if "{qrcode}" in msg_pix: msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
-                            else: msg_pix += f"\n\n👇 Copie:\n<pre>{qr}</pre>"
+                        # 1. Constrói o BLOCO DA OFERTA (Bonito)
+                        if desconto_percentual > 0:
+                            oferta_block = f"💵 De: <s>R$ {plano.preco_atual:.2f}</s>\n"
+                            oferta_block += f"✨ Por apenas: <b>R$ {preco_final:.2f}</b>\n"
+                            oferta_block += f"📉 Economia: <b>{desconto_percentual}% OFF</b>"
                         else:
-                            msg_pix = f"🌟 Pagamento gerado:\n🎁 Plano: <b>{nome_final}</b>\n💰 Valor: <b>R$ {val_fmt}</b>\n\n🔐 Pix Copia e Cola:\n<pre>{qr}</pre>\n\n⚡ Acesso automático!"
+                            oferta_block = f"💰 Valor Promocional: <b>R$ {preco_final:.2f}</b>"
 
+                        msg_pix = ""
+
+                        if custom_msg:
+                            # --- MODO PERSONALIZADO ---
+                            val_fmt = f"{preco_final:.2f}".replace('.', ',')
+                            msg_pix = custom_msg.replace("{nome}", first_name)\
+                                                .replace("{plano}", plano.nome_exibicao)\
+                                                .replace("{valor}", val_fmt)\
+                                                .replace("{oferta}", oferta_block)
+
+                            if "{qrcode}" in msg_pix:
+                                msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                            else:
+                                msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
+                        else:
+                            # --- MODO PADRÃO (ANTIGO) ---
+                            msg_pix = f"🔥 <b>OFERTA ATIVADA!</b>\n\n"
+                            msg_pix += f"🎁 Plano: <b>{plano.nome_exibicao}</b>\n"
+                            msg_pix += f"{oferta_block}\n"
+                            msg_pix += f"\n🔐 Pague via Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n👆 Toque na chave PIX acima para copiá-la\n‼️ Após o pagamento, o acesso será liberado automaticamente!"
+
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
                         msg_pix = convert_premium_emojis(msg_pix)
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                     else:
                         try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                         except: pass
-                        bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
-                except Exception:
-                    try: bot_temp.delete_message(chat_id, msg_wait.message_id)
-                    except: pass
-                    bot_temp.send_message(chat_id, "❌ Erro.")
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar QRCode. Tente novamente.")
 
+                except Exception as e:
+                    logger.error(f"❌ Erro GERAL no handler promo_: {e}", exc_info=True)
+                    try: bot_temp.send_message(chat_id, "❌ Ocorreu um erro ao processar sua solicitação.")
+                    except: pass
+
+            # --- 🚀 UPSELL: ACEITAR ---
             elif data.startswith("upsell_accept_"):
                 try:
                     bot_id_str = data.replace("upsell_accept_", "").strip()
                     upsell_cfg = db.query(UpsellConfig).filter(UpsellConfig.bot_id == int(bot_id_str)).first()
+                    
                     if not upsell_cfg or not upsell_cfg.ativo:
                         bot_temp.send_message(chat_id, "❌ Esta oferta não está mais disponível.")
                         return {"status": "ok"}
                     
+                    # Auto-destruir a mensagem da oferta se configurado
                     if upsell_cfg.autodestruir:
                         try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
                         except: pass
                     
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando pagamento da oferta...", parse_mode="HTML")
+                    
                     mytx = str(uuid.uuid4())
                     preco_upsell = round(float(upsell_cfg.preco), 2)
                     
                     try:
                         pix, _gw_usada = await gerar_pix_gateway(
-                            valor_float=preco_upsell, transaction_id=mytx, bot_id=bot_db.id, db=db,
-                            user_telegram_id=str(chat_id), user_first_name=first_name, plano_nome=f"UPSELL: {upsell_cfg.nome_produto}", agendar_remarketing=False
+                            valor_float=preco_upsell,
+                            transaction_id=mytx,
+                            bot_id=bot_db.id,
+                            db=db,
+                            user_telegram_id=str(chat_id),
+                            user_first_name=first_name,
+                            plano_nome=f"UPSELL: {upsell_cfg.nome_produto}",
+                            agendar_remarketing=False
                         )
-                    except Exception:
+                    except Exception as e_pix:
+                        logger.error(f"❌ Erro PIX upsell: {e_pix}", exc_info=True)
                         try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                         except: pass
-                        bot_temp.send_message(chat_id, "❌ Erro ao gerar pagamento.")
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar pagamento. Tente novamente.")
                         return {"status": "error"}
                     
                     if pix:
@@ -12095,10 +12758,23 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         txid = str(pix.get('id') or mytx).lower()
                         
                         novo_pedido = Pedido(
-                            bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
-                            plano_nome=f"UPSELL: {upsell_cfg.nome_produto}", plano_id=None, valor=preco_upsell,
-                            transaction_id=txid, txid=txid, qr_code=qr, status="pending", tem_order_bump=False,
-                            created_at=now_brazil(), status_funil='fundo', origem='upsell', gateway_usada=_gw_usada
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=f"UPSELL: {upsell_cfg.nome_produto}",
+                            plano_id=None,
+                            valor=preco_upsell,
+                            transaction_id=txid,
+                            txid=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=now_brazil(),
+                            status_funil='fundo',
+                            origem='upsell',
+                            tracking_id=(db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first() or type('', (), {'tracking_id': None})).tracking_id,
+                            gateway_usada=_gw_usada
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -12109,48 +12785,77 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
                         
-                        msg_pix_txt = f"🚀 <b>OFERTA UPSELL</b>\n\n📦 {upsell_cfg.nome_produto}\n💰 Valor: <b>R$ {preco_upsell:.2f}</b>\n\n🔐 Pix Copia e Cola:\n<pre>{qr}</pre>\n\n⚡ Acesso liberado automaticamente!"
+                        msg_pix_txt = (
+                            f"🚀 <b>OFERTA UPSELL</b>\n\n"
+                            f"📦 {upsell_cfg.nome_produto}\n"
+                            f"💰 Valor: <b>R$ {preco_upsell:.2f}</b>\n\n"
+                            f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                            f"👆 Toque na chave PIX acima para copiá-la\n"
+                            f"⚡ Acesso liberado automaticamente!"
+                        )
+                        
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX (Upsell)
                         msg_pix_txt = convert_premium_emojis(msg_pix_txt)
                         bot_temp.send_message(chat_id, msg_pix_txt, parse_mode="HTML", reply_markup=markup_pix)
-                except Exception:
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro handler upsell_accept_: {e}", exc_info=True)
                     try: bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.")
                     except: pass
 
+            # --- 🚀 UPSELL: RECUSAR ---
             elif data.startswith("upsell_decline_"):
                 try:
+                    # Auto-destruir se configurado
                     bot_id_str = data.replace("upsell_decline_", "").strip()
                     upsell_cfg = db.query(UpsellConfig).filter(UpsellConfig.bot_id == int(bot_id_str)).first()
+                    
                     if upsell_cfg and upsell_cfg.autodestruir:
                         try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
                         except: pass
+                    
                     bot_temp.send_message(chat_id, "👍 Tudo bem! Se mudar de ideia, é só avisar.")
-                except Exception: pass
+                    logger.info(f"❌ Upsell recusado por {chat_id}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro upsell_decline_: {e}")
 
+            # --- 📉 DOWNSELL: ACEITAR ---
             elif data.startswith("downsell_accept_"):
                 try:
                     bot_id_str = data.replace("downsell_accept_", "").strip()
                     downsell_cfg = db.query(DownsellConfig).filter(DownsellConfig.bot_id == int(bot_id_str)).first()
+                    
                     if not downsell_cfg or not downsell_cfg.ativo:
                         bot_temp.send_message(chat_id, "❌ Esta oferta não está mais disponível.")
                         return {"status": "ok"}
                     
+                    # Auto-destruir a mensagem da oferta se configurado
                     if downsell_cfg.autodestruir:
                         try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
                         except: pass
                     
                     msg_wait = bot_temp.send_message(chat_id, "⏳ Gerando pagamento da oferta...", parse_mode="HTML")
+                    
                     mytx = str(uuid.uuid4())
                     preco_downsell = round(float(downsell_cfg.preco), 2)
                     
                     try:
                         pix, _gw_usada = await gerar_pix_gateway(
-                            valor_float=preco_downsell, transaction_id=mytx, bot_id=bot_db.id, db=db,
-                            user_telegram_id=str(chat_id), user_first_name=first_name, plano_nome=f"DOWNSELL: {downsell_cfg.nome_produto}", agendar_remarketing=False
+                            valor_float=preco_downsell,
+                            transaction_id=mytx,
+                            bot_id=bot_db.id,
+                            db=db,
+                            user_telegram_id=str(chat_id),
+                            user_first_name=first_name,
+                            plano_nome=f"DOWNSELL: {downsell_cfg.nome_produto}",
+                            agendar_remarketing=False
                         )
-                    except Exception:
+                    except Exception as e_pix:
+                        logger.error(f"❌ Erro PIX downsell: {e_pix}", exc_info=True)
                         try: bot_temp.delete_message(chat_id, msg_wait.message_id)
                         except: pass
-                        bot_temp.send_message(chat_id, "❌ Erro ao gerar pagamento.")
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar pagamento. Tente novamente.")
                         return {"status": "error"}
                     
                     if pix:
@@ -12158,10 +12863,23 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         txid = str(pix.get('id') or mytx).lower()
                         
                         novo_pedido = Pedido(
-                            bot_id=bot_db.id, telegram_id=str(chat_id), first_name=first_name, username=username,
-                            plano_nome=f"DOWNSELL: {downsell_cfg.nome_produto}", plano_id=None, valor=preco_downsell,
-                            transaction_id=txid, txid=txid, qr_code=qr, status="pending", tem_order_bump=False,
-                            created_at=now_brazil(), status_funil='fundo', origem='downsell', gateway_usada=_gw_usada
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=f"DOWNSELL: {downsell_cfg.nome_produto}",
+                            plano_id=None,
+                            valor=preco_downsell,
+                            transaction_id=txid,
+                            txid=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=False,
+                            created_at=now_brazil(),
+                            status_funil='fundo',
+                            origem='downsell',
+                            tracking_id=(db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first() or type('', (), {'tracking_id': None})).tracking_id,
+                            gateway_usada=_gw_usada
                         )
                         db.add(novo_pedido)
                         db.commit()
@@ -12172,22 +12890,39 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         markup_pix = types.InlineKeyboardMarkup()
                         markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR PAGAMENTO", callback_data=f"check_payment_{txid}"))
                         
-                        msg_pix_txt = f"🎁 <b>OFERTA ESPECIAL</b>\n\n📦 {downsell_cfg.nome_produto}\n💰 Valor: <b>R$ {preco_downsell:.2f}</b>\n\n🔐 Pix Copia e Cola:\n<pre>{qr}</pre>\n\n⚡ Acesso liberado automaticamente!"
+                        msg_pix_txt = (
+                            f"🎁 <b>OFERTA ESPECIAL</b>\n\n"
+                            f"📦 {downsell_cfg.nome_produto}\n"
+                            f"💰 Valor: <b>R$ {preco_downsell:.2f}</b>\n\n"
+                            f"🔐 Pix Copia e Cola:\n\n<pre>{qr}</pre>\n\n"
+                            f"👆 Toque na chave PIX acima para copiá-la\n"
+                            f"⚡ Acesso liberado automaticamente!"
+                        )
+                        
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX (Downsell)
                         msg_pix_txt = convert_premium_emojis(msg_pix_txt)
                         bot_temp.send_message(chat_id, msg_pix_txt, parse_mode="HTML", reply_markup=markup_pix)
-                except Exception:
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro handler downsell_accept_: {e}", exc_info=True)
                     try: bot_temp.send_message(chat_id, "❌ Erro ao processar oferta.")
                     except: pass
 
+            # --- 📉 DOWNSELL: RECUSAR ---
             elif data.startswith("downsell_decline_"):
                 try:
                     bot_id_str = data.replace("downsell_decline_", "").strip()
                     downsell_cfg = db.query(DownsellConfig).filter(DownsellConfig.bot_id == int(bot_id_str)).first()
+                    
                     if downsell_cfg and downsell_cfg.autodestruir:
                         try: bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
                         except: pass
+                    
                     bot_temp.send_message(chat_id, "👍 Tudo bem! Obrigado pela preferência! 😊")
-                except Exception: pass
+                    logger.info(f"❌ Downsell recusado por {chat_id}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Erro downsell_decline_: {e}")
 
     except ApiTelegramException as e:
         err_str = str(e).lower()
