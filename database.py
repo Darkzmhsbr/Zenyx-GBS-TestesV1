@@ -158,6 +158,9 @@ class Bot(Base):
     escudo_ativo = Column(Boolean, default=False)
     escudo_limite_pix = Column(Integer, default=5)
 
+    # 🔥 NOVO: LIMPEZA DE MENSAGENS DE SERVIÇO (Entrou/Saiu)
+    apagar_mensagens_servico = Column(Boolean, default=False)
+
     created_at = Column(DateTime, default=now_brazil)
     
     # 🆕 ORDEM NO SELETOR DE BOTS (drag-and-drop)
@@ -211,7 +214,7 @@ class BotAdmin(Base):
 class LaunchStrategyConfig(Base):
     """
     Configuração do Módulo de Lançamento (Degustação VIP / Sneak Peek).
-    Permite liberar entrada no VIP, e expulsar automaticamente após N minutos,
+    Permite liberar entrada no VIP, e expulsar automaticamente após N segundos,
     mandando imediatamente a oferta escassa na DM do usuário.
     """
     __tablename__ = "launch_strategy_config"
@@ -232,7 +235,8 @@ class LaunchStrategyConfig(Base):
     msg_aprovacao_btn = Column(String, default="🔥 ENTRAR NO VIP")
     
     # 2. Configuração do Cronômetro
-    tempo_vip_minutos = Column(Integer, default=1)  # Tempo de degustação no canal (Ex: 1 min, 60 min, etc)
+    # 🔥 NOVO: Ajustado para Segundos para precisão no nicho adulto (aversão à perda extrema)
+    tempo_vip_segundos = Column(Integer, default=60)  
     
     # 3. A Oferta (Mensagem enviada após a expulsão)
     msg_expulsao = Column(Text, default="⚠️ SEU ACESSO VIP GRATUITO EXPIROU!! 😈\n\nGaranta sua vaga permanente agora:")
@@ -247,7 +251,7 @@ class LaunchStrategyConfig(Base):
     bot = relationship("Bot", back_populates="launch_strategy")
 
     def __repr__(self):
-        return f"<LaunchStrategyConfig(bot_id={self.bot_id}, ativo={self.ativo}, tempo={self.tempo_vip_minutos}min)>"
+        return f"<LaunchStrategyConfig(bot_id={self.bot_id}, ativo={self.ativo}, tempo={self.tempo_vip_segundos}s)>"
 
 
 # =========================================================

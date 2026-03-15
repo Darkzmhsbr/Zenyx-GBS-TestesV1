@@ -349,7 +349,7 @@ def processar_aprovacao_lancamento(bot_token: str, canal_id: str, user_id: int, 
             link_para_canal = f"https://t.me/c/{str(canal_id).replace('-100', '')}/1" 
             markup_aprov.add(types.InlineKeyboardButton(text=btn_text, url=link_para_canal))
 
-        # TENTA ENVIAR NO PRIVADO (DM) PRIMEIRO
+        # 🔥 NOVO FLUXO: TENTA ENVIAR NO PRIVADO (DM) PRIMEIRO. SE NÃO CONSEGUIR, IGNORA (NÃO POLUI O GRUPO!)
         enviou_privado = False
         try:
             if config.msg_aprovacao_media:
@@ -363,50 +363,23 @@ def processar_aprovacao_lancamento(bot_token: str, canal_id: str, user_id: int, 
             enviou_privado = True
             logger.info(f"🚀 [LANÇAMENTO] Boas-vindas enviada no PRIVADO para {user_name}!")
         except ApiTelegramException as e_msg:
-            # 🚨 ERRO 403: O usuário não deu /start. Vamos mandar NO CANAL VIP e apagar depois!
-            err_str = str(e_msg).lower()
-            if "403" in err_str or "forbidden" in err_str or "initiate conversation" in err_str:
-                logger.warning(f"⚠️ [LANÇAMENTO] Usuário {user_id} não deu /start. Enviando boas-vindas no CANAL.")
-            else:
-                logger.error(f"❌ [LANÇAMENTO] Erro API ao enviar msg de boas vindas: {e_msg}")
+            # 🚨 ERRO 403: O usuário não deu /start. IGNORAMOS SILENCIOSAMENTE!
+            logger.warning(f"⚠️ [LANÇAMENTO] Usuário {user_id} não tem DM aberta. Mensagem ignorada para não poluir o grupo VIP.")
 
-        # SE NÃO ENVIOU NO PRIVADO, ENVIA NO CANAL
-        if not enviou_privado:
+        # 4. Agenda a Expulsão (EM SEGUNDOS)
+        tempo_segundos = getattr(config, 'tempo_vip_segundos', 60)
+        
+        # 🚨 MENSAGEM DE ADRENALINA/URGÊNCIA (Enviada logo após a mensagem de boas vindas)
+        if enviou_privado and tempo_segundos > 0:
+            import time
+            time.sleep(1) # Dá um tempinho
             try:
-                # Modificamos a mensagem para marcar a pessoa no canal
-                aviso_canal = f"👋 <a href='tg://user?id={user_id}'>{user_name}</a> acabou de entrar!\n\n{msg_aprovacao}"
-                
-                msg_sent = None
-                if config.msg_aprovacao_media:
-                    media_low = config.msg_aprovacao_media.lower()
-                    if media_low.endswith(('.mp4', '.mov', '.avi')):
-                        msg_sent = bot.send_video(canal_id, config.msg_aprovacao_media, caption=aviso_canal, reply_markup=markup_aprov, parse_mode="HTML")
-                    else:
-                        msg_sent = bot.send_photo(canal_id, config.msg_aprovacao_media, caption=aviso_canal, reply_markup=markup_aprov, parse_mode="HTML")
-                else:
-                    msg_sent = bot.send_message(canal_id, aviso_canal, reply_markup=markup_aprov, parse_mode="HTML")
-                
-                logger.info(f"✅ [LANÇAMENTO] Boas-vindas enviada no CANAL para {user_name}!")
-                
-                # Agenda a destruição da mensagem no canal após 1 minuto (para não poluir)
-                if msg_sent:
-                    try:
-                        from main import scheduler
-                        run_date = now_brazil() + timedelta(seconds=60)
-                        scheduler.add_job(
-                            bot.delete_message, 'date', run_date=run_date,
-                            args=[canal_id, msg_sent.message_id],
-                            id=f"del_boasvindas_{canal_id}_{msg_sent.message_id}", replace_existing=True
-                        )
-                    except: pass
-                    
-            except Exception as e_fallback:
-                logger.error(f"❌ [LANÇAMENTO] Erro fatal ao tentar avisar no canal: {e_fallback}")
+                bot.send_message(user_id, f"🚨 <b>SEU TEMPO COMEÇOU!</b>\n\nVocê tem exatamente <b>{tempo_segundos} segundos</b> para dar uma espiada no nosso VIP. Aproveite rápido!", parse_mode="HTML")
+            except: pass
 
-        # 4. Agenda a Expulsão
-        if config.tempo_vip_minutos > 0:
+        if tempo_segundos > 0:
             try:
-                run_date = now_brazil() + timedelta(minutes=config.tempo_vip_minutos)
+                run_date = now_brazil() + timedelta(seconds=tempo_segundos)
                 job_id = f"kick_launch_{canal_id}_{user_id}"
                 
                 from main import scheduler 
@@ -418,7 +391,7 @@ def processar_aprovacao_lancamento(bot_token: str, canal_id: str, user_id: int, 
                     id=job_id,
                     replace_existing=True
                 )
-                logger.info(f"⏰ [LANÇAMENTO] Expulsão armada para daqui a {config.tempo_vip_minutos} min. ({user_name})")
+                logger.info(f"⏰ [LANÇAMENTO] Expulsão armada para daqui a {tempo_segundos} segundos. ({user_name})")
             except Exception as e_sched:
                 logger.error(f"❌ Erro ao agendar expulsão: {e_sched}")
 
@@ -426,6 +399,7 @@ def processar_aprovacao_lancamento(bot_token: str, canal_id: str, user_id: int, 
         logger.error(f"❌ Erro geral no processar_aprovacao_lancamento: {e_geral}")
     finally:
         db.close()
+
 
 # =========================================================
 # 🚀 FUNÇÃO: EXPULSAR E OFERECER (LANÇAMENTO VIP)
@@ -437,7 +411,7 @@ def expulsar_usuario_lancamento(bot_token: str, canal_id: str, user_id: int, bot
     """
     db = SessionLocal()
     try:
-        import time # 🔥 NOVO: Para usar no sleep do anti-flood
+        import time 
         bot = telebot.TeleBot(bot_token, threaded=False)
         
         # 1. Chuta o usuário do canal
@@ -453,45 +427,38 @@ def expulsar_usuario_lancamento(bot_token: str, canal_id: str, user_id: int, bot
         if not config or not config.msg_expulsao:
             return
 
-        plano = db.query(PlanoConfig).filter(PlanoConfig.id == config.plano_id).first()
+        plano_id = config.plano_id
         
         msg_oferta = config.msg_expulsao
-        msg_oferta = convert_premium_emojis(msg_oferta, db)
+        
+        try:
+            msg_oferta = convert_premium_emojis(msg_oferta, db)
+        except: pass
         
         markup_oferta_privado = None
-        markup_oferta_canal = None # 🔥 NOVO: Botão diferente para o canal
         user_first_name = "Usuário"
         
-        if plano:
-            # Tenta pegar informações básicas do usuário se estiver na tabela Leads
-            lead_info = db.query(Lead).filter(Lead.user_id == str(user_id), Lead.bot_id == bot_db_id).first()
-            if lead_info and lead_info.nome:
-                user_first_name = lead_info.nome
-            user_username = lead_info.username if lead_info and lead_info.username else ""
-            
-            # Formata a mensagem com variáveis se existirem
-            msg_oferta = msg_oferta.replace("{first_name}", user_first_name)
-            str_user = f"@{user_username}" if user_username else f"<a href='tg://user?id={user_id}'>{user_first_name}</a>"
-            msg_oferta = msg_oferta.replace("{username}", str_user)
-            
-            # 🔥 CRIA OS BOTÕES DE CHECKOUT
-            preco_fmt = f"R${plano.preco_atual:.2f}".replace(".", ",")
-            btn_txt = f"💳 COMPRAR ACESSO ({preco_fmt})"
-            
-            # Botão para DM: Fluxo normal
-            markup_oferta_privado = types.InlineKeyboardMarkup()
-            markup_oferta_privado.add(types.InlineKeyboardButton(text=btn_txt, callback_data=f"checkout_{plano.id}"))
-            
-            # Botão para o Canal: Redireciona pro Bot (Resolve o erro "A chave 'email' não foi encontrada...")
-            try:
-                bot_info = bot.get_me()
-                markup_oferta_canal = types.InlineKeyboardMarkup()
-                markup_oferta_canal.add(types.InlineKeyboardButton(text=btn_txt, url=f"https://t.me/{bot_info.username}?start=checkout_{plano.id}"))
-            except:
-                markup_oferta_canal = markup_oferta_privado # Fallback seguro
+        if plano_id:
+            plano = db.query(PlanoConfig).filter(PlanoConfig.id == plano_id).first()
+            if plano:
+                # Tenta pegar informações básicas do usuário se estiver na tabela Leads
+                lead_info = db.query(Lead).filter(Lead.user_id == str(user_id), Lead.bot_id == bot_db_id).first()
+                if lead_info and lead_info.nome:
+                    user_first_name = lead_info.nome
+                user_username = lead_info.username if lead_info and lead_info.username else ""
+                
+                # Formata a mensagem com variáveis se existirem
+                msg_oferta = msg_oferta.replace("{first_name}", user_first_name)
+                str_user = f"@{user_username}" if user_username else f"<a href='tg://user?id={user_id}'>{user_first_name}</a>"
+                msg_oferta = msg_oferta.replace("{username}", str_user)
+                
+                # 🔥 AQUI ENTRA O SEU CÓDIGO EXATO PARA O NOME DO PLANO E VALOR
+                markup_oferta_privado = types.InlineKeyboardMarkup()
+                preco_fmt = f"R$ {plano.preco_atual:.2f}".replace('.', ',')
+                btn_txt = f"{plano.nome_exibicao} - {preco_fmt}"
+                markup_oferta_privado.add(types.InlineKeyboardButton(btn_txt, callback_data=f"checkout_{plano.id}"))
 
-        # 3. Tenta Enviar a Oferta
-        enviou_privado = False
+        # 3. Tenta Enviar a Oferta APENAS NO PRIVADO (Removido o fallback pro canal)
         try:
             if config.media_oferta_url:
                 media_low = config.media_oferta_url.lower()
@@ -502,64 +469,17 @@ def expulsar_usuario_lancamento(bot_token: str, canal_id: str, user_id: int, bot
             else:
                 bot.send_message(user_id, msg_oferta, reply_markup=markup_oferta_privado, parse_mode="HTML")
                 
-            enviou_privado = True
-            logger.info(f"🚀 [LANÇAMENTO] Oferta de recuperação enviada NO PRIVADO para {user_id}")
+            logger.info(f"🚀 [LANÇAMENTO] Oferta de recuperação enviada NO PRIVADO para {user_id} com sucesso!")
             
         except ApiTelegramException as e_msg:
             err_str = str(e_msg).lower()
             if "403" in err_str or "forbidden" in err_str or "initiate conversation" in err_str:
-                logger.warning(f"⚠️ [LANÇAMENTO] Usuário {user_id} não tem DM aberta. Enviando oferta de KICK NO CANAL!")
+                logger.warning(f"⚠️ [LANÇAMENTO] Usuário {user_id} não tem DM aberta. Oferta de kick ignorada para não poluir o grupo!")
             else:
-                logger.error(f"❌ [LANÇAMENTO] Erro API ao enviar oferta de expulsão: {e_msg}")
-
-        # 4. Se não enviou no privado, MANDA NO CANAL como último aviso!
-        if not enviou_privado:
-            try:
-                # Adiciona o aviso de que o tempo esgotou marcando o usuário
-                aviso_canal = f"⚠️ O Tempo Vip de <a href='tg://user?id={user_id}'>{user_first_name}</a> acabou e ele foi removido do grupo.\n\n{msg_oferta}"
-                
-                msg_sent = None
-                
-                # 🔥 FIX ANTI-FLOOD (ERRO 429)
-                for attempt in range(3):
-                    try:
-                        if config.media_oferta_url:
-                            media_low = config.media_oferta_url.lower()
-                            if media_low.endswith(('.mp4', '.mov', '.avi')):
-                                msg_sent = bot.send_video(int(canal_id), config.media_oferta_url, caption=aviso_canal, reply_markup=markup_oferta_canal, parse_mode="HTML")
-                            else:
-                                msg_sent = bot.send_photo(int(canal_id), config.media_oferta_url, caption=aviso_canal, reply_markup=markup_oferta_canal, parse_mode="HTML")
-                        else:
-                            msg_sent = bot.send_message(int(canal_id), aviso_canal, reply_markup=markup_oferta_canal, parse_mode="HTML")
-                        break # Se enviou com sucesso, sai do loop
-                    except ApiTelegramException as e_flood:
-                        if e_flood.error_code == 429:
-                            retry_after = int(e_flood.result_json.get('parameters', {}).get('retry_after', 3))
-                            logger.warning(f"⚠️ Flood detectado. Aguardando {retry_after}s...")
-                            time.sleep(retry_after)
-                        else:
-                            raise e_flood
-                
-                if msg_sent:
-                    logger.info(f"✅ [LANÇAMENTO] Oferta de expulsão enviada NO CANAL para {user_id}!")
-                
-                # Agenda a destruição da cobrança no canal após 2 minutos (para dar tempo de ele clicar)
-                if msg_sent:
-                    try:
-                        from main import scheduler
-                        run_date = now_brazil() + timedelta(seconds=120)
-                        scheduler.add_job(
-                            bot.delete_message, 'date', run_date=run_date,
-                            args=[int(canal_id), msg_sent.message_id],
-                            id=f"del_ofertakick_{canal_id}_{msg_sent.message_id}", replace_existing=True
-                        )
-                    except: pass
-
-            except Exception as e_fallback:
-                logger.error(f"❌ [LANÇAMENTO] Erro fatal ao enviar oferta de kick no canal: {e_fallback}")
+                logger.error(f"❌ [LANÇAMENTO] Erro API ao enviar oferta para {user_id}: {e_msg}")
 
     except Exception as e_geral:
-        logger.error(f"❌ Erro geral no expulsar_usuario_lancamento: {e_geral}")
+        logger.error(f"❌ Erro geral na expulsão de lançamento: {e_geral}")
     finally:
         db.close()
 
@@ -5686,12 +5606,12 @@ class LaunchStrategyUpdate(BaseModel):
     media_url: Optional[str] = None
     btn_text: Optional[str] = "🔓 RESGATAR CONVITE VIP"
     
-    delay_aprovacao_segundos: int = 0  # 🔥 NOVO!
+    delay_aprovacao_segundos: int = 0
     msg_aprovacao_texto: Optional[str] = None
     msg_aprovacao_media: Optional[str] = None
     msg_aprovacao_btn: Optional[str] = "🔥 ENTRAR NO VIP"
     
-    tempo_vip_minutos: int
+    tempo_vip_segundos: int  # 🔥 ALTERADO PARA SEGUNDOS!
     msg_expulsao: Optional[str] = None
     media_oferta_url: Optional[str] = None
     plano_id: Optional[int] = None
@@ -6097,7 +6017,6 @@ class BotCreate(BaseModel):
     protect_content: Optional[bool] = False
     notificar_no_bot: Optional[bool] = True  # 🔥 NOVO: Toggle notificação no bot
 
-# Novo modelo para Atualização
 class BotUpdate(BaseModel):
     nome: Optional[str] = None
     token: Optional[str] = None
@@ -6110,6 +6029,8 @@ class BotUpdate(BaseModel):
     # 👇 [NOVO] VARIÁVEIS DO ESCUDO PRIME 👇
     escudo_ativo: Optional[bool] = None
     escudo_limite_pix: Optional[int] = None
+    # 🧹 [NOVO] LIMPEZA GLOBAL DE SERVIÇO
+    apagar_mensagens_servico: Optional[bool] = None
 
 # Modelo para Criar Admin
 class BotAdminCreate(BaseModel):
@@ -11103,6 +11024,25 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
         bot_temp = telebot.TeleBot(token, threaded=False)
         message = update.message if update.message else None
         
+        # =========================================================
+        # 🧹 [NOVO] LIMPEZA GLOBAL DE MENSAGENS DE SERVIÇO
+        # =========================================================
+        if message and getattr(bot_db, 'apagar_mensagens_servico', False):
+            # Tipos de mensagens de serviço geradas pelo Telegram
+            service_types = [
+                'new_chat_members', 'left_chat_member', 'new_chat_title', 
+                'new_chat_photo', 'delete_chat_photo', 'group_chat_created', 
+                'supergroup_chat_created', 'channel_chat_created', 
+                'migrate_to_chat_id', 'migrate_from_chat_id', 'pinned_message'
+            ]
+            if message.content_type in service_types:
+                try:
+                    bot_temp.delete_message(message.chat.id, message.message_id)
+                    logger.info(f"🧹 [LIMPEZA] Mensagem de serviço ({message.content_type}) apagada no chat {message.chat.id}")
+                except Exception as e:
+                    logger.warning(f"🧹 Erro ao apagar mensagem de serviço: {e}")
+                # O processamento continua porque ainda precisamos ler 'new_chat_members' abaixo.
+
         # ========================================
         # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE / LANÇAMENTO
         # ========================================
@@ -11154,7 +11094,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 markup_aprov.add(types.InlineKeyboardButton(text=btn_text, url=link_para_canal))
 
                             # ========================================================
-                            # 🔥 CORREÇÃO: TENTA MANDAR NO PRIVADO (403) OU CANAL (429)
+                            # 🔥 CORREÇÃO: TENTA MANDAR SÓ NO PRIVADO. SEM FALLBACK POLUIDOR DO CANAL.
                             # ========================================================
                             enviou_privado = False
                             try:
@@ -11171,57 +11111,35 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 logger.info(f"🚀 [LANÇAMENTO] Boas-vindas enviada no PRIVADO para {user_name}!")
                             except ApiTelegramException as e_msg:
                                 if "403" in str(e_msg) or "forbidden" in str(e_msg).lower():
-                                    logger.warning(f"⚠️ [LANÇAMENTO] Usuário {user_id} não deu /start. Enviando no canal.")
+                                    logger.warning(f"⚠️ [LANÇAMENTO] Usuário {user_id} não deu /start. Fallback para o canal REMOVIDO por segurança.")
                                 else:
                                     logger.error(f"❌ Erro API: {e_msg}")
-
-                            if not enviou_privado:
+                            
+                            # Agenda a expulsão e envia alerta de urgência!
+                            tempo_segundos = getattr(launch_cfg, 'tempo_vip_segundos', 60)
+                            
+                            if enviou_privado and tempo_segundos > 0:
                                 import time
-                                aviso_canal = f"👋 <a href='tg://user?id={user_id}'>{user_name}</a> acabou de entrar!\n\n{msg_aprovacao}"
-                                msg_sent = None
-                                
-                                # Anti-Flood (Erro 429)
-                                for attempt in range(3):
-                                    try:
-                                        if launch_cfg.msg_aprovacao_media:
-                                            media_low = launch_cfg.msg_aprovacao_media.lower()
-                                            if media_low.endswith(('.mp4', '.mov', '.avi')):
-                                                msg_sent = bot_temp.send_video(canal_id, launch_cfg.msg_aprovacao_media, caption=aviso_canal, reply_markup=markup_aprov, parse_mode="HTML")
-                                            else:
-                                                msg_sent = bot_temp.send_photo(canal_id, launch_cfg.msg_aprovacao_media, caption=aviso_canal, reply_markup=markup_aprov, parse_mode="HTML")
-                                        else:
-                                            msg_sent = bot_temp.send_message(canal_id, aviso_canal, reply_markup=markup_aprov, parse_mode="HTML")
-                                        break
-                                    except ApiTelegramException as e_flood:
-                                        if e_flood.error_code == 429:
-                                            retry_after = int(e_flood.result_json.get('parameters', {}).get('retry_after', 3))
-                                            time.sleep(retry_after)
-                                        else:
-                                            break
-                                
-                                # Apaga a mensagem do canal em 60s
-                                if msg_sent:
-                                    try:
-                                        run_del = now_brazil() + timedelta(seconds=60)
-                                        scheduler.add_job(bot_temp.delete_message, 'date', run_date=run_del, args=[canal_id, msg_sent.message_id], id=f"del_boasvindas_{canal_id}_{msg_sent.message_id}", replace_existing=True)
-                                    except: pass
+                                time.sleep(1)
+                                try:
+                                    bot_temp.send_message(user_id, f"🚨 <b>SEU TEMPO COMEÇOU!</b>\n\nVocê tem exatamente <b>{tempo_segundos} segundos</b> para dar uma espiada no nosso VIP. Aproveite rápido!", parse_mode="HTML")
+                                except: pass
 
+                            if tempo_segundos > 0:
+                                try:
+                                    run_date = now_brazil() + timedelta(seconds=tempo_segundos)
+                                    job_id = f"kick_launch_{canal_vip_id}_{user_id}"
+                                    scheduler.add_job(
+                                        expulsar_usuario_lancamento, 'date', run_date=run_date,
+                                        args=[token, canal_vip_id, user_id, bot_db.id],
+                                        id=job_id, replace_existing=True
+                                    )
+                                    logger.info(f"⏰ [LANÇAMENTO] Expulsão agendada para daqui a {tempo_segundos} seg.")
+                                except Exception as e_sched:
+                                    logger.error(f"❌ Erro ao agendar expulsão: {e_sched}")
+                        
                         except Exception as e_app:
                             logger.error(f"❌ [LANÇAMENTO] Erro ao processar aprovação VIP: {e_app}")
-                        
-                        # Agenda a expulsão
-                        if launch_cfg.tempo_vip_minutos > 0:
-                            try:
-                                run_date = now_brazil() + timedelta(minutes=launch_cfg.tempo_vip_minutos)
-                                job_id = f"kick_launch_{canal_vip_id}_{user_id}"
-                                scheduler.add_job(
-                                    expulsar_usuario_lancamento, 'date', run_date=run_date,
-                                    args=[token, canal_vip_id, user_id, bot_db.id],
-                                    id=job_id, replace_existing=True
-                                )
-                                logger.info(f"⏰ [LANÇAMENTO] Expulsão agendada para daqui a {launch_cfg.tempo_vip_minutos} min.")
-                            except Exception as e_sched:
-                                logger.error(f"❌ Erro ao agendar expulsão: {e_sched}")
                         
                         return {"status": "ok", "message": "Lançamento processado"}
 
@@ -11342,80 +11260,80 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                     reply_markup=markup,
                                     parse_mode="HTML"
                                 )
-                        else:  # photo ou padrão
-                            bot_temp.send_photo(
-                                user_id,
-                                config.media_url,
-                                caption=final_message,
-                                reply_markup=markup,
-                                parse_mode="HTML"
-                            )
-                    else:
-                        bot_temp.send_message(
+                    else:  # photo ou padrão
+                        bot_temp.send_photo(
                             user_id,
-                            final_message,
+                            config.media_url,
+                            caption=final_message,
                             reply_markup=markup,
                             parse_mode="HTML"
                         )
-                    
-                    logger.info(f"✅ [CANAL FREE] Mensagem enviada para {user_name}")
-                    
-                except Exception as e_msg:
-                    logger.error(f"❌ [CANAL FREE] Erro ao enviar mensagem: {e_msg}")
-                
-                # Salvar lead se não existir
-                try:
-                    lead_existente = db.query(Lead).filter(
-                        Lead.user_id == str(user_id),
-                        Lead.bot_id == bot_db.id
-                    ).first()
-                    
-                    if not lead_existente:
-                        lead = Lead(
-                            user_id=str(user_id),
-                            nome=user_name,
-                            username=username,
-                            bot_id=bot_db.id,
-                            status='topo',
-                            funil_stage='lead_frio',
-                            origem_entrada='canal_free'  # 🔥 NOVO: Marca origem
-                        )
-                        db.add(lead)
-                        db.commit()
-                        logger.info(f"✅ [CANAL FREE] Lead salvo: {user_name}")
-                    else:
-                        # 🔥 Se lead já existe mas não tem origem marcada, atualiza
-                        if not lead_existente.origem_entrada or lead_existente.origem_entrada == 'bot_direto':
-                            lead_existente.origem_entrada = 'canal_free'
-                            db.commit()
-                    
-                except Exception as e_lead:
-                    logger.error(f"❌ [CANAL FREE] Erro ao salvar lead: {e_lead}")
-                    db.rollback()
-                
-                # Agendar aprovação automática
-                try:
-                    run_date = now_brazil() + timedelta(seconds=config.delay_seconds)
-                    
-                    scheduler.add_job(
-                        aprovar_entrada_canal_free,
-                        'date',
-                        run_date=run_date,
-                        args=[token, canal_id, user_id],
-                        id=f"approve_free_{canal_id}_{user_id}",
-                        replace_existing=True
+                else:
+                    bot_temp.send_message(
+                        user_id,
+                        final_message,
+                        reply_markup=markup,
+                        parse_mode="HTML"
                     )
                     
-                    logger.info(f"⏰ [CANAL FREE] Aprovação agendada para {config.delay_seconds}s - User: {user_name}")
-                    
-                except Exception as e_schedule:
-                    logger.error(f"❌ [CANAL FREE] Erro ao agendar aprovação: {e_schedule}")
+                logger.info(f"✅ [CANAL FREE] Mensagem enviada para {user_name}")
                 
-                return {"status": "ok", "message": "Canal Free processado"}
+            except Exception as e_msg:
+                logger.error(f"❌ [CANAL FREE] Erro ao enviar mensagem: {e_msg}")
+            
+            # Salvar lead se não existir
+            try:
+                lead_existente = db.query(Lead).filter(
+                    Lead.user_id == str(user_id),
+                    Lead.bot_id == bot_db.id
+                ).first()
                 
-            except Exception as e_free:
-                logger.error(f"❌ [CANAL FREE] Erro geral: {e_free}")
-                return {"status": "error", "message": str(e_free)}
+                if not lead_existente:
+                    lead = Lead(
+                        user_id=str(user_id),
+                        nome=user_name,
+                        username=username,
+                        bot_id=bot_db.id,
+                        status='topo',
+                        funil_stage='lead_frio',
+                        origem_entrada='canal_free'  # 🔥 NOVO: Marca origem
+                    )
+                    db.add(lead)
+                    db.commit()
+                    logger.info(f"✅ [CANAL FREE] Lead salvo: {user_name}")
+                else:
+                    # 🔥 Se lead já existe mas não tem origem marcada, atualiza
+                    if not lead_existente.origem_entrada or lead_existente.origem_entrada == 'bot_direto':
+                        lead_existente.origem_entrada = 'canal_free'
+                        db.commit()
+                
+            except Exception as e_lead:
+                logger.error(f"❌ [CANAL FREE] Erro ao salvar lead: {e_lead}")
+                db.rollback()
+            
+            # Agendar aprovação automática
+            try:
+                run_date = now_brazil() + timedelta(seconds=config.delay_seconds)
+                
+                scheduler.add_job(
+                    aprovar_entrada_canal_free,
+                    'date',
+                    run_date=run_date,
+                    args=[token, canal_id, user_id],
+                    id=f"approve_free_{canal_id}_{user_id}",
+                    replace_existing=True
+                )
+                
+                logger.info(f"⏰ [CANAL FREE] Aprovação agendada para {config.delay_seconds}s - User: {user_name}")
+                
+            except Exception as e_schedule:
+                logger.error(f"❌ [CANAL FREE] Erro ao agendar aprovação: {e_schedule}")
+            
+            return {"status": "ok", "message": "Canal Free processado"}
+            
+        except Exception as e_free:
+            logger.error(f"❌ [CANAL FREE] Erro geral: {e_free}")
+            return {"status": "error", "message": str(e_free)}
         
         # ----------------------------------------
         # 🚪 1. O PORTEIRO (GATEKEEPER CLÁSSICO)
@@ -11457,10 +11375,12 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             LaunchStrategyConfig.ativo == True
                         ).first()
 
-                        if launch_cfg and launch_cfg.tempo_vip_minutos > 0:
-                            # MODO DEGUSTAÇÃO: Agenda a expulsão em X minutos
+                        tempo_seg = getattr(launch_cfg, 'tempo_vip_segundos', 60) if launch_cfg else 0
+
+                        if launch_cfg and tempo_seg > 0:
+                            # MODO DEGUSTAÇÃO: Agenda a expulsão em X segundos
                             try:
-                                run_date = now_brazil() + timedelta(minutes=launch_cfg.tempo_vip_minutos)
+                                run_date = now_brazil() + timedelta(seconds=tempo_seg)
                                 job_id = f"kick_launch_{canal_vip_id}_{member.id}"
                                 
                                 scheduler.add_job(
@@ -11471,7 +11391,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                     id=job_id,
                                     replace_existing=True
                                 )
-                                logger.info(f"🚀 [LANÇAMENTO] Usuário {member.id} entrou na degustação (Via Grupo). Expulsão em {launch_cfg.tempo_vip_minutos} min.")
+                                logger.info(f"🚀 [LANÇAMENTO] Usuário {member.id} entrou na degustação (Via Grupo). Expulsão em {tempo_seg} seg.")
                             except Exception as e_sched:
                                 logger.error(f"❌ Erro ao agendar expulsão do lançamento: {e_sched}")
                         else:
@@ -11755,10 +11675,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     logger.info("✅ Menu enviado com sucesso!")
 
-                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão
-                    # if sent_msg_start and flow and flow.autodestruir_1:
-                    #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg_start.message_id, 5)
-
                 except ApiTelegramException as e_envio:
                     err_str = str(e_envio).lower()
                     if "blocked" in err_str or "403" in err_str:
@@ -11960,7 +11876,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                     oferta_block = f"💰 Valor: <b>R$ {valor_fmt}</b>"
                                     
                                     if msg_pix_template:
-                                        msg_pix = msg_pix_template                                            .replace("{nome}", "Usuário Teste")                                            .replace("{first_name}", "Usuário Teste")                                            .replace("{plano}", plano.nome_exibicao)                                            .replace("{valor}", valor_fmt)                                            .replace("{oferta}", oferta_block)
+                                        msg_pix = msg_pix_template                                           .replace("{nome}", "Usuário Teste")                                           .replace("{first_name}", "Usuário Teste")                                           .replace("{plano}", plano.nome_exibicao)                                           .replace("{valor}", valor_fmt)                                           .replace("{oferta}", oferta_block)
                                         
                                         if "{qrcode}" in msg_pix:
                                             msg_pix = msg_pix.replace("{qrcode}", f"<pre>{fake_pix}</pre>")
@@ -12118,11 +12034,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     except:
                         # Fallback caso falhe HTML ou Mídia
                         sent_msg = bot_temp.send_message(chat_id, strip_premium_emoji_tags(_step_txt) or "...", reply_markup=mk, protect_content=_protect)
-
-                    # 🔥 AUTO-DESTRUIÇÃO REMOVIDA - Agora só deleta ao clicar no botão
-                    # if sent_msg and target_step.autodestruir:
-                    #     tempo = target_step.delay_seconds if target_step.delay_seconds > 0 else 20
-                    #     agendar_destruicao_msg(bot_temp, chat_id, sent_msg.message_id, tempo)
 
                     # Lógica de Navegação Automática (Recursividade para passos SEM botão)
                     if not target_step.mostrar_botao:
@@ -12383,8 +12294,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             
                             if chat_id in dict_pendente: del dict_pendente[chat_id]
                             if str(chat_id) in dict_pendente: del dict_pendente[str(chat_id)]
-                        else:
-                            logger.warning(f"⚠️ Clique detectado, mas não achei agendamento para {chat_id} (Restartou o servidor?)")
+                    else:
+                        logger.warning(f"⚠️ Clique detectado, mas não achei agendamento para {chat_id} (Restartou o servidor?)")
 
                     # ==============================================================================
                     
@@ -23272,12 +23183,28 @@ async def get_launch_strategy(bot_id: int, db: Session = Depends(get_db), curren
             "msg_aprovacao_texto": "PARABÉNS {first_name} VOCÊ FOI APROVADO EM NOSSO VIP 🎉\n\nCLIQUE ABAIXO PARA ACESSAR O NOSSO GRUPINHO SECRETO 👇🏼\n\nENTRE AGORA!! SE SAIR NÃO TEM VOLTA!!",
             "msg_aprovacao_media": "",
             "msg_aprovacao_btn": "🔥 ENTRAR NO VIP",
-            "tempo_vip_minutos": 1,
+            "tempo_vip_segundos": 60,  # 🔥 MUDOU PARA SEGUNDOS
             "msg_expulsao": "⚠️ SEU ACESSO VIP GRATUITO EXPIROU!! 😈\n\nMas não fique triste!! Temos uma condição especial e única para você garantir seu acesso VIP pra SEMPRE!!\n\n⏳ As vagas estão acabando. Garanta o acesso antes que feche de vez! ⬇️",
             "media_oferta_url": "",
             "plano_id": None
         }
-    return config
+    
+    # Prepara o dicionário de retorno substituindo minutos por segundos se necessário (retrocompatibilidade)
+    retorno = {
+        "ativo": config.ativo,
+        "msg_boas_vindas": config.msg_boas_vindas,
+        "media_url": config.media_url,
+        "btn_text": config.btn_text,
+        "delay_aprovacao_segundos": config.delay_aprovacao_segundos,
+        "msg_aprovacao_texto": config.msg_aprovacao_texto,
+        "msg_aprovacao_media": config.msg_aprovacao_media,
+        "msg_aprovacao_btn": config.msg_aprovacao_btn,
+        "tempo_vip_segundos": getattr(config, 'tempo_vip_segundos', 60), # 🔥 PUXA SEGUNDOS
+        "msg_expulsao": config.msg_expulsao,
+        "media_oferta_url": config.media_oferta_url,
+        "plano_id": config.plano_id
+    }
+    return retorno
 
 @app.post("/api/admin/launch-strategy/{bot_id}")
 async def save_launch_strategy(bot_id: int, payload: LaunchStrategyUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
@@ -23300,7 +23227,7 @@ async def save_launch_strategy(bot_id: int, payload: LaunchStrategyUpdate, db: S
     config.msg_aprovacao_media = payload.msg_aprovacao_media
     config.msg_aprovacao_btn = payload.msg_aprovacao_btn
     
-    config.tempo_vip_minutos = payload.tempo_vip_minutos
+    config.tempo_vip_segundos = payload.tempo_vip_segundos # 🔥 SALVA SEGUNDOS
     config.msg_expulsao = payload.msg_expulsao
     config.media_oferta_url = payload.media_oferta_url
     config.plano_id = payload.plano_id
@@ -23367,3 +23294,42 @@ async def migrate_launch_strategy_v12(db: Session = Depends(get_db)):
         }
     except Exception as e:
         return {"status": "error", "message": f"❌ Erro na migração: {str(e)}"}
+
+# =========================================================
+# 🚨 MIGRAÇÃO V13: LIMPEZA DE GRUPO E LANÇAMENTO EM SEGUNDOS
+# =========================================================
+@app.get("/migrate-v13-updates")
+async def migrate_v13_updates(db: Session = Depends(get_db)):
+    """
+    Migração V13: Adiciona coluna apagar_mensagens_servico na tabela bots,
+    e altera o tempo de lançamento para segundos.
+    """
+    try:
+        from sqlalchemy import text
+        log_msgs = []
+        
+        # 1. Adiciona apagar_mensagens_servico na tabela de bots
+        try:
+            db.execute(text("ALTER TABLE bots ADD COLUMN apagar_mensagens_servico BOOLEAN DEFAULT FALSE"))
+            db.commit()
+            log_msgs.append("✅ Coluna apagar_mensagens_servico adicionada em bots.")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"ℹ️ Coluna apagar_mensagens_servico já existe ou falhou: {str(e)}")
+
+        # 2. Adiciona tempo_vip_segundos na launch_strategy_config
+        try:
+            db.execute(text("ALTER TABLE launch_strategy_config ADD COLUMN tempo_vip_segundos INTEGER DEFAULT 60"))
+            db.commit()
+            log_msgs.append("✅ Coluna tempo_vip_segundos adicionada em launch_strategy_config.")
+        except Exception as e:
+            db.rollback()
+            log_msgs.append(f"ℹ️ Coluna tempo_vip_segundos já existe ou falhou: {str(e)}")
+
+        return {
+            "status": "success",
+            "message": "🚀 Migração V13 concluída com sucesso!",
+            "details": log_msgs
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"❌ Erro na migração V13: {str(e)}"}
