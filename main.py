@@ -11041,7 +11041,6 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     logger.info(f"🧹 [LIMPEZA] Mensagem de serviço ({message.content_type}) apagada no chat {message.chat.id}")
                 except Exception as e:
                     logger.warning(f"🧹 Erro ao apagar mensagem de serviço: {e}")
-                # O processamento continua porque ainda precisamos ler 'new_chat_members' abaixo.
 
         # ========================================
         # 🆓 HANDLER: SOLICITAÇÃO DE ENTRADA NO CANAL FREE / LANÇAMENTO
@@ -11076,8 +11075,10 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             # 2. 🔥 QUEIMA O LINK (Revoga para nunca mais ser usado)
                             if join_request.invite_link and join_request.invite_link.invite_link:
                                 link_usado = join_request.invite_link.invite_link
-                                bot_temp.revoke_chat_invite_link(canal_id, link_usado)
-                                logger.info(f"🔥 [LANÇAMENTO] Link QUEIMADO com sucesso! ({link_usado})")
+                                try:
+                                    bot_temp.revoke_chat_invite_link(canal_id, link_usado)
+                                    logger.info(f"🔥 [LANÇAMENTO] Link QUEIMADO com sucesso! ({link_usado})")
+                                except: pass
                                 
                             # 3. 🚀 ENVIA MENSAGEM DE BOAS-VINDAS IMEDIATA
                             msg_aprovacao = launch_cfg.msg_aprovacao_texto or f"PARABÉNS {user_name} VOCÊ FOI APROVADO EM NOSSO VIP 🎉\n\nCLIQUE ABAIXO PARA ACESSAR O NOSSO GRUPINHO SECRETO 👇🏼\n\nENTRE AGORA!! SE SAIR NÃO TEM VOLTA!!"
@@ -11094,7 +11095,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 markup_aprov.add(types.InlineKeyboardButton(text=btn_text, url=link_para_canal))
 
                             # ========================================================
-                            # 🔥 CORREÇÃO: TENTA MANDAR SÓ NO PRIVADO. SEM FALLBACK POLUIDOR DO CANAL.
+                            # 🔥 TENTA MANDAR SÓ NO PRIVADO. SEM FALLBACK POLUIDOR NO CANAL!
                             # ========================================================
                             enviou_privado = False
                             try:
@@ -11110,8 +11111,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                 enviou_privado = True
                                 logger.info(f"🚀 [LANÇAMENTO] Boas-vindas enviada no PRIVADO para {user_name}!")
                             except ApiTelegramException as e_msg:
-                                if "403" in str(e_msg) or "forbidden" in str(e_msg).lower():
-                                    logger.warning(f"⚠️ [LANÇAMENTO] Usuário {user_id} não deu /start. Fallback para o canal REMOVIDO por segurança.")
+                                if "403" in str(e_msg).lower() or "forbidden" in str(e_msg).lower():
+                                    logger.warning(f"⚠️ [LANÇAMENTO] Usuário {user_id} não deu /start. Mensagem ignorada por segurança.")
                                 else:
                                     logger.error(f"❌ Erro API: {e_msg}")
                             
@@ -11220,6 +11221,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         else:
                             bot_temp.send_voice(user_id, _audio_url_cf)
                         
+                        import time
                         time.sleep(_audio_delay_cf)
                         
                         if config.media_url and config.media_type in ('photo', 'video'):
@@ -11253,6 +11255,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                             else:
                                 bot_temp.send_voice(user_id, config.media_url)
                             if final_message or markup:
+                                import time
                                 time.sleep(2)
                                 bot_temp.send_message(
                                     user_id,
@@ -11876,7 +11879,12 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                                     oferta_block = f"💰 Valor: <b>R$ {valor_fmt}</b>"
                                     
                                     if msg_pix_template:
-                                        msg_pix = msg_pix_template                                           .replace("{nome}", "Usuário Teste")                                           .replace("{first_name}", "Usuário Teste")                                           .replace("{plano}", plano.nome_exibicao)                                           .replace("{valor}", valor_fmt)                                           .replace("{oferta}", oferta_block)
+                                        msg_pix = msg_pix_template \
+                                            .replace("{nome}", "Usuário Teste") \
+                                            .replace("{first_name}", "Usuário Teste") \
+                                            .replace("{plano}", plano.nome_exibicao) \
+                                            .replace("{valor}", valor_fmt) \
+                                            .replace("{oferta}", oferta_block)
                                         
                                         if "{qrcode}" in msg_pix:
                                             msg_pix = msg_pix.replace("{qrcode}", f"<pre>{fake_pix}</pre>")
@@ -12470,9 +12478,7 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         types.InlineKeyboardButton(f"{bump.btn_aceitar} (+ R$ {bump.preco:.2f})", callback_data=f"bump_yes_{plano.id}"),
                         types.InlineKeyboardButton(bump.btn_recusar, callback_data=f"bump_no_{plano.id}")
                     )
-                    txt_bump = bump.msg_texto or f"Levar {bump.nome_produto} junto?"
-                    # ✨ CONVERTE EMOJIS PREMIUM
-                    txt_bump = convert_premium_emojis(txt_bump)
+                    txt_bump = convert_premium_emojis(bump.msg_texto or f"Levar {bump.nome_produto} junto?")
                     try:
                         if bump.msg_media:
                             if bump.msg_media.lower().endswith(('.mp4','.mov')):
@@ -12570,120 +12576,131 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
                         
                     else:
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
                         bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
 
             # --- C) BUMP YES/NO ---
             elif data.startswith("bump_yes_") or data.startswith("bump_no_"):
-                aceitou = "yes" in data
-                pid = data.split("_")[2]
-                plano = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
-                
-                lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
-                track_id_pedido = lead_origem.tracking_id if lead_origem else None
-
-                bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
-                
-                if bump and bump.autodestruir:
-                    try:
-                        bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
-                    except:
-                        pass
-                
-                valor_final = plano.preco_atual
-                nome_final = plano.nome_exibicao
-                if aceitou and bump:
-                    valor_final += bump.preco
-                    nome_final += f" + {bump.nome_produto}"
-                
-                msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
-                mytx = str(uuid.uuid4())
-
-                # Gera PIX com remarketing integrado
-                pix, _gw_usada = await gerar_pix_gateway(
-                    valor_float=valor_final,
-                    transaction_id=mytx,
-                    bot_id=bot_db.id,
-                    db=db,
-                    user_telegram_id=str(chat_id),  # ✅ PASSA TELEGRAM ID
-                    user_first_name=first_name,     # ✅ PASSA NOME
-                    plano_nome=nome_final           # ✅ PASSA PLANO
-                )
-                
-                if pix:
-                    qr = pix.get('qr_code_text') or pix.get('qr_code')
-                    txid = str(pix.get('id') or mytx).lower()
+                try:
+                    aceitou = "yes" in data
+                    pid = data.split("_")[2]
+                    plano = db.query(PlanoConfig).filter(PlanoConfig.id == pid).first()
                     
-                    # Salva pedido
-                    novo_pedido = Pedido(
+                    lead_origem = db.query(Lead).filter(Lead.user_id == str(chat_id), Lead.bot_id == bot_db.id).first()
+                    track_id_pedido = lead_origem.tracking_id if lead_origem else None
+
+                    bump = db.query(OrderBumpConfig).filter(OrderBumpConfig.bot_id == bot_db.id).first()
+                    
+                    if bump and bump.autodestruir:
+                        try:
+                            bot_temp.delete_message(chat_id, update.callback_query.message.message_id)
+                        except:
+                            pass
+                    
+                    valor_final = plano.preco_atual
+                    nome_final = plano.nome_exibicao
+                    if aceitou and bump:
+                        valor_final += bump.preco
+                        nome_final += f" + {bump.nome_produto}"
+                    
+                    msg_wait = bot_temp.send_message(chat_id, f"⏳ Gerando PIX: <b>{nome_final}</b>...", parse_mode="HTML")
+                    mytx = str(uuid.uuid4())
+
+                    # Gera PIX com remarketing integrado
+                    pix, _gw_usada = await gerar_pix_gateway(
+                        valor_float=valor_final,
+                        transaction_id=mytx,
                         bot_id=bot_db.id,
-                        telegram_id=str(chat_id),
-                        first_name=first_name,
-                        username=username,
-                        plano_nome=nome_final,
-                        plano_id=plano.id,
-                        valor=valor_final,
-                        transaction_id=txid,
-                        txid=txid,
-                        qr_code=qr,
-                        status="pending",
-                        tem_order_bump=aceitou,
-                        created_at=now_brazil(),
-                        tracking_id=track_id_pedido,
-                        gateway_usada=_gw_usada,
+                        db=db,
+                        user_telegram_id=str(chat_id),  # ✅ PASSA TELEGRAM ID
+                        user_first_name=first_name,     # ✅ PASSA NOME
+                        plano_nome=nome_final           # ✅ PASSA PLANO
                     )
-                    db.add(novo_pedido)
-                    db.commit()
                     
-                    try:
-                        bot_temp.delete_message(chat_id, msg_wait.message_id)
-                    except:
-                        pass
-                    
-                    markup_pix = types.InlineKeyboardMarkup()
-                    markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
-
-                    # -----------------------------------------------------------
-                    # 🎨 MENSAGEM PIX (BUMP): PERSONALIZADA vs PADRÃO
-                    # -----------------------------------------------------------
-                    flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
-                    custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
-                    
-                    msg_pix = ""
-                    val_fmt = f"{valor_final:.2f}".replace('.', ',')
-                    
-                    if custom_msg:
-                        # --- MODO PERSONALIZADO ---
-                        oferta_simple = f"💰 Valor: <b>R$ {val_fmt}</b>"
-                        msg_pix = custom_msg.replace("{nome}", first_name)\
-                                            .replace("{plano}", nome_final)\
-                                            .replace("{valor}", val_fmt)\
-                                            .replace("{oferta}", oferta_simple)
+                    if pix:
+                        qr = pix.get('qr_code_text') or pix.get('qr_code')
+                        txid = str(pix.get('id') or mytx).lower()
                         
-                        if "{qrcode}" in msg_pix:
-                            msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
-                        else:
-                            msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
-                    else:
-                        # --- MODO PADRÃO (ANTIGO) ---
-                        msg_pix = (
-                            f"🌟 Pagamento gerado:\n"
-                            f"🎁 Plano: <b>{nome_final}</b>\n"
-                            f"💰 Valor: <b>R$ {val_fmt}</b>\n"
-                            f"🔐 Pix Copia e Cola:\n\n"
-                            f"<pre>{qr}</pre>\n\n"
-                            f"👆 Toque para copiar\n"
-                            f"⚡ Acesso automático!"
+                        # Salva pedido
+                        novo_pedido = Pedido(
+                            bot_id=bot_db.id,
+                            telegram_id=str(chat_id),
+                            first_name=first_name,
+                            username=username,
+                            plano_nome=nome_final,
+                            plano_id=plano.id,
+                            valor=valor_final,
+                            transaction_id=txid,
+                            txid=txid,
+                            qr_code=qr,
+                            status="pending",
+                            tem_order_bump=aceitou,
+                            created_at=now_brazil(),
+                            tracking_id=track_id_pedido,
+                            gateway_usada=_gw_usada,
                         )
+                        db.add(novo_pedido)
+                        db.commit()
+                        
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
+                        
+                        markup_pix = types.InlineKeyboardMarkup()
+                        markup_pix.add(types.InlineKeyboardButton("🔄 VERIFICAR STATUS", callback_data=f"check_payment_{txid}"))
 
-                    # 🔥 LÓGICA DE MÍDIA ATUALIZADA NO FINAL (Se houver mídia no PIX/BUMP)
-                    # NOTA: O fluxo original apenas enviava a msg de texto do PIX. 
-                    # Mas se você quiser garantir que se por acaso tiver mídia ele leia:
-                    # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
-                    msg_pix = convert_premium_emojis(msg_pix)
-                    bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
-                    
-                else:
-                    bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
+                        # -----------------------------------------------------------
+                        # 🎨 MENSAGEM PIX (BUMP): PERSONALIZADA vs PADRÃO
+                        # -----------------------------------------------------------
+                        flow_config = db.query(BotFlow).filter(BotFlow.bot_id == bot_db.id).first()
+                        custom_msg = flow_config.msg_pix if flow_config and flow_config.msg_pix else None
+                        
+                        msg_pix = ""
+                        val_fmt = f"{valor_final:.2f}".replace('.', ',')
+                        
+                        if custom_msg:
+                            # --- MODO PERSONALIZADO ---
+                            oferta_simple = f"💰 Valor: <b>R$ {val_fmt}</b>"
+                            msg_pix = custom_msg.replace("{nome}", first_name)\
+                                                .replace("{plano}", nome_final)\
+                                                .replace("{valor}", val_fmt)\
+                                                .replace("{oferta}", oferta_simple)
+                            
+                            if "{qrcode}" in msg_pix:
+                                msg_pix = msg_pix.replace("{qrcode}", f"<pre>{qr}</pre>")
+                            else:
+                                msg_pix += f"\n\n👇 Copie o código abaixo:\n<pre>{qr}</pre>"
+                        else:
+                            # --- MODO PADRÃO (ANTIGO) ---
+                            msg_pix = (
+                                f"🌟 Pagamento gerado:\n"
+                                f"🎁 Plano: <b>{nome_final}</b>\n"
+                                f"💰 Valor: <b>R$ {val_fmt}</b>\n"
+                                f"🔐 Pix Copia e Cola:\n\n"
+                                f"<pre>{qr}</pre>\n\n"
+                                f"👆 Toque para copiar\n"
+                                f"⚡ Acesso automático!"
+                            )
+
+                        # 🔥 LÓGICA DE MÍDIA ATUALIZADA NO FINAL (Se houver mídia no PIX/BUMP)
+                        # NOTA: O fluxo original apenas enviava a msg de texto do PIX. 
+                        # Mas se você quiser garantir que se por acaso tiver mídia ele leia:
+                        # ✨ CONVERTE EMOJIS PREMIUM na mensagem do PIX
+                        msg_pix = convert_premium_emojis(msg_pix)
+                        bot_temp.send_message(chat_id, msg_pix, parse_mode="HTML", reply_markup=markup_pix)
+                        
+                    else:
+                        try:
+                            bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except:
+                            pass
+                        bot_temp.send_message(chat_id, "❌ Erro ao gerar PIX.")
+                except Exception as e:
+                    logger.error(f"❌ Erro bump: {e}")
 
             # --- D) PROMO (Campanhas Manuais) - LÓGICA BLINDADA ---
             elif data.startswith("promo_"):
@@ -12763,6 +12780,8 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                         )
                     except Exception as e_pix:
                         logger.error(f"❌ Erro CRÍTICO ao gerar PIX: {e_pix}", exc_info=True)
+                        try: bot_temp.delete_message(chat_id, msg_wait.message_id)
+                        except: pass
                         bot_temp.send_message(chat_id, "❌ Erro ao conectar com o banco de pagamentos.")
                         return {"status": "error"}
 
