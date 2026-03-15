@@ -11050,9 +11050,11 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                 user_name = join_request.from_user.first_name if join_request.from_user.first_name else ""
                 username = join_request.from_user.username
                 
+                # --- 🚀 MUDANÇA: É O CANAL VIP? SE SIM, É LANÇAMENTO! ---
                 canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
                 
                 if canal_id == canal_vip_id:
+                    # Verifica se o lançamento está ativo
                     launch_cfg = db.query(LaunchStrategyConfig).filter(
                         LaunchStrategyConfig.bot_id == bot_db.id,
                         LaunchStrategyConfig.ativo == True
@@ -11060,16 +11062,51 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
                     
                     if launch_cfg:
                         logger.info(f"🚀 [LANÇAMENTO] Pedido de entrada detectado de {user_name} ({user_id})")
+                        
+                        # 🔥 TRAVA DE SEGURANÇA DUPLA NA PORTA DO CANAL
+                        ja_degustou = db.query(Pedido).filter(
+                            Pedido.bot_id == bot_db.id,
+                            Pedido.telegram_id == str(user_id),
+                            Pedido.status == "degustacao"
+                        ).first()
+
+                        if ja_degustou:
+                            logger.warning(f"🚫 [LANÇAMENTO] Usuário {user_id} tentou entrar novamente na degustação. Bloqueado.")
+                            try:
+                                bot_temp.decline_chat_join_request(int(canal_id), user_id)
+                                bot_temp.send_message(user_id, "❌ <b>ACESSO NEGADO!</b>\n\nSua degustação gratuita já foi utilizada. Adquira um plano para voltar.", parse_mode="HTML")
+                            except: pass
+                            return {"status": "ok", "message": "Já degustou"}
+
+                        # 👉 REGISTRA QUE O USUÁRIO ENTROU NA DEGUSTAÇÃO (Para não entrar de novo)
                         try:
+                            import time
+                            registro_degustacao = Pedido(
+                                bot_id=bot_db.id, telegram_id=str(user_id), first_name=user_name, username=username,
+                                plano_nome="Degustação VIP", valor=0.0, status="degustacao",
+                                transaction_id=f"degust_{user_id}_{int(time.time())}", txid=f"degust_{user_id}_{int(time.time())}"
+                            )
+                            db.add(registro_degustacao)
+                            db.commit()
+                        except Exception as e_reg:
+                            db.rollback()
+                            logger.error(f"Erro ao registrar degustação: {e_reg}")
+
+                        # Aprova a pessoa instantaneamente e QUEIMA O LINK!
+                        try:
+                            # 1. Aprova o usuário
                             bot_temp.approve_chat_join_request(int(canal_id), user_id)
                             logger.info(f"🚀 [LANÇAMENTO] Usuário {user_id} APROVADO para a degustação no canal {canal_id}!")
                             
+                            # 2. 🔥 QUEIMA O LINK (Revoga para nunca mais ser usado)
                             if join_request.invite_link and join_request.invite_link.invite_link:
                                 link_usado = join_request.invite_link.invite_link
                                 try:
                                     bot_temp.revoke_chat_invite_link(canal_id, link_usado)
+                                    logger.info(f"🔥 [LANÇAMENTO] Link QUEIMADO com sucesso! ({link_usado})")
                                 except: pass
                                 
+                            # 3. 🚀 ENVIA MENSAGEM DE BOAS-VINDAS IMEDIATA
                             msg_aprovacao = launch_cfg.msg_aprovacao_texto or f"PARABÉNS {user_name} VOCÊ FOI APROVADO EM NOSSO VIP 🎉\n\nCLIQUE ABAIXO PARA ACESSAR O NOSSO GRUPINHO SECRETO 👇🏼\n\nENTRE AGORA!! SE SAIR NÃO TEM VOLTA!!"
                             msg_aprovacao = msg_aprovacao.replace("{first_name}", user_name)
                             str_user = f"@{username}" if username else ""
@@ -11504,17 +11541,43 @@ async def receber_update_telegram(token: str, req: Request, db: Session = Depend
             first_name = update.callback_query.from_user.first_name
             username = update.callback_query.from_user.username
 
+            # --- 🚀 RESGATAR CONVITE VIP (ESTRATÉGIA DE LANÇAMENTO) ---
             if data == "launch_invite" or data.startswith("launch_invite_"):
                 try:
                     canal_vip_id = str(bot_db.id_canal_vip).replace(" ", "").strip()
+                    
+                    # 🔥 VERIFICAÇÃO DE SEGURANÇA: Já usou a degustação?
+                    ja_degustou = db.query(Pedido).filter(
+                        Pedido.bot_id == bot_db.id,
+                        Pedido.telegram_id == str(chat_id),
+                        Pedido.status == "degustacao"
+                    ).first()
+
+                    if ja_degustou:
+                        try: bot_temp.send_message(chat_id, "❌ <b>ACESSO NEGADO!</b>\n\nVocê já utilizou o seu tempo de degustação VIP gratuito.\nPara ter acesso, adquira um plano definitivo no menu.", parse_mode="HTML")
+                        except: pass
+                        return {"status": "ok"}
+                    
+                    # Tenta desbanir caso ele já tenha sido chutado antes, para permitir que ele use o link
                     try: bot_temp.unban_chat_member(canal_vip_id, chat_id)
                     except: pass
                     
-                    convite = bot_temp.create_chat_invite_link(chat_id=canal_vip_id, creates_join_request=True, name=f"VIP {first_name}")
-                    bot_temp.send_message(chat_id, f"🎉 <b>SEU CONVITE ESTÁ PRONTO!</b>\n\nEste link é exclusivo para você. Clique abaixo, solicite a entrada e o acesso será liberado instantaneamente pelo sistema!\n\n👉 {convite.invite_link}", parse_mode="HTML")
+                    # 🔥 MUDANÇA MESTRE: creates_join_request=True 
+                    # Força o Telegram a avisar o bot EXATAMENTE na hora que o usuário tenta entrar!
+                    convite = bot_temp.create_chat_invite_link(
+                        chat_id=canal_vip_id, 
+                        creates_join_request=True,
+                        name=f"VIP Lançamento {first_name}"
+                    )
+                    
+                    msg_link = f"🎉 <b>SEU CONVITE ESTÁ PRONTO!</b>\n\nEste link é exclusivo para você. Clique abaixo, solicite a entrada e o acesso será liberado instantaneamente pelo sistema!\n\n👉 {convite.invite_link}"
+                    bot_temp.send_message(chat_id, msg_link, parse_mode="HTML")
+                    logger.info(f"🚀 [LANÇAMENTO] Link com request gerado para {first_name} ({chat_id})")
                 except Exception as e:
-                    try: bot_temp.send_message(chat_id, "❌ Erro ao gerar seu convite. O bot precisa ser Admin do Canal.")
+                    logger.error(f"❌ Erro ao gerar link de lançamento: {e}")
+                    try: bot_temp.send_message(chat_id, "❌ Erro ao gerar seu convite. O bot precisa ser Admin do Canal com permissão para Adicionar Usuários via Link.")
                     except: pass
+                
                 return {"status": "ok"}
 
             payment_prefixes = ("checkout_", "checkout_promo_", "remarketing_plano_", "bump_yes_", "bump_no_", "upsell_accept_", "downsell_accept_")
